@@ -72,6 +72,9 @@ The WASM module exports the following functions:
 - `eval(ptr, len) -> ptr_len`
   - Evaluates a Lua script buffer and returns encoded Reply.
 
+- `eval_with_args(script_ptr, script_len, args_ptr, args_len, keys_count) -> ptr_len`
+  - Evaluates a Lua script buffer with binary-safe KEYS/ARGV provided by the host.
+
 - `alloc(size) -> ptr`
   - Allocates `size` bytes in linear memory.
 
@@ -79,7 +82,7 @@ The WASM module exports the following functions:
   - Frees memory allocated by `alloc` or reply buffers.
 
 ## Argument Encoding
-Arguments to `host_redis_call` and `host_redis_pcall` are encoded as:
+Arguments to `host_redis_call`, `host_redis_pcall`, and `eval_with_args` are encoded as:
 
 ```
 struct ArgArray {

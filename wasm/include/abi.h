@@ -47,6 +47,8 @@ PtrLen host_sha1hex(uint32_t ptr, uint32_t len);
 int32_t init(void);
 int32_t reset(void);
 PtrLen eval(uint32_t ptr, uint32_t len);
+PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
+                      uint32_t args_len, uint32_t keys_count);
 uint32_t alloc(uint32_t size);
 void free_mem(uint32_t ptr);
 
