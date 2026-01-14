@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build WASM (Docker)
+        run: ./wasm/build/docker-build.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install host deps
+        working-directory: host
+        run: npm install
+
+      - name: Host tests
+        working-directory: host
+        run: npm run test

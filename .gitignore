@@ -1,0 +1,12 @@
+# Node
+node_modules/
+
+# TypeScript
+*.tsbuildinfo
+
+# Build outputs
+host/dist/
+wasm/build/tests/
+
+# macOS
+.DS_Store
