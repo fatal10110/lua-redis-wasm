@@ -39,8 +39,10 @@ done
 
 emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=0 \
-  -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node -sNO_EXIT_RUNTIME=1 \
+  -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node -sNO_EXIT_RUNTIME=1 -sSTRICT=1 \
   -sWASM_BIGINT=1 \
+  -sEXPORTED_RUNTIME_METHODS="['HEAPU8']" \
+  -sINCOMING_MODULE_JS_API="['locateFile','instantiateWasm']" \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 \
   -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
