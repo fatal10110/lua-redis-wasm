@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type {
+  EngineOptions,
+  ReplyValue,
+  RedisCallHandler,
+  RedisHost,
+  RedisLogHandler,
+  StandaloneOptions
+} from "./types.js";
 
 const REPLY_NULL = 0x00;
 const REPLY_INT = 0x01;
@@ -8,25 +16,6 @@ const REPLY_BULK = 0x02;
 const REPLY_ARRAY = 0x03;
 const REPLY_STATUS = 0x04;
 const REPLY_ERROR = 0x05;
-
-type ReplyValue =
-  | null
-  | number
-  | bigint
-  | Buffer
-  | { ok: Buffer }
-  | { err: Buffer }
-  | ReplyValue[];
-
-type RedisCallHandler = (args: Buffer[]) => ReplyValue;
-
-type EngineOptions = {
-  wasmPath?: string;
-  wasmBytes?: Uint8Array;
-  redisCall?: RedisCallHandler;
-  redisPcall?: RedisCallHandler;
-  logger?: (level: number, message: Buffer) => void;
-};
 
 type PtrLen = { ptr: number; len: number };
 
@@ -195,13 +184,17 @@ export class LuaWasmEngine {
   private exports: WasmExports;
   private memory: WebAssembly.Memory;
 
-  constructor(instance: WebAssembly.Instance, private options: EngineOptions) {
+  constructor(instance: WebAssembly.Instance, private options: EngineOptions | StandaloneOptions) {
     this.instance = instance;
     this.exports = instance.exports as WasmExports;
     this.memory = this.exports.memory;
   }
 
-  static async create(options: EngineOptions = {}): Promise<LuaWasmEngine> {
+  static async create(options: EngineOptions): Promise<LuaWasmEngine> {
+    return LuaWasmEngine.createWithHost(options);
+  }
+
+  static async createWithHost(options: EngineOptions): Promise<LuaWasmEngine> {
     const wasmBytes = options.wasmBytes
       ? options.wasmBytes
       : await fs.readFile(options.wasmPath ?? LuaWasmEngine.defaultWasmPath());
@@ -240,11 +233,7 @@ export class LuaWasmEngine {
       len: number
     ): void => {
       const msg = readBytes(ptr, len);
-      if (options.logger) {
-        options.logger(level, msg);
-      } else {
-        console.log(`[redis.lua] ${level}: ${msg.toString("utf8")}`);
-      }
+      options.host.log(level, msg);
     };
 
     (imports.env as Record<string, (...args: number[]) => number>).host_sha1hex = (
@@ -258,10 +247,7 @@ export class LuaWasmEngine {
     };
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
-      const handler = isPcall ? options.redisPcall ?? options.redisCall : options.redisCall;
-      if (!handler) {
-        return { err: Buffer.from("ERR redis.call handler not configured", "utf8") };
-      }
+      const handler = isPcall ? options.host.redisPcall : options.host.redisCall;
       try {
         return handler(args);
       } catch (err) {
@@ -308,6 +294,80 @@ export class LuaWasmEngine {
       const args = decodeArgs(ptr, len);
       return encodeAndReturn(callHandler(args, true));
     };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+    instanceHolder.instance = instance;
+
+    const engine = new LuaWasmEngine(instance, options);
+    const initResult = engine.exports.init();
+    if (typeof initResult === "number" && initResult !== 0) {
+      throw new Error("Failed to initialize Lua WASM engine");
+    }
+    return engine;
+  }
+
+  static async createStandalone(options: StandaloneOptions = {}): Promise<LuaWasmEngine> {
+    const wasmBytes = options.wasmBytes
+      ? options.wasmBytes
+      : await fs.readFile(options.wasmPath ?? LuaWasmEngine.defaultWasmPath());
+
+    const imports: WebAssembly.Imports = {
+      env: {}
+    };
+
+    const instanceHolder: { instance: WebAssembly.Instance | null } = { instance: null };
+
+    const readBytes = (ptr: number, len: number): Buffer => {
+      const mem = new Uint8Array((instanceHolder.instance!.exports as WasmExports).memory.buffer);
+      return Buffer.from(mem.subarray(ptr, ptr + len));
+    };
+
+    const writeBytes = (ptr: number, data: Buffer): void => {
+      const mem = new Uint8Array((instanceHolder.instance!.exports as WasmExports).memory.buffer);
+      mem.set(data, ptr);
+    };
+
+    const allocAndWrite = (data: Buffer): number => {
+      const ptr = (instanceHolder.instance!.exports as WasmExports).alloc(data.length);
+      writeBytes(ptr, data);
+      return ptr;
+    };
+
+    const encodeAndReturn = (value: ReplyValue): bigint => {
+      const encoded = encodeReplyValue(value);
+      const ptr = allocAndWrite(encoded);
+      return packPtrLen(ptr, encoded.length);
+    };
+
+    const notSupported = (action: string): ReplyValue => ({
+      err: Buffer.from(`ERR ${action} is not available in standalone mode`, "utf8")
+    });
+
+    (imports.env as Record<string, (...args: number[]) => number>).host_redis_log = (
+      _level: number,
+      _ptr: number,
+      _len: number
+    ): void => {};
+
+    (imports.env as Record<string, (...args: number[]) => number>).host_sha1hex = (
+      ptr: number,
+      len: number
+    ): bigint => {
+      const data = readBytes(ptr, len);
+      const hex = createHash("sha1").update(data).digest("hex");
+      const bytes = Buffer.from(hex, "utf8");
+      return encodeAndReturn(bytes);
+    };
+
+    (imports.env as Record<string, (...args: number[]) => number>).host_redis_call = (
+      _ptr: number,
+      _len: number
+    ): bigint => encodeAndReturn(notSupported("redis.call"));
+
+    (imports.env as Record<string, (...args: number[]) => number>).host_redis_pcall = (
+      _ptr: number,
+      _len: number
+    ): bigint => encodeAndReturn(notSupported("redis.pcall"));
 
     const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
     instanceHolder.instance = instance;
@@ -369,6 +429,15 @@ export class LuaWasmEngine {
     return decodeReply(buffer).value;
   }
 }
+
+export type {
+  EngineOptions,
+  ReplyValue,
+  RedisCallHandler,
+  RedisHost,
+  RedisLogHandler,
+  StandaloneOptions
+};
 
 export function encodeReply(value: ReplyValue): Buffer {
   return encodeReplyValue(value);

@@ -22,15 +22,28 @@ async function main(): Promise<void> {
 
   const engine = await LuaWasmEngine.create({
     wasmPath,
-    redisCall(args) {
-      const command = args[0]?.toString("utf8").toUpperCase();
-      if (command === "PING") {
-        return { ok: Buffer.from("PONG", "utf8") };
-      }
-      if (command === "ECHO" && args[1]) {
-        return Buffer.from(args[1]);
-      }
-      return { err: Buffer.from("ERR unknown command", "utf8") };
+    host: {
+      redisCall(args) {
+        const command = args[0]?.toString("utf8").toUpperCase();
+        if (command === "PING") {
+          return { ok: Buffer.from("PONG", "utf8") };
+        }
+        if (command === "ECHO" && args[1]) {
+          return Buffer.from(args[1]);
+        }
+        return { err: Buffer.from("ERR unknown command", "utf8") };
+      },
+      redisPcall(args) {
+        const command = args[0]?.toString("utf8").toUpperCase();
+        if (command === "PING") {
+          return { ok: Buffer.from("PONG", "utf8") };
+        }
+        if (command === "ECHO" && args[1]) {
+          return Buffer.from(args[1]);
+        }
+        return { err: Buffer.from("ERR unknown command", "utf8") };
+      },
+      log(_level, _message) {}
     }
   });
 
