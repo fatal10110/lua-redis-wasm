@@ -1,4 +1,9 @@
-# redis-lua-wasm
+# lua-redis-wasm
+
+[![npm version](https://img.shields.io/npm/v/lua-redis-wasm.svg)](https://www.npmjs.com/package/lua-redis-wasm)
+[![CI](https://github.com/fatal10110/lua-redis-wasm/workflows/ci/badge.svg)](https://github.com/fatal10110/lua-redis-wasm/actions)
+[![Node.js Version](https://img.shields.io/node/v/lua-redis-wasm.svg)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A WebAssembly-based Redis Lua 5.1 script engine for Node.js. Execute Redis-compatible Lua scripts in JavaScript/TypeScript environments without a live Redis server.
 
@@ -14,7 +19,7 @@ A WebAssembly-based Redis Lua 5.1 script engine for Node.js. Execute Redis-compa
 ## Installation
 
 ```bash
-npm install redis-lua-wasm
+npm install lua-redis-wasm
 ```
 
 **Requirements:** Node.js >= 22
@@ -214,9 +219,37 @@ npm run test:skip-wasm  # Skip WASM rebuild
 - [Binary ABI Specification](docs/abi.md)
 - [Limits and Compatibility](docs/limits-compat.md)
 
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on:
+
+- How to report bugs
+- How to suggest enhancements
+- Development setup
+- Pull request process
+- Coding standards
+
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
+
+## Security
+
+Security is important to us. If you discover a security vulnerability, please follow our [Security Policy](SECURITY.md) for responsible disclosure.
+
+For general security considerations when using lua-redis-wasm, see the [Security Guide](SECURITY.md#security-considerations).
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/fatal10110/lua-redis-wasm/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/fatal10110/lua-redis-wasm/discussions)
+- **Documentation**: [docs/](docs/)
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of changes in each release.
+
 ## License
 
-This package is licensed under the **MIT License**.
+This package is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
 
 ### Third-Party Licenses
 
@@ -229,3 +262,9 @@ This project includes third-party code, all under the MIT License:
 - **lua_bit** - Copyright (C) 2008-2012 Mike Pall
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full license texts.
+
+## Acknowledgments
+
+- Redis team for the Lua integration design
+- Emscripten project for WebAssembly tooling
+- Contributors and maintainers of the included Lua libraries

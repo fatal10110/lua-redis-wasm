@@ -1,6 +1,29 @@
 {
-  "name": "redis-lua-wasm",
-  "version": "0.0.0",
+  "name": "lua-redis-wasm",
+  "version": "1.0.0",
+  "description": "WebAssembly-based Redis Lua 5.1 script engine for Node.js - Execute Redis-compatible Lua scripts without a live Redis server",
+  "keywords": [
+    "redis",
+    "lua",
+    "wasm",
+    "webassembly",
+    "lua5.1",
+    "script",
+    "engine",
+    "eval",
+    "testing",
+    "sandbox"
+  ],
+  "license": "MIT",
+  "author": "lua-redis-wasm contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fatal10110/lua-redis-wasm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fatal10110/lua-redis-wasm/issues"
+  },
+  "homepage": "https://github.com/fatal10110/lua-redis-wasm#readme",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,10 +33,13 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
   ],
   "scripts": {
     "build:wasm": "./wasm/build/docker-build.sh",
