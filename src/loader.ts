@@ -43,6 +43,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { EngineOptions, StandaloneOptions } from "./types.js";
 
+/** Directory containing this module, resolved at load time */
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+
 /**
  * Type definition for the Emscripten module exports.
  *
@@ -190,7 +193,7 @@ function resolveExistingPath(candidates: string[]): string {
  * @returns Absolute path to the WASM binary
  */
 export function defaultWasmPath(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
+  const here = currentDir;
   return resolveExistingPath([
     path.resolve(here, "./redis_lua.wasm"),
     path.resolve(here, "../wasm/build/redis_lua.wasm")
@@ -206,7 +209,7 @@ export function defaultWasmPath(): string {
  * @returns Absolute path to the JS module
  */
 export function defaultModulePath(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
+  const here = currentDir;
   return resolveExistingPath([
     path.resolve(here, "./redis_lua.mjs"),
     path.resolve(here, "../wasm/build/redis_lua.mjs")
