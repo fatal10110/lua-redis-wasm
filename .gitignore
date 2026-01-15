@@ -5,8 +5,12 @@ node_modules/
 *.tsbuildinfo
 
 # Build outputs
-host/dist/
+dist/
 wasm/build/tests/
+wasm/build/redis_lua.wasm
+wasm/build/redis_lua.mjs
+dist/redis_lua.wasm
+dist/redis_lua.mjs
 
 # macOS
 .DS_Store

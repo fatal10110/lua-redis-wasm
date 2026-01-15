@@ -18,6 +18,9 @@ typedef struct ReplyBuffer {
 
 static lua_State *g_state = NULL;
 static int64_t g_fuel_remaining = DEFAULT_FUEL_LIMIT;
+static int64_t g_fuel_limit = DEFAULT_FUEL_LIMIT;
+static uint32_t g_max_reply_bytes = 0;
+static uint32_t g_max_arg_bytes = 0;
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
@@ -309,7 +312,15 @@ static void fuel_hook(lua_State *L, lua_Debug *ar) {
 }
 
 static void reset_fuel(void) {
-  g_fuel_remaining = DEFAULT_FUEL_LIMIT;
+  g_fuel_remaining = g_fuel_limit;
+}
+
+void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes) {
+  if (max_fuel > 0) {
+    g_fuel_limit = (int64_t)max_fuel;
+  }
+  g_max_reply_bytes = max_reply_bytes;
+  g_max_arg_bytes = max_arg_bytes;
 }
 
 static int set_keys_argv(lua_State *L, const uint8_t *buf, size_t len, uint32_t keys_count) {
@@ -422,6 +433,11 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
     free(rb.data);
     return reply_error("ERR unsupported Lua return type", 32);
   }
+  if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
+    lua_settop(g_state, 0);
+    free(rb.data);
+    return reply_error("ERR reply exceeds configured limit", 34);
+  }
   lua_settop(g_state, 0);
   PtrLen out = rb_finalize(&rb);
   free(rb.data);
@@ -437,6 +453,9 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
+  if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
+    return reply_error("ERR KEYS/ARGV exceeds configured limit", 40);
+  }
   const uint8_t *args = (const uint8_t *)(uintptr_t)args_ptr;
   if (set_keys_argv(g_state, args, (size_t)args_len, keys_count) != 0) {
     lua_settop(g_state, 0);
@@ -467,6 +486,11 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     lua_settop(g_state, 0);
     free(rb.data);
     return reply_error("ERR unsupported Lua return type", 32);
+  }
+  if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
+    lua_settop(g_state, 0);
+    free(rb.data);
+    return reply_error("ERR reply exceeds configured limit", 34);
   }
   lua_settop(g_state, 0);
   PtrLen out = rb_finalize(&rb);

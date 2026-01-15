@@ -17,13 +17,24 @@ export type RedisHost = {
   log: RedisLogHandler;
 };
 
+export type EngineLimits = {
+  maxFuel?: number;
+  maxMemoryBytes?: number;
+  maxReplyBytes?: number;
+  maxArgBytes?: number;
+};
+
 export type EngineOptions = {
   host: RedisHost;
   wasmPath?: string;
   wasmBytes?: Uint8Array;
+  modulePath?: string;
+  limits?: EngineLimits;
 };
 
 export type StandaloneOptions = {
   wasmPath?: string;
   wasmBytes?: Uint8Array;
+  modulePath?: string;
+  limits?: EngineLimits;
 };

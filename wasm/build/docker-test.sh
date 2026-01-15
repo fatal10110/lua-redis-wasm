@@ -2,18 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-IMAGE_NAME="redis-lua-wasm-build"
-HOST_ARCH="$(uname -m)"
+IMAGE_NAME="emscripten/emsdk:3.1.56"
 
-PLATFORM=""
-if [ "$HOST_ARCH" = "arm64" ] || [ "$HOST_ARCH" = "aarch64" ]; then
-  PLATFORM="--platform=linux/arm64"
-fi
-
-# Build the container image if missing.
-if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-  docker build $PLATFORM -t "$IMAGE_NAME" -f "$ROOT_DIR/docker/Dockerfile" "$ROOT_DIR/docker"
-fi
+# Default to amd64 since emscripten/emsdk does not publish arm64 images.
+PLATFORM="${DOCKER_PLATFORM:---platform=linux/amd64}"
 
 # Run smoke tests inside Docker.
 docker run $PLATFORM --rm -v "$ROOT_DIR":/work -w /work "$IMAGE_NAME" \

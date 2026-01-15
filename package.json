@@ -1,5 +1,33 @@
 {
+  "name": "redis-lua-wasm",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build:wasm": "./wasm/build/docker-build.sh",
+    "build:ts": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts && node ./scripts/copy-wasm.mjs",
+    "test": "npm run build:wasm && node --test --import tsx test/**/*.test.ts",
+    "test:skip-wasm": "node --test --import tsx test/**/*.test.ts"
+  },
   "devDependencies": {
-    "@types/node": "^22.19.6"
+    "@types/node": "^22.19.6",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

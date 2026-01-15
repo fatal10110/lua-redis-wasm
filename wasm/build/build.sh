@@ -37,14 +37,14 @@ for file in $REDIS_LUA_MODULES; do
   MODULE_FILES="$MODULE_FILES $REDIS_LUA_DEPS/$file"
 done
 
-emcc -O2 -sSTANDALONE_WASM=1 -DENABLE_CJSON_GLOBAL \
+emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=0 \
+  -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node -sNO_EXIT_RUNTIME=1 \
+  -sWASM_BIGINT=1 \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 \
+  -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
   "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
-  -Wl,--no-entry \
-  -Wl,--export=init -Wl,--export=reset -Wl,--export=eval -Wl,--export=eval_with_args \
-  -Wl,--export=alloc -Wl,--export=free_mem -Wl,--export-memory \
-  -o "$OUT_DIR/redis_lua.wasm"
+  -o "$OUT_DIR/redis_lua.mjs"
 
-echo "Built $OUT_DIR/redis_lua.wasm"
+echo "Built $OUT_DIR/redis_lua.mjs"
