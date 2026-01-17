@@ -1,6 +1,6 @@
 {
   "name": "lua-redis-wasm",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "WebAssembly-based Redis Lua 5.1 script engine for Node.js - Execute Redis-compatible Lua scripts without a live Redis server",
   "keywords": [
     "redis",
@@ -25,13 +25,14 @@
   },
   "homepage": "https://github.com/fatal10110/lua-redis-wasm#readme",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
     }
   },
   "sideEffects": false,
@@ -44,13 +45,19 @@
   ],
   "scripts": {
     "build:wasm": "./wasm/build/docker-build.sh",
-    "build:ts": "rm -rf dist && tsc -p tsconfig.json",
+    "build:ts": "rm -rf dist && rollup -c",
     "build": "npm run build:wasm && npm run build:ts && node ./scripts/copy-wasm.mjs",
     "test": "npm run build:wasm && node --test --import tsx test/**/*.test.ts",
-    "test:skip-wasm": "node --test --import tsx test/**/*.test.ts"
+    "test:skip-wasm": "node --test --import tsx test/**/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
+    "@rollup/plugin-commonjs": "^29.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0",
     "@types/node": "^22.19.6",
+    "rollup": "^4.55.1",
+    "tslib": "^2.8.1",
     "tsx": "^4.19.1",
     "typescript": "^5.5.4"
   },

@@ -251,6 +251,8 @@ export class LuaWasmEngine {
      * Host import: redis.sha1hex(buffer) -> hex string
      * Computes SHA1 hash and returns 40-char hex digest.
      * Handles both sret and direct return ABI conventions.
+     *
+     * Per ABI: Output is raw 40-byte hex string, NOT Reply-encoded.
      */
     hostImports.host_sha1hex = (...args: number[]): bigint | void => {
       // Detect ABI: sret has 3+ args (retPtr, ptr, len), direct has 2 (ptr, len)
@@ -262,7 +264,9 @@ export class LuaWasmEngine {
       const data = readBytes(ptr, len);
       const hex = createHash("sha1").update(data).digest("hex");
       const bytes = Buffer.from(hex, "utf8");
-      const ptrLen = encodeReplyToPtrLen(bytes);
+      // Return raw bytes, not Reply-encoded (per ABI spec)
+      const outPtr = allocAndWrite(bytes);
+      const ptrLen = { ptr: outPtr, len: bytes.length };
 
       if (hasRet) {
         writePtrLen(retPtr, ptrLen);
@@ -276,9 +280,11 @@ export class LuaWasmEngine {
      * Routes to the appropriate host handler and catches errors.
      */
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
-      const handler = isPcall ? options.host.redisPcall : options.host.redisCall;
       try {
-        return handler(args);
+        // Call with proper `this` binding so host methods can reference each other
+        return isPcall
+          ? options.host.redisPcall.call(options.host, args)
+          : options.host.redisCall.call(options.host, args);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { err: Buffer.from(message, "utf8") };
@@ -461,7 +467,9 @@ export class LuaWasmEngine {
       const data = readBytes(ptr, len);
       const hex = createHash("sha1").update(data).digest("hex");
       const bytes = Buffer.from(hex, "utf8");
-      const ptrLen = encodeReplyToPtrLen(bytes);
+      // Return raw bytes, not Reply-encoded (per ABI spec)
+      const outPtr = allocAndWrite(bytes);
+      const ptrLen = { ptr: outPtr, len: bytes.length };
       if (hasRet) {
         writePtrLen(retPtr, ptrLen);
         return;

@@ -251,7 +251,9 @@ export async function loadModule(
   // Resolve module and WASM paths
   const modulePath = options.modulePath ?? defaultModulePath();
   const moduleUrl = pathToFileURL(modulePath).href;
-  const moduleFactory = (await import(moduleUrl)).default as EmscriptenModuleFactory;
+  // Dynamic import works in both ESM and CJS (Node.js 12+)
+  const imported = await import(moduleUrl);
+  const moduleFactory = (imported.default ?? imported) as EmscriptenModuleFactory;
   const wasmPath = options.wasmPath ?? defaultWasmPath();
 
   // Load WASM binary from provided bytes or file
