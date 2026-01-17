@@ -408,7 +408,7 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   reset_fuel();
   set_empty_keys_argv(g_state);
   const char *script = (const char *)(uintptr_t)ptr;
-  if (luaL_loadbuffer(g_state, script, (size_t)len, "eval") != 0) {
+  if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
     PtrLen out = reply_error(err ? err : "ERR script load failed", err ? err_len : 23);
@@ -462,7 +462,7 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR invalid KEYS/ARGV encoding", 31);
   }
   const char *script = (const char *)(uintptr_t)script_ptr;
-  if (luaL_loadbuffer(g_state, script, (size_t)script_len, "eval") != 0) {
+  if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
     PtrLen out = reply_error(err ? err : "ERR script load failed", err ? err_len : 23);

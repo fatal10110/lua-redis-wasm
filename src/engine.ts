@@ -140,11 +140,12 @@ export class LuaEngine {
    */
   eval(script: Buffer | Uint8Array | string): ReplyValue {
     const scriptBuf = ensureBuffer(script, "script");
+    const sha = computeSha1Hex(scriptBuf).toString("utf8");
     const ptr = this.exports._alloc(scriptBuf.length);
     this.exports.HEAPU8.set(scriptBuf, ptr);
     const result = this.callEval(ptr, scriptBuf.length);
     this.exports._free_mem(ptr);
-    return this.decodeResult(result);
+    return this.decodeResult(result, sha);
   }
 
   /**
@@ -174,6 +175,7 @@ export class LuaEngine {
     args: Array<Buffer | Uint8Array | string> = [],
   ): ReplyValue {
     const scriptBuf = ensureBuffer(script, "script");
+    const sha = computeSha1Hex(scriptBuf).toString("utf8");
     const argBuf = encodeArgArray([...keys, ...args]);
 
     // Enforce maxArgBytes limit on host side
@@ -198,7 +200,7 @@ export class LuaEngine {
 
     this.exports._free_mem(scriptPtr);
     this.exports._free_mem(argsPtr);
-    return this.decodeResult(result);
+    return this.decodeResult(result, sha);
   }
 
   /**
@@ -289,6 +291,7 @@ export class LuaEngine {
    */
   private decodeResult(
     result: bigint | number[] | { ptr: number; len: number } | number,
+    sha: string,
   ): ReplyValue {
     let ptrLen: { ptr: number; len: number };
 
@@ -319,7 +322,22 @@ export class LuaEngine {
 
     const buffer = Buffer.from(this.exports.HEAPU8.subarray(ptr, ptr + len));
     this.exports._free_mem(ptr);
-    return decodeReply(buffer).value;
+    const value = decodeReply(buffer).value;
+
+    // Format Lua script errors to match Redis format
+    // Lua errors look like: "user_script:N: message"
+    if (value && typeof value === "object" && "err" in value) {
+      const errStr = value.err.toString("utf8");
+      if (errStr.startsWith("user_script:")) {
+        // Extract line number: "user_script:N: message" -> N
+        const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
+        const line = colonIdx > 12 ? errStr.substring(12, colonIdx) : "1";
+        const formatted = `${errStr} script: ${sha}, on @user_script:${line}.`;
+        return { err: Buffer.from(formatted, "utf8") };
+      }
+    }
+
+    return value;
   }
 }
 

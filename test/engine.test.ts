@@ -186,6 +186,45 @@ test("eval: Lua runtime error returns error", async () => {
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
+test("eval: Lua error format matches Redis format", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const script = "redis.set('key', 'value')"; // redis.set doesn't exist, only redis.call
+  const result = engine.eval(script);
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  const errStr = (result as { err: Buffer }).err.toString("utf8");
+
+  // Should match Redis format: "user_script:N: message script: <sha>, on @user_script:N."
+  assert.ok(errStr.startsWith("user_script:1:"), `Error should start with 'user_script:1:', got: ${errStr}`);
+  assert.ok(errStr.includes(" script: "), `Error should contain ' script: ', got: ${errStr}`);
+  assert.ok(errStr.includes(", on @user_script:1."), `Error should end with ', on @user_script:1.', got: ${errStr}`);
+
+  // SHA should be 40 hex chars
+  const shaMatch = errStr.match(/script: ([a-f0-9]{40}),/);
+  assert.ok(shaMatch, `Error should contain 40-char SHA hex, got: ${errStr}`);
+});
+
+test("eval: Lua error on different line includes correct line number", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const script = `
+local x = 1
+local y = 2
+redis.nonexistent()  -- line 4
+`;
+  const result = engine.eval(script);
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  const errStr = (result as { err: Buffer }).err.toString("utf8");
+
+  // Should reference line 4
+  assert.ok(errStr.startsWith("user_script:4:"), `Error should start with 'user_script:4:', got: ${errStr}`);
+  assert.ok(errStr.includes(", on @user_script:4."), `Error should end with ', on @user_script:4.', got: ${errStr}`);
+});
+
 // =============================================================================
 // evalWithArgs() tests
 // =============================================================================
