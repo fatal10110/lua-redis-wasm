@@ -39,8 +39,6 @@
  * @module engine
  */
 
-import { createHash } from "node:crypto";
-
 import type {
   EngineLimits,
   EngineOptions,
@@ -53,12 +51,19 @@ import type {
 import {
   decodeReply,
   encodeArgArray,
-  encodeReplyValue,
   ensureBuffer,
-  packPtrLen,
   unpackPtrLen
 } from "./codec.js";
 import { loadModule, type HostImport, type WasmExports, defaultModulePath, defaultWasmPath } from "./loader.js";
+import {
+  readBytes,
+  allocAndWrite,
+  encodeReplyToPtrLen,
+  parseAbiArgs,
+  returnPtrLen,
+  decodeArgs,
+  computeSha1Hex
+} from "./helpers.js";
 
 /**
  * Redis Lua WASM Engine for executing Lua scripts in Node.js.
@@ -166,113 +171,11 @@ export class LuaWasmEngine {
    */
   static async createWithHost(options: EngineOptions): Promise<LuaWasmEngine> {
     const hostImports: Record<string, HostImport> = {};
-    let moduleRef: WasmExports | null = null;
     let exportsRef: WasmExports | null = null;
 
-    // =========================================================================
-    // Memory helpers - binary-safe read/write to WASM linear memory
-    // =========================================================================
-
-    /**
-     * Reads bytes from WASM linear memory into a Buffer.
-     * Binary-safe - no string coercion or encoding transformation.
-     */
-    const readBytes = (ptr: number, len: number): Buffer => {
-      if (!moduleRef) {
-        throw new Error("WASM module not initialized");
-      }
-      const mem = moduleRef.HEAPU8;
-      return Buffer.from(mem.subarray(ptr, ptr + len));
-    };
-
-    /**
-     * Writes a Buffer into WASM linear memory at the given pointer.
-     */
-    const writeBytes = (ptr: number, data: Buffer): void => {
-      if (!moduleRef) {
-        throw new Error("WASM module not initialized");
-      }
-      moduleRef.HEAPU8.set(data, ptr);
-    };
-
-    /**
-     * Allocates memory and writes data in one operation.
-     * Returns the pointer to the allocated memory.
-     */
-    const allocAndWrite = (data: Buffer): number => {
-      if (!exportsRef) {
-        throw new Error("WASM module not initialized");
-      }
-      const ptr = exportsRef._alloc(data.length);
-      writeBytes(ptr, data);
-      return ptr;
-    };
-
-    /**
-     * Encodes a ReplyValue and writes it to WASM memory.
-     * Returns the pointer and length for passing back to WASM.
-     */
-    const encodeReplyToPtrLen = (value: ReplyValue): { ptr: number; len: number } => {
-      const encoded = encodeReplyValue(value);
-      const ptr = allocAndWrite(encoded);
-      return { ptr, len: encoded.length };
-    };
-
-    /**
-     * Writes a PtrLen struct to WASM memory for sret-style returns.
-     * Layout: [ptr: u32le][len: u32le] = 8 bytes total
-     */
-    const writePtrLen = (retPtr: number, ptrLen: { ptr: number; len: number }): void => {
-      const heap = moduleRef!.HEAPU8;
-      heap[retPtr] = ptrLen.ptr & 0xff;
-      heap[retPtr + 1] = (ptrLen.ptr >> 8) & 0xff;
-      heap[retPtr + 2] = (ptrLen.ptr >> 16) & 0xff;
-      heap[retPtr + 3] = (ptrLen.ptr >> 24) & 0xff;
-      heap[retPtr + 4] = ptrLen.len & 0xff;
-      heap[retPtr + 5] = (ptrLen.len >> 8) & 0xff;
-      heap[retPtr + 6] = (ptrLen.len >> 16) & 0xff;
-      heap[retPtr + 7] = (ptrLen.len >> 24) & 0xff;
-    };
-
-    // =========================================================================
-    // Host imports - callbacks invoked by WASM for Redis API
-    // =========================================================================
-
-    /**
-     * Host import: redis.log(level, msg)
-     * Forwards log messages to the host's log handler.
-     */
-    hostImports.host_redis_log = (level: number, ptr: number, len: number): void => {
-      const msg = readBytes(ptr, len);
-      options.host.log(level, msg);
-    };
-
-    /**
-     * Host import: redis.sha1hex(buffer) -> hex string
-     * Computes SHA1 hash and returns 40-char hex digest.
-     * Handles both sret and direct return ABI conventions.
-     *
-     * Per ABI: Output is raw 40-byte hex string, NOT Reply-encoded.
-     */
-    hostImports.host_sha1hex = (...args: number[]): bigint | void => {
-      // Detect ABI: sret has 3+ args (retPtr, ptr, len), direct has 2 (ptr, len)
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptr = hasRet ? args[1] : args[0];
-      const len = hasRet ? args[2] : args[1];
-
-      const data = readBytes(ptr, len);
-      const hex = createHash("sha1").update(data).digest("hex");
-      const bytes = Buffer.from(hex, "utf8");
-      // Return raw bytes, not Reply-encoded (per ABI spec)
-      const outPtr = allocAndWrite(bytes);
-      const ptrLen = { ptr: outPtr, len: bytes.length };
-
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+    const getExports = (): WasmExports => {
+      if (!exportsRef) throw new Error("WASM module not initialized");
+      return exportsRef;
     };
 
     /**
@@ -281,7 +184,6 @@ export class LuaWasmEngine {
      */
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
       try {
-        // Call with proper `this` binding so host methods can reference each other
         return isPcall
           ? options.host.redisPcall.call(options.host, args)
           : options.host.redisCall.call(options.host, args);
@@ -291,80 +193,45 @@ export class LuaWasmEngine {
       }
     };
 
-    /**
-     * Decodes an ArgArray payload from WASM memory into Buffer arguments.
-     * Wire format: [count: u32le][len: u32le][bytes]...
-     */
-    const decodeArgs = (ptr: number, len: number): Buffer[] => {
-      const buf = readBytes(ptr, len);
-      if (buf.length < 4) {
-        throw new Error("ERR invalid argument encoding");
-      }
-      const count = buf.readUInt32LE(0);
-      const out: Buffer[] = [];
-      let offset = 4;
-      for (let i = 0; i < count; i += 1) {
-        if (offset + 4 > buf.length) {
-          throw new Error("ERR invalid argument encoding");
-        }
-        const argLen = buf.readUInt32LE(offset);
-        offset += 4;
-        if (offset + argLen > buf.length) {
-          throw new Error("ERR invalid argument encoding");
-        }
-        out.push(Buffer.from(buf.subarray(offset, offset + argLen)));
-        offset += argLen;
-      }
-      return out;
+    // Host import: redis.log(level, msg)
+    hostImports.host_redis_log = (level: number, ptr: number, len: number): void => {
+      const msg = readBytes(getExports().HEAPU8, ptr, len);
+      options.host.log(level, msg);
     };
 
-    /**
-     * Host import: redis.call(...) -> ReplyValue
-     * Decodes arguments, calls host handler, encodes response.
-     */
+    // Host import: redis.sha1hex(buffer) -> hex string
+    hostImports.host_sha1hex = (...args: number[]): bigint | void => {
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
+      const bytes = computeSha1Hex(data);
+      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+
+    // Host import: redis.call(...) -> ReplyValue
     hostImports.host_redis_call = (...args: number[]): bigint | void => {
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptr = hasRet ? args[1] : args[0];
-      const len = hasRet ? args[2] : args[1];
-      const decoded = decodeArgs(ptr, len);
-      const ptrLen = encodeReplyToPtrLen(callHandler(decoded, false));
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const decoded = decodeArgs(readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len));
+      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, false));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
     };
 
-    /**
-     * Host import: redis.pcall(...) -> ReplyValue
-     * Same as redis.call but errors are returned as {err: Buffer}.
-     */
+    // Host import: redis.pcall(...) -> ReplyValue
     hostImports.host_redis_pcall = (...args: number[]): bigint | void => {
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptr = hasRet ? args[1] : args[0];
-      const len = hasRet ? args[2] : args[1];
-      const decoded = decodeArgs(ptr, len);
-      const ptrLen = encodeReplyToPtrLen(callHandler(decoded, true));
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const decoded = decodeArgs(readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len));
+      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, true));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
     };
 
-    // =========================================================================
-    // Module initialization
-    // =========================================================================
-
-    const { module, exports } = await loadModule(options, hostImports);
-    moduleRef = module;
+    const { exports } = await loadModule(options, hostImports);
     exportsRef = exports;
 
     const engine = new LuaWasmEngine(exports, options);
 
-    // Configure runtime limits if provided
     if (engine.exports._set_limits && options.limits) {
       engine.exports._set_limits(
         options.limits.maxFuel ?? 0,
@@ -373,7 +240,6 @@ export class LuaWasmEngine {
       );
     }
 
-    // Initialize Lua VM
     const initResult = engine.exports._init();
     if (typeof initResult === "number" && initResult !== 0) {
       throw new Error("Failed to initialize Lua WASM engine");
@@ -403,55 +269,13 @@ export class LuaWasmEngine {
    */
   static async createStandalone(options: StandaloneOptions = {}): Promise<LuaWasmEngine> {
     const hostImports: Record<string, HostImport> = {};
-    let moduleRef: WasmExports | null = null;
     let exportsRef: WasmExports | null = null;
 
-    // Memory helpers (same as createWithHost)
-    const readBytes = (ptr: number, len: number): Buffer => {
-      if (!moduleRef) {
-        throw new Error("WASM module not initialized");
-      }
-      const mem = moduleRef.HEAPU8;
-      return Buffer.from(mem.subarray(ptr, ptr + len));
+    const getExports = (): WasmExports => {
+      if (!exportsRef) throw new Error("WASM module not initialized");
+      return exportsRef;
     };
 
-    const writeBytes = (ptr: number, data: Buffer): void => {
-      if (!moduleRef) {
-        throw new Error("WASM module not initialized");
-      }
-      moduleRef.HEAPU8.set(data, ptr);
-    };
-
-    const allocAndWrite = (data: Buffer): number => {
-      if (!exportsRef) {
-        throw new Error("WASM module not initialized");
-      }
-      const ptr = exportsRef._alloc(data.length);
-      writeBytes(ptr, data);
-      return ptr;
-    };
-
-    const encodeReplyToPtrLen = (value: ReplyValue): { ptr: number; len: number } => {
-      const encoded = encodeReplyValue(value);
-      const ptr = allocAndWrite(encoded);
-      return { ptr, len: encoded.length };
-    };
-
-    const writePtrLen = (retPtr: number, ptrLen: { ptr: number; len: number }): void => {
-      const heap = moduleRef!.HEAPU8;
-      heap[retPtr] = ptrLen.ptr & 0xff;
-      heap[retPtr + 1] = (ptrLen.ptr >> 8) & 0xff;
-      heap[retPtr + 2] = (ptrLen.ptr >> 16) & 0xff;
-      heap[retPtr + 3] = (ptrLen.ptr >> 24) & 0xff;
-      heap[retPtr + 4] = ptrLen.len & 0xff;
-      heap[retPtr + 5] = (ptrLen.len >> 8) & 0xff;
-      heap[retPtr + 6] = (ptrLen.len >> 16) & 0xff;
-      heap[retPtr + 7] = (ptrLen.len >> 24) & 0xff;
-    };
-
-    /**
-     * Helper to create "not supported" error replies.
-     */
     const notSupported = (action: string): ReplyValue => ({
       err: Buffer.from(`ERR ${action} is not available in standalone mode`, "utf8")
     });
@@ -460,47 +284,29 @@ export class LuaWasmEngine {
     hostImports.host_redis_log = (_level: number, _ptr: number, _len: number): void => {};
 
     hostImports.host_sha1hex = (...args: number[]): bigint | void => {
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptr = hasRet ? args[1] : args[0];
-      const len = hasRet ? args[2] : args[1];
-      const data = readBytes(ptr, len);
-      const hex = createHash("sha1").update(data).digest("hex");
-      const bytes = Buffer.from(hex, "utf8");
-      // Return raw bytes, not Reply-encoded (per ABI spec)
-      const outPtr = allocAndWrite(bytes);
-      const ptrLen = { ptr: outPtr, len: bytes.length };
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
+      const bytes = computeSha1Hex(data);
+      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
     };
 
     hostImports.host_redis_call = (...args: number[]): bigint | void => {
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptrLen = encodeReplyToPtrLen(notSupported("redis.call"));
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.call"));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
     };
 
     hostImports.host_redis_pcall = (...args: number[]): bigint | void => {
-      const hasRet = args.length >= 3;
-      const retPtr = hasRet ? args[0] : 0;
-      const ptrLen = encodeReplyToPtrLen(notSupported("redis.pcall"));
-      if (hasRet) {
-        writePtrLen(retPtr, ptrLen);
-        return;
-      }
-      return packPtrLen(ptrLen.ptr, ptrLen.len);
+      const exports = getExports();
+      const abiArgs = parseAbiArgs(args);
+      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.pcall"));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
     };
 
-    const { module, exports } = await loadModule(options, hostImports);
-    moduleRef = module;
+    const { exports } = await loadModule(options, hostImports);
     exportsRef = exports;
 
     const engine = new LuaWasmEngine(exports, options);

@@ -129,7 +129,7 @@ Called when Lua executes `redis.log(level, message)`. Level is a numeric Redis l
 
 ## Reply Types
 
-Return values must be Redis-compatible:
+Return values are Redis-compatible:
 
 ```typescript
 type ReplyValue =
@@ -137,10 +137,83 @@ type ReplyValue =
   | number              // Integer (safe range)
   | bigint              // Integer (64-bit)
   | Buffer              // Bulk string
-  | { ok: Buffer }      // Status reply
-  | { err: Buffer }     // Error reply
+  | { ok: Buffer }      // Status reply (+OK)
+  | { err: Buffer }     // Error reply (-ERR)
   | ReplyValue[];       // Array
 ```
+
+### Determining the Response Type
+
+Use type guards to inspect what Lua returned:
+
+```typescript
+const result = engine.eval(script);
+
+// Check for null (Lua nil)
+if (result === null) {
+  console.log("Got nil");
+}
+
+// Check for integer
+else if (typeof result === "number" || typeof result === "bigint") {
+  console.log("Got integer:", result);
+}
+
+// Check for array (Lua table with sequential keys)
+else if (Array.isArray(result)) {
+  console.log("Got array with", result.length, "elements");
+  for (const item of result) {
+    // Each element is also a ReplyValue - handle recursively
+  }
+}
+
+// Check for status reply ({ok: Buffer}) - e.g. from SET, PING
+else if (typeof result === "object" && "ok" in result) {
+  console.log("Got status:", result.ok.toString());
+}
+
+// Check for error reply ({err: Buffer})
+else if (typeof result === "object" && "err" in result) {
+  console.log("Got error:", result.err.toString());
+}
+
+// Otherwise it's a bulk string (Buffer)
+else if (Buffer.isBuffer(result)) {
+  console.log("Got bulk string:", result.toString());
+}
+```
+
+### Lua Type Conversions
+
+This matches Redis Lua behavior:
+
+```typescript
+// Lua nil → null
+engine.eval("return nil");                    // null
+
+// Lua number → number (or bigint for large values)
+engine.eval("return 42");                     // 42
+engine.eval("return 2^62");                   // 4611686018427387904n (bigint)
+
+// Lua string → Buffer
+engine.eval("return 'hello'");                // Buffer.from("hello")
+
+// Lua table (array) → ReplyValue[]
+engine.eval("return {1, 2, 3}");              // [1, 2, 3]
+engine.eval("return {'a', 'b'}");             // [Buffer, Buffer]
+
+// Status reply: commands like SET, PING return {ok: "..."}
+// In Lua: local resp = redis.call('SET', 'k', 'v') → resp.ok == "OK"
+engine.eval("return redis.call('SET', 'k', 'v')");     // { ok: Buffer.from("OK") }
+engine.eval("return redis.call('SET', 'k', 'v').ok");  // Buffer.from("OK")
+
+// Error reply: redis.pcall catches errors as {err: "..."}
+// In Lua: local resp = redis.pcall('INVALID') → resp.err == "ERR ..."
+engine.eval("return redis.pcall('INVALID')");          // { err: Buffer.from("ERR ...") }
+```
+
+> **Note**: Status replies (`+OK`) become `{ok: "..."}` tables in Lua, matching real Redis behavior.
+> Use `resp.ok` to access the status string.
 
 ## Resource Limits
 
