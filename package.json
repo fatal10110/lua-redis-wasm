@@ -1,6 +1,6 @@
 {
   "name": "lua-redis-wasm",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "WebAssembly-based Redis Lua 5.1 script engine for Node.js - Execute Redis-compatible Lua scripts without a live Redis server",
   "keywords": [
     "redis",
@@ -24,7 +24,6 @@
     "url": "https://github.com/fatal10110/lua-redis-wasm/issues"
   },
   "homepage": "https://github.com/fatal10110/lua-redis-wasm#readme",
-  "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
