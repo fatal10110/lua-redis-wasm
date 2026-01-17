@@ -1,7 +1,8 @@
-export { LuaWasmEngine } from "./engine.js";
+export { load, LuaWasmModule, LuaEngine, LuaWasmEngine } from "./engine.js";
 export type {
   EngineOptions,
   EngineLimits,
+  LoadOptions,
   ReplyValue,
   RedisCallHandler,
   RedisHost,

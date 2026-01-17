@@ -234,3 +234,32 @@ export type StandaloneOptions = {
   /** Optional resource limits. */
   limits?: EngineLimits;
 };
+
+/**
+ * Configuration options for loading the WASM module.
+ *
+ * These options control how the WASM binary is located and loaded.
+ * The returned LuaWasmModule can then be used to create engine instances.
+ *
+ * @example
+ * ```typescript
+ * const module = await load({
+ *   limits: { maxFuel: 1_000_000 }
+ * });
+ *
+ * const engine = module.create(myRedisHost);
+ * ```
+ */
+export type LoadOptions = {
+  /** Optional path to the WASM binary file. */
+  wasmPath?: string;
+
+  /** Optional pre-loaded WASM binary. */
+  wasmBytes?: Uint8Array;
+
+  /** Optional path to the Emscripten JS module. */
+  modulePath?: string;
+
+  /** Optional resource limits applied to all engines created from this module. */
+  limits?: EngineLimits;
+};

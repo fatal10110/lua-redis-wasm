@@ -1,12 +1,12 @@
 /**
- * Comprehensive unit tests for LuaWasmEngine.
+ * Comprehensive unit tests for LuaEngine.
  * Tests cover: basic eval, evalWithArgs, host callbacks, error handling, limits, and standalone mode.
  */
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LuaWasmEngine } from "../src/index.js";
+import { load, LuaWasmModule } from "../src/index.js";
 import type { ReplyValue, RedisHost } from "../src/types.js";
 
 // Helper to resolve WASM path (checks dist/ first, then wasm/build/)
@@ -62,21 +62,24 @@ function createTestHost(overrides: Partial<RedisHost> = {}): RedisHost {
 
 test("eval: returns number", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return 42");
   assert.equal(result, 42);
 });
 
 test("eval: returns negative number", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return -100");
   assert.equal(result, -100);
 });
 
 test("eval: returns float as integer", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   // Lua 5.1 has no separate integer type, math.floor returns number
   const result = engine.eval("return math.floor(3.7)");
   assert.equal(result, 3);
@@ -84,7 +87,8 @@ test("eval: returns float as integer", async () => {
 
 test("eval: arithmetic operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   assert.equal(engine.eval("return 10 + 5"), 15);
   assert.equal(engine.eval("return 10 - 5"), 5);
   assert.equal(engine.eval("return 10 * 5"), 50);
@@ -95,7 +99,8 @@ test("eval: arithmetic operations", async () => {
 
 test("eval: returns string as Buffer", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return 'hello world'");
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).toString("utf8"), "hello world");
@@ -103,14 +108,16 @@ test("eval: returns string as Buffer", async () => {
 
 test("eval: returns nil as null", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return nil");
   assert.equal(result, null);
 });
 
 test("eval: returns empty table as empty array", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return {}");
   assert.ok(Array.isArray(result));
   assert.equal((result as unknown[]).length, 0);
@@ -118,7 +125,8 @@ test("eval: returns empty table as empty array", async () => {
 
 test("eval: returns table as array", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return {1, 2, 3}");
   assert.ok(Array.isArray(result));
   assert.deepEqual(result, [1, 2, 3]);
@@ -126,7 +134,8 @@ test("eval: returns table as array", async () => {
 
 test("eval: returns nested tables", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return {{1, 2}, {3, 4}}");
   assert.ok(Array.isArray(result));
   assert.deepEqual(result, [[1, 2], [3, 4]]);
@@ -134,7 +143,8 @@ test("eval: returns nested tables", async () => {
 
 test("eval: returns mixed array", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return {1, 'hello', nil, 4}") as ReplyValue[];
   assert.ok(Array.isArray(result));
   assert.equal(result[0], 1);
@@ -144,7 +154,8 @@ test("eval: returns mixed array", async () => {
 
 test("eval: accepts Buffer as script", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const script = Buffer.from("return 99");
   const result = engine.eval(script);
   assert.equal(result, 99);
@@ -152,7 +163,8 @@ test("eval: accepts Buffer as script", async () => {
 
 test("eval: accepts Uint8Array as script", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const script = new TextEncoder().encode("return 77");
   const result = engine.eval(script);
   assert.equal(result, 77);
@@ -160,14 +172,16 @@ test("eval: accepts Uint8Array as script", async () => {
 
 test("eval: Lua syntax error returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return 1 +");
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
 test("eval: Lua runtime error returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("error('boom')");
   assert.ok(result && typeof result === "object" && "err" in result);
 });
@@ -178,7 +192,8 @@ test("eval: Lua runtime error returns error", async () => {
 
 test("evalWithArgs: KEYS injection", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs(
     "return KEYS[1]",
     [Buffer.from("mykey")],
@@ -190,7 +205,8 @@ test("evalWithArgs: KEYS injection", async () => {
 
 test("evalWithArgs: ARGV injection", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs(
     "return ARGV[1]",
     [],
@@ -202,7 +218,8 @@ test("evalWithArgs: ARGV injection", async () => {
 
 test("evalWithArgs: multiple KEYS and ARGV", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs(
     "return {KEYS[1], KEYS[2], ARGV[1], ARGV[2]}",
     [Buffer.from("k1"), Buffer.from("k2")],
@@ -218,7 +235,8 @@ test("evalWithArgs: multiple KEYS and ARGV", async () => {
 
 test("evalWithArgs: binary-safe KEYS/ARGV with null bytes", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const key = Buffer.from([0x00, 0x01, 0x02]);
   const arg = Buffer.from([0x03, 0x00, 0x04]);
 
@@ -234,7 +252,8 @@ test("evalWithArgs: binary-safe KEYS/ARGV with null bytes", async () => {
 
 test("evalWithArgs: accepts strings", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs("return KEYS[1]", ["stringkey"], []);
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).toString(), "stringkey");
@@ -242,14 +261,16 @@ test("evalWithArgs: accepts strings", async () => {
 
 test("evalWithArgs: empty KEYS and ARGV", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs("return #KEYS + #ARGV", [], []);
   assert.equal(result, 0);
 });
 
 test("evalWithArgs: KEYS length", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs(
     "return #KEYS",
     [Buffer.from("a"), Buffer.from("b"), Buffer.from("c")],
@@ -260,7 +281,8 @@ test("evalWithArgs: KEYS length", async () => {
 
 test("evalWithArgs: ARGV length", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.evalWithArgs(
     "return #ARGV",
     [],
@@ -275,7 +297,8 @@ test("evalWithArgs: ARGV length", async () => {
 
 test("redis.call: PING returns status", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('PING')");
   assert.ok(result && typeof result === "object" && "ok" in result);
   assert.equal((result as { ok: Buffer }).ok.toString(), "PONG");
@@ -283,7 +306,8 @@ test("redis.call: PING returns status", async () => {
 
 test("redis.call: GET returns value", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('GET', 'foo')");
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).toString(), "value:foo");
@@ -291,21 +315,24 @@ test("redis.call: GET returns value", async () => {
 
 test("redis.call: SET returns OK", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('SET', 'key', 'value')");
   assert.ok(result && typeof result === "object" && "ok" in result);
 });
 
 test("redis.call: INCR returns integer", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('INCR', 'counter')");
   assert.equal(result, 1);
 });
 
 test("redis.call: MGET returns array", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('MGET', 'a', 'b')") as ReplyValue[];
   assert.ok(Array.isArray(result));
   assert.equal(result.length, 2);
@@ -313,7 +340,8 @@ test("redis.call: MGET returns array", async () => {
 
 test("redis.call: ECHO with binary data", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('ECHO', string.char(0, 1, 0))");
   assert.ok(Buffer.isBuffer(result));
   assert.deepEqual([...(result as Buffer)], [0, 1, 0]);
@@ -321,14 +349,16 @@ test("redis.call: ECHO with binary data", async () => {
 
 test("redis.call: unknown command returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('UNKNOWNCMD')");
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
 test("redis.call: host throwing returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.call('THROW')");
   assert.ok(result && typeof result === "object" && "err" in result);
   assert.ok((result as { err: Buffer }).err.toString().includes("intentional"));
@@ -343,7 +373,8 @@ test("redis.call: receives arguments as Buffers", async () => {
       return { ok: Buffer.from("OK") };
     }
   });
-  const engine = await LuaWasmEngine.create({ host });
+  const module = await load();
+  const engine = module.create(host);
   engine.eval("redis.call('TEST', 'arg1', 'arg2')");
 
   assert.equal(receivedArgs.length, 3);
@@ -359,14 +390,16 @@ test("redis.call: receives arguments as Buffers", async () => {
 
 test("redis.pcall: returns error instead of throwing", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.pcall('THROW')");
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
 test("redis.pcall: success returns normal value", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.pcall('PING')");
   assert.ok(result && typeof result === "object" && "ok" in result);
 });
@@ -387,7 +420,8 @@ test("redis.log: calls host log handler", async () => {
     }
   });
 
-  const engine = await LuaWasmEngine.create({ host });
+  const module = await load();
+  const engine = module.create(host);
   engine.eval("redis.log(redis.LOG_WARNING, 'test message')");
 
   assert.ok(loggedLevel !== null);
@@ -402,7 +436,8 @@ test("redis.log: calls host log handler", async () => {
 
 test("redis.sha1hex: computes SHA1 hash", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.sha1hex('hello')");
   assert.ok(Buffer.isBuffer(result));
   // SHA1 of "hello" is aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
@@ -411,7 +446,8 @@ test("redis.sha1hex: computes SHA1 hash", async () => {
 
 test("redis.sha1hex: empty string", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return redis.sha1hex('')");
   assert.ok(Buffer.isBuffer(result));
   // SHA1 of empty string is da39a3ee5e6b4b0d3255bfef95601890afd80709
@@ -424,7 +460,8 @@ test("redis.sha1hex: empty string", async () => {
 
 test("Lua: string library", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   assert.equal(engine.eval("return string.len('hello')"), 5);
   assert.equal((engine.eval("return string.upper('hello')") as Buffer).toString(), "HELLO");
@@ -435,7 +472,8 @@ test("Lua: string library", async () => {
 
 test("Lua: math library", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   assert.equal(engine.eval("return math.abs(-5)"), 5);
   assert.equal(engine.eval("return math.max(1, 5, 3)"), 5);
@@ -446,7 +484,8 @@ test("Lua: math library", async () => {
 
 test("Lua: table library", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   const concat = engine.eval("return table.concat({'a','b','c'}, ',')");
   assert.ok(Buffer.isBuffer(concat));
@@ -459,10 +498,8 @@ test("Lua: table library", async () => {
 
 test("limits: maxArgBytes enforced on evalWithArgs", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({
-    host: createTestHost(),
-    limits: { maxArgBytes: 10 }
-  });
+  const module = await load({ limits: { maxArgBytes: 10 } });
+  const engine = module.create(createTestHost());
 
   // This should exceed the limit (encoded args > 10 bytes)
   const result = engine.evalWithArgs(
@@ -477,10 +514,8 @@ test("limits: maxArgBytes enforced on evalWithArgs", async () => {
 
 test("limits: small args pass validation", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({
-    host: createTestHost(),
-    limits: { maxArgBytes: 1000 }
-  });
+  const module = await load({ limits: { maxArgBytes: 1000 } });
+  const engine = module.create(createTestHost());
 
   const result = engine.evalWithArgs(
     "return KEYS[1]",
@@ -499,10 +534,8 @@ test("getLimits: returns configured limits", async () => {
     maxArgBytes: 500000
   };
 
-  const engine = await LuaWasmEngine.create({
-    host: createTestHost(),
-    limits
-  });
+  const module = await load({ limits });
+  const engine = module.create(createTestHost());
 
   const retrieved = engine.getLimits();
   assert.deepEqual(retrieved, limits);
@@ -510,7 +543,8 @@ test("getLimits: returns configured limits", async () => {
 
 test("getLimits: returns undefined when no limits set", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const retrieved = engine.getLimits();
   assert.equal(retrieved, undefined);
 });
@@ -521,20 +555,23 @@ test("getLimits: returns undefined when no limits set", async () => {
 
 test("standalone: basic eval works", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.eval("return 1 + 2");
   assert.equal(result, 3);
 });
 
 test("standalone: math library works", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   assert.equal(engine.eval("return math.sqrt(16)"), 4);
 });
 
 test("standalone: string library works", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.eval("return string.upper('test')");
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).toString(), "TEST");
@@ -542,7 +579,8 @@ test("standalone: string library works", async () => {
 
 test("standalone: redis.call returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.eval("return redis.call('PING')");
   assert.ok(result && typeof result === "object" && "err" in result);
   assert.ok((result as { err: Buffer }).err.toString().includes("standalone"));
@@ -550,7 +588,8 @@ test("standalone: redis.call returns error", async () => {
 
 test("standalone: redis.pcall returns error", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.eval("return redis.pcall('GET', 'key')");
   assert.ok(result && typeof result === "object" && "err" in result);
   assert.ok((result as { err: Buffer }).err.toString().includes("standalone"));
@@ -558,7 +597,8 @@ test("standalone: redis.pcall returns error", async () => {
 
 test("standalone: redis.sha1hex still works", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.eval("return redis.sha1hex('test')");
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).length, 40); // SHA1 hex is 40 chars
@@ -566,7 +606,8 @@ test("standalone: redis.sha1hex still works", async () => {
 
 test("standalone: evalWithArgs works", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.createStandalone({});
+  const module = await load();
+  const engine = module.createStandalone();
   const result = engine.evalWithArgs(
     "return KEYS[1] .. ARGV[1]",
     [Buffer.from("key")],
@@ -581,13 +622,13 @@ test("standalone: evalWithArgs works", async () => {
 // =============================================================================
 
 test("defaultWasmPath: returns a string path", () => {
-  const wasmPath = LuaWasmEngine.defaultWasmPath();
+  const wasmPath = LuaWasmModule.defaultWasmPath();
   assert.equal(typeof wasmPath, "string");
   assert.ok(wasmPath.endsWith(".wasm"));
 });
 
 test("defaultModulePath: returns a string path", () => {
-  const modulePath = LuaWasmEngine.defaultModulePath();
+  const modulePath = LuaWasmModule.defaultModulePath();
   assert.equal(typeof modulePath, "string");
   assert.ok(modulePath.endsWith(".mjs"));
 });
@@ -598,7 +639,8 @@ test("defaultModulePath: returns a string path", () => {
 
 test("cjson: encode object", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("return cjson.encode({a=1, b=2})");
   assert.ok(Buffer.isBuffer(result));
   const parsed = JSON.parse((result as Buffer).toString());
@@ -607,14 +649,16 @@ test("cjson: encode object", async () => {
 
 test("cjson: decode string", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval("local t = cjson.decode('{\"x\":10}'); return t.x");
   assert.equal(result, 10);
 });
 
 test("cjson: roundtrip", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval(`
     local orig = {name='test', count=42}
     local json = cjson.encode(orig)
@@ -630,7 +674,8 @@ test("cjson: roundtrip", async () => {
 
 test("cmsgpack: pack and unpack", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval(`
     local packed = cmsgpack.pack({1, 2, 3})
     local unpacked = cmsgpack.unpack(packed)
@@ -645,7 +690,8 @@ test("cmsgpack: pack and unpack", async () => {
 
 test("struct: pack and unpack integers", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
   const result = engine.eval(`
     local packed = struct.pack('>I2', 0x1234)
     local a, b = string.byte(packed, 1, 2)
@@ -660,7 +706,8 @@ test("struct: pack and unpack integers", async () => {
 
 test("bit: operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   assert.equal(engine.eval("return bit.band(0xff, 0x0f)"), 0x0f);
   assert.equal(engine.eval("return bit.bor(0xf0, 0x0f)"), 0xff);
@@ -676,7 +723,8 @@ test("bit: operations", async () => {
 
 test("multiple evals: engine state persists", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   // Note: Lua global variables don't persist between evals in this implementation
   // Each eval is independent
@@ -687,11 +735,46 @@ test("multiple evals: engine state persists", async () => {
 
 test("multiple evalWithArgs: independent executions", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createTestHost() });
+  const module = await load();
+  const engine = module.create(createTestHost());
 
   const r1 = engine.evalWithArgs("return KEYS[1]", [Buffer.from("first")], []);
   const r2 = engine.evalWithArgs("return KEYS[1]", [Buffer.from("second")], []);
 
   assert.equal((r1 as Buffer).toString(), "first");
   assert.equal((r2 as Buffer).toString(), "second");
+});
+
+// =============================================================================
+// Module consumption tests
+// =============================================================================
+
+test("LuaWasmModule: throws on second create call", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  module.create(createTestHost());
+
+  assert.throws(() => {
+    module.create(createTestHost());
+  }, /already been used/);
+});
+
+test("LuaWasmModule: throws on create after createStandalone", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  module.createStandalone();
+
+  assert.throws(() => {
+    module.create(createTestHost());
+  }, /already been used/);
+});
+
+test("LuaWasmModule: throws on createStandalone after create", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  module.create(createTestHost());
+
+  assert.throws(() => {
+    module.createStandalone();
+  }, /already been used/);
 });

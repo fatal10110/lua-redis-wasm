@@ -41,7 +41,7 @@ import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { EngineOptions, StandaloneOptions } from "./types.js";
+import type { LoadOptions } from "./types.js";
 
 /** Directory containing this module, resolved at load time */
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -245,7 +245,7 @@ export function defaultModulePath(): string {
  * ```
  */
 export async function loadModule(
-  options: EngineOptions | StandaloneOptions,
+  options: LoadOptions,
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
   // Resolve module and WASM paths

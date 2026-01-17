@@ -42,8 +42,8 @@ const engine = await LuaWasmEngine.create({
     },
     log(level, message) {
       console.log(`[${level}] ${message.toString()}`);
-    }
-  }
+    },
+  },
 });
 
 // Simple evaluation
@@ -53,7 +53,7 @@ const result = engine.eval("return 1 + 1"); // Returns: 2
 const data = engine.evalWithArgs(
   "return {KEYS[1], ARGV[1]}",
   [Buffer.from("user:1")],
-  [Buffer.from("hello")]
+  [Buffer.from("hello")],
 );
 ```
 
@@ -99,8 +99,24 @@ Evaluates a script with binary-safe `KEYS` and `ARGV` arrays.
 engine.evalWithArgs(
   "return {KEYS[1], ARGV[1], ARGV[2]}",
   [Buffer.from("key:1")],
-  [Buffer.from("arg1"), Buffer.from("arg2\x00with-null")]
+  [Buffer.from("arg1"), Buffer.from("arg2\x00with-null")],
 );
+```
+
+### LuaWasmEngine (Convenience)
+
+Alternative API that combines loading and creation.
+
+#### LuaWasmEngine.create(options)
+
+```typescript
+const engine = await LuaWasmEngine.create({ host: myHost });
+```
+
+#### LuaWasmEngine.createStandalone(options)
+
+```typescript
+const engine = await LuaWasmEngine.createStandalone();
 ```
 
 ## Host Interface
@@ -109,7 +125,7 @@ The host must implement three callbacks:
 
 ```typescript
 type RedisHost = {
-  redisCall: (args: Buffer[]) => ReplyValue;  // For redis.call()
+  redisCall: (args: Buffer[]) => ReplyValue; // For redis.call()
   redisPcall: (args: Buffer[]) => ReplyValue; // For redis.pcall()
   log: (level: number, message: Buffer) => void; // For redis.log()
 };
@@ -133,13 +149,13 @@ Return values are Redis-compatible:
 
 ```typescript
 type ReplyValue =
-  | null                // Lua nil
-  | number              // Integer (safe range)
-  | bigint              // Integer (64-bit)
-  | Buffer              // Bulk string
-  | { ok: Buffer }      // Status reply (+OK)
-  | { err: Buffer }     // Error reply (-ERR)
-  | ReplyValue[];       // Array
+  | null // Lua nil
+  | number // Integer (safe range)
+  | bigint // Integer (64-bit)
+  | Buffer // Bulk string
+  | { ok: Buffer } // Status reply (+OK)
+  | { err: Buffer } // Error reply (-ERR)
+  | ReplyValue[]; // Array
 ```
 
 ### Determining the Response Type
@@ -189,27 +205,27 @@ This matches Redis Lua behavior:
 
 ```typescript
 // Lua nil → null
-engine.eval("return nil");                    // null
+engine.eval("return nil"); // null
 
 // Lua number → number (or bigint for large values)
-engine.eval("return 42");                     // 42
-engine.eval("return 2^62");                   // 4611686018427387904n (bigint)
+engine.eval("return 42"); // 42
+engine.eval("return 2^62"); // 4611686018427387904n (bigint)
 
 // Lua string → Buffer
-engine.eval("return 'hello'");                // Buffer.from("hello")
+engine.eval("return 'hello'"); // Buffer.from("hello")
 
 // Lua table (array) → ReplyValue[]
-engine.eval("return {1, 2, 3}");              // [1, 2, 3]
-engine.eval("return {'a', 'b'}");             // [Buffer, Buffer]
+engine.eval("return {1, 2, 3}"); // [1, 2, 3]
+engine.eval("return {'a', 'b'}"); // [Buffer, Buffer]
 
 // Status reply: commands like SET, PING return {ok: "..."}
 // In Lua: local resp = redis.call('SET', 'k', 'v') → resp.ok == "OK"
-engine.eval("return redis.call('SET', 'k', 'v')");     // { ok: Buffer.from("OK") }
-engine.eval("return redis.call('SET', 'k', 'v').ok");  // Buffer.from("OK")
+engine.eval("return redis.call('SET', 'k', 'v')"); // { ok: Buffer.from("OK") }
+engine.eval("return redis.call('SET', 'k', 'v').ok"); // Buffer.from("OK")
 
 // Error reply: redis.pcall catches errors as {err: "..."}
 // In Lua: local resp = redis.pcall('INVALID') → resp.err == "ERR ..."
-engine.eval("return redis.pcall('INVALID')");          // { err: Buffer.from("ERR ...") }
+engine.eval("return redis.pcall('INVALID')"); // { err: Buffer.from("ERR ...") }
 ```
 
 > **Note**: Status replies (`+OK`) become `{ok: "..."}` tables in Lua, matching real Redis behavior.
@@ -220,23 +236,23 @@ engine.eval("return redis.pcall('INVALID')");          // { err: Buffer.from("ER
 Protect against runaway scripts with configurable limits:
 
 ```typescript
-const engine = await LuaWasmEngine.create({
-  host,
+const module = await load({
   limits: {
-    maxFuel: 10_000_000,              // Instruction budget
+    maxFuel: 10_000_000, // Instruction budget
     maxMemoryBytes: 64 * 1024 * 1024, // Memory cap (host-coordinated)
-    maxReplyBytes: 2 * 1024 * 1024,   // Max reply size
-    maxArgBytes: 1 * 1024 * 1024      // Max single argument size
-  }
+    maxReplyBytes: 2 * 1024 * 1024, // Max reply size
+    maxArgBytes: 1 * 1024 * 1024, // Max single argument size
+  },
 });
+const engine = module.create(host);
 ```
 
-| Limit | Description | Enforcement |
-|-------|-------------|-------------|
-| `maxFuel` | Instruction count budget | WASM runtime |
-| `maxMemoryBytes` | Memory growth cap | Host-coordinated |
-| `maxReplyBytes` | Maximum reply payload size | WASM runtime |
-| `maxArgBytes` | Maximum single argument size | WASM runtime |
+| Limit            | Description                  | Enforcement      |
+| ---------------- | ---------------------------- | ---------------- |
+| `maxFuel`        | Instruction count budget     | WASM runtime     |
+| `maxMemoryBytes` | Memory growth cap            | Host-coordinated |
+| `maxReplyBytes`  | Maximum reply payload size   | WASM runtime     |
+| `maxArgBytes`    | Maximum single argument size | WASM runtime     |
 
 ## Included Lua Libraries
 
@@ -258,18 +274,18 @@ Plus standard Lua 5.1 libraries: `base`, `table`, `string`, `math`.
 
 ## Compatibility
 
-| Feature | Status |
-|---------|--------|
-| Redis version target | 7.x |
-| Lua version | 5.1 |
-| Binary-safe strings | Yes |
-| `redis.call` / `redis.pcall` | Yes |
-| `redis.log` | Yes |
-| `redis.sha1hex` | Yes |
-| Standard Lua libraries | Yes |
-| Redis Lua modules (cjson, etc.) | Yes |
-| Debug / REPL helpers | No |
-| Redis Modules API | Not yet |
+| Feature                         | Status  |
+| ------------------------------- | ------- |
+| Redis version target            | 7.x     |
+| Lua version                     | 5.1     |
+| Binary-safe strings             | Yes     |
+| `redis.call` / `redis.pcall`    | Yes     |
+| `redis.log`                     | Yes     |
+| `redis.sha1hex`                 | Yes     |
+| Standard Lua libraries          | Yes     |
+| Redis Lua modules (cjson, etc.) | Yes     |
+| Debug / REPL helpers            | No      |
+| Redis Modules API               | Not yet |
 
 ## Building from Source
 

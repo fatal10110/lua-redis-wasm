@@ -1,29 +1,37 @@
 /**
- * @fileoverview Main LuaWasmEngine class for executing Redis Lua scripts.
+ * @fileoverview Main API for executing Redis Lua scripts in WebAssembly.
  *
  * This module provides the primary API for the redis-lua-wasm package:
- * - `LuaWasmEngine.create()` - Create engine with Redis host integration
- * - `LuaWasmEngine.createStandalone()` - Create engine without host
+ * - `load()` - Async function to load the WASM module
+ * - `LuaWasmModule` - Factory for creating engine instances
+ * - `LuaEngine` - Executes Lua scripts
+ * - `LuaWasmEngine` - Convenience API (combines load and create)
  *
  * ## Architecture
  *
- * The engine manages the lifecycle of a Lua 5.1 VM running in WebAssembly:
+ * The API separates async loading from sync execution:
  *
  * ```
  * ┌─────────────────────────────────────────────────────────────┐
- * │                    LuaWasmEngine                            │
- * │  - eval(script)                                             │
- * │  - evalWithArgs(script, keys, args)                         │
+ * │                      load(options)                          │
+ * │  - Async WASM loading                                       │
+ * │  - Returns LuaWasmModule                                    │
  * └─────────────────────┬───────────────────────────────────────┘
  *                       │
- *     ┌─────────────────┼─────────────────┐
- *     │                 │                 │
- *     ▼                 ▼                 ▼
- * ┌────────┐      ┌──────────┐      ┌──────────┐
- * │ codec  │      │  loader  │      │   WASM   │
- * │ encode │      │  module  │      │   Lua    │
- * │ decode │      │  loader  │      │  runtime │
- * └────────┘      └──────────┘      └──────────┘
+ *                       ▼
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │                    LuaWasmModule                            │
+ * │  - create(host) → LuaEngine                                 │
+ * │  - createStandalone() → LuaEngine                           │
+ * │  - One-time use (consumed after create)                     │
+ * └─────────────────────┬───────────────────────────────────────┘
+ *                       │
+ *                       ▼
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │                      LuaEngine                              │
+ * │  - eval(script)                                             │
+ * │  - evalWithArgs(script, keys, args)                         │
+ * └─────────────────────────────────────────────────────────────┘
  * ```
  *
  * ## Host Callbacks
@@ -41,20 +49,27 @@
 
 import type {
   EngineLimits,
-  EngineOptions,
+  LoadOptions,
   ReplyValue,
   RedisHost,
   RedisCallHandler,
   RedisLogHandler,
-  StandaloneOptions
+  EngineOptions,
+  StandaloneOptions,
 } from "./types.js";
 import {
   decodeReply,
   encodeArgArray,
   ensureBuffer,
-  unpackPtrLen
+  unpackPtrLen,
 } from "./codec.js";
-import { loadModule, type HostImport, type WasmExports, defaultModulePath, defaultWasmPath } from "./loader.js";
+import {
+  loadModule,
+  type HostImport,
+  type WasmExports,
+  defaultModulePath,
+  defaultWasmPath,
+} from "./loader.js";
 import {
   readBytes,
   allocAndWrite,
@@ -62,36 +77,14 @@ import {
   parseAbiArgs,
   returnPtrLen,
   decodeArgs,
-  computeSha1Hex
+  computeSha1Hex,
 } from "./helpers.js";
 
 /**
- * Redis Lua WASM Engine for executing Lua scripts in Node.js.
+ * Lua script execution engine.
  *
- * This class provides a Redis-compatible Lua 5.1 execution environment
- * powered by WebAssembly. It supports:
- * - Binary-safe script evaluation
- * - KEYS/ARGV injection
- * - redis.call/pcall host integration
- * - Resource limits (fuel, memory, reply size)
- *
- * ## Creating an Engine
- *
- * Use the static factory methods to create instances:
- *
- * ```typescript
- * // With Redis host integration
- * const engine = await LuaWasmEngine.create({
- *   host: {
- *     redisCall(args) { ... },
- *     redisPcall(args) { ... },
- *     log(level, msg) { ... }
- *   }
- * });
- *
- * // Standalone (no Redis commands)
- * const standalone = await LuaWasmEngine.createStandalone({});
- * ```
+ * This class provides methods to evaluate Lua scripts. Instances are created
+ * via `LuaWasmModule` or `LuaWasmEngine`.
  *
  * ## Evaluating Scripts
  *
@@ -107,238 +100,14 @@ import {
  * );
  * ```
  */
-export class LuaWasmEngine {
-  /** Reference to WASM module exports */
-  private exports: WasmExports;
-
-  /** Configured resource limits */
-  private limits: EngineLimits | undefined;
-
+export class LuaEngine {
   /**
-   * Private constructor - use static factory methods instead.
    * @internal
    */
-  constructor(exports: WasmExports, private options: EngineOptions | StandaloneOptions) {
-    this.exports = exports;
-    this.limits = options.limits;
-  }
-
-  /**
-   * Creates a new engine with full Redis host integration.
-   *
-   * This is the primary factory method for creating engines that support
-   * `redis.call()`, `redis.pcall()`, and `redis.log()` from Lua scripts.
-   *
-   * @param options - Engine configuration with host callbacks
-   * @returns Promise resolving to initialized engine
-   *
-   * @example
-   * ```typescript
-   * const engine = await LuaWasmEngine.create({
-   *   host: {
-   *     redisCall(args) {
-   *       const cmd = args[0].toString().toUpperCase();
-   *       if (cmd === "PING") return { ok: Buffer.from("PONG") };
-   *       throw new Error("ERR unknown command");
-   *     },
-   *     redisPcall(args) {
-   *       try { return this.redisCall(args); }
-   *       catch (e) { return { err: Buffer.from(e.message) }; }
-   *     },
-   *     log(level, msg) { console.log(msg.toString()); }
-   *   },
-   *   limits: { maxFuel: 10_000_000 }
-   * });
-   * ```
-   */
-  static async create(options: EngineOptions): Promise<LuaWasmEngine> {
-    return LuaWasmEngine.createWithHost(options);
-  }
-
-  /**
-   * Creates engine with host callbacks for redis.call/pcall/log/sha1hex.
-   *
-   * This method sets up the WASM module with host import functions that
-   * bridge Lua's redis API to the JavaScript host. The host imports handle:
-   *
-   * - `host_redis_call` - Dispatches to host.redisCall()
-   * - `host_redis_pcall` - Dispatches to host.redisPcall()
-   * - `host_redis_log` - Dispatches to host.log()
-   * - `host_sha1hex` - Computes SHA1 using Node.js crypto
-   *
-   * @param options - Engine configuration with host callbacks
-   * @returns Promise resolving to initialized engine
-   */
-  static async createWithHost(options: EngineOptions): Promise<LuaWasmEngine> {
-    const hostImports: Record<string, HostImport> = {};
-    let exportsRef: WasmExports | null = null;
-
-    const getExports = (): WasmExports => {
-      if (!exportsRef) throw new Error("WASM module not initialized");
-      return exportsRef;
-    };
-
-    /**
-     * Internal handler for redis.call/pcall dispatch.
-     * Routes to the appropriate host handler and catches errors.
-     */
-    const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
-      try {
-        return isPcall
-          ? options.host.redisPcall.call(options.host, args)
-          : options.host.redisCall.call(options.host, args);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { err: Buffer.from(message, "utf8") };
-      }
-    };
-
-    // Host import: redis.log(level, msg)
-    hostImports.host_redis_log = (level: number, ptr: number, len: number): void => {
-      const msg = readBytes(getExports().HEAPU8, ptr, len);
-      options.host.log(level, msg);
-    };
-
-    // Host import: redis.sha1hex(buffer) -> hex string
-    hostImports.host_sha1hex = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
-      const bytes = computeSha1Hex(data);
-      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    // Host import: redis.call(...) -> ReplyValue
-    hostImports.host_redis_call = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const decoded = decodeArgs(readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len));
-      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, false));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    // Host import: redis.pcall(...) -> ReplyValue
-    hostImports.host_redis_pcall = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const decoded = decodeArgs(readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len));
-      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, true));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    const { exports } = await loadModule(options, hostImports);
-    exportsRef = exports;
-
-    const engine = new LuaWasmEngine(exports, options);
-
-    if (engine.exports._set_limits && options.limits) {
-      engine.exports._set_limits(
-        options.limits.maxFuel ?? 0,
-        options.limits.maxReplyBytes ?? 0,
-        options.limits.maxArgBytes ?? 0
-      );
-    }
-
-    const initResult = engine.exports._init();
-    if (typeof initResult === "number" && initResult !== 0) {
-      throw new Error("Failed to initialize Lua WASM engine");
-    }
-
-    return engine;
-  }
-
-  /**
-   * Creates a standalone engine without Redis host integration.
-   *
-   * In standalone mode, `redis.call()` and `redis.pcall()` return errors.
-   * This is useful for running pure Lua computations or testing.
-   *
-   * @param options - Optional configuration (paths, limits)
-   * @returns Promise resolving to initialized engine
-   *
-   * @example
-   * ```typescript
-   * const engine = await LuaWasmEngine.createStandalone({
-   *   limits: { maxFuel: 1_000_000 }
-   * });
-   *
-   * engine.eval("return math.sqrt(16)");  // Returns: 4
-   * engine.eval("redis.call('PING')");    // Returns: {err: "ERR..."}
-   * ```
-   */
-  static async createStandalone(options: StandaloneOptions = {}): Promise<LuaWasmEngine> {
-    const hostImports: Record<string, HostImport> = {};
-    let exportsRef: WasmExports | null = null;
-
-    const getExports = (): WasmExports => {
-      if (!exportsRef) throw new Error("WASM module not initialized");
-      return exportsRef;
-    };
-
-    const notSupported = (action: string): ReplyValue => ({
-      err: Buffer.from(`ERR ${action} is not available in standalone mode`, "utf8")
-    });
-
-    // Standalone host imports - log is no-op, redis.call/pcall return errors
-    hostImports.host_redis_log = (_level: number, _ptr: number, _len: number): void => {};
-
-    hostImports.host_sha1hex = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
-      const bytes = computeSha1Hex(data);
-      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    hostImports.host_redis_call = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.call"));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    hostImports.host_redis_pcall = (...args: number[]): bigint | void => {
-      const exports = getExports();
-      const abiArgs = parseAbiArgs(args);
-      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.pcall"));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    const { exports } = await loadModule(options, hostImports);
-    exportsRef = exports;
-
-    const engine = new LuaWasmEngine(exports, options);
-    if (engine.exports._set_limits && options.limits) {
-      engine.exports._set_limits(
-        options.limits.maxFuel ?? 0,
-        options.limits.maxReplyBytes ?? 0,
-        options.limits.maxArgBytes ?? 0
-      );
-    }
-    const initResult = engine.exports._init();
-    if (typeof initResult === "number" && initResult !== 0) {
-      throw new Error("Failed to initialize Lua WASM engine");
-    }
-    return engine;
-  }
-
-  /**
-   * Returns the default path to the bundled WASM binary.
-   * @returns Absolute path to redis_lua.wasm
-   */
-  static defaultWasmPath(): string {
-    return defaultWasmPath();
-  }
-
-  /**
-   * Returns the default path to the bundled Emscripten JS module.
-   * @returns Absolute path to redis_lua.mjs
-   */
-  static defaultModulePath(): string {
-    return defaultModulePath();
-  }
+  constructor(
+    private exports: WasmExports,
+    private limits: EngineLimits | undefined,
+  ) {}
 
   /**
    * Returns the configured resource limits, if any.
@@ -402,14 +171,16 @@ export class LuaWasmEngine {
   evalWithArgs(
     script: Buffer | Uint8Array | string,
     keys: Array<Buffer | Uint8Array | string> = [],
-    args: Array<Buffer | Uint8Array | string> = []
+    args: Array<Buffer | Uint8Array | string> = [],
   ): ReplyValue {
     const scriptBuf = ensureBuffer(script, "script");
     const argBuf = encodeArgArray([...keys, ...args]);
 
     // Enforce maxArgBytes limit on host side
     if (this.limits?.maxArgBytes && argBuf.length > this.limits.maxArgBytes) {
-      return { err: Buffer.from("ERR KEYS/ARGV exceeds configured limit", "utf8") };
+      return {
+        err: Buffer.from("ERR KEYS/ARGV exceeds configured limit", "utf8"),
+      };
     }
 
     const scriptPtr = this.exports._alloc(scriptBuf.length);
@@ -422,7 +193,7 @@ export class LuaWasmEngine {
       scriptBuf.length,
       argsPtr,
       argBuf.length,
-      keys.length
+      keys.length,
     );
 
     this.exports._free_mem(scriptPtr);
@@ -432,18 +203,12 @@ export class LuaWasmEngine {
 
   /**
    * Calls the WASM _eval function, handling different ABI conventions.
-   *
-   * The ABI may use either:
-   * - Direct return: Returns packed bigint (ptr|len)
-   * - Sret: Writes to hidden return pointer parameter
-   *
-   * @param ptr - Pointer to script in linear memory
-   * @param len - Script byte length
-   * @returns PtrLen result in one of several formats
    * @private
    */
-  private callEval(ptr: number, len: number): bigint | number[] | { ptr: number; len: number } | number {
-    // Check if function expects sret (3+ params means first is return ptr)
+  private callEval(
+    ptr: number,
+    len: number,
+  ): bigint | number[] | { ptr: number; len: number } | number {
     if (this.exports._eval.length >= 3) {
       const retPtr = this.exports._alloc(8);
       this.exports._eval(retPtr, ptr, len);
@@ -460,13 +225,6 @@ export class LuaWasmEngine {
 
   /**
    * Calls the WASM _eval_with_args function with KEYS/ARGV.
-   *
-   * @param scriptPtr - Pointer to script bytes
-   * @param scriptLen - Script byte length
-   * @param argsPtr - Pointer to encoded ArgArray
-   * @param argsLen - ArgArray byte length
-   * @param keysCount - Number of KEYS (rest are ARGV)
-   * @returns PtrLen result
    * @private
    */
   private callEvalWithArgs(
@@ -474,17 +232,29 @@ export class LuaWasmEngine {
     scriptLen: number,
     argsPtr: number,
     argsLen: number,
-    keysCount: number
+    keysCount: number,
   ): bigint | number[] | { ptr: number; len: number } | number {
-    // Check for sret ABI (6+ params)
     if (this.exports._eval_with_args.length >= 6) {
       const retPtr = this.exports._alloc(8);
-      this.exports._eval_with_args(retPtr, scriptPtr, scriptLen, argsPtr, argsLen, keysCount);
+      this.exports._eval_with_args(
+        retPtr,
+        scriptPtr,
+        scriptLen,
+        argsPtr,
+        argsLen,
+        keysCount,
+      );
       const ptrLen = this.readPtrLen(retPtr);
       this.exports._free_mem(retPtr);
       return ptrLen;
     }
-    const result = this.exports._eval_with_args(scriptPtr, scriptLen, argsPtr, argsLen, keysCount);
+    const result = this.exports._eval_with_args(
+      scriptPtr,
+      scriptLen,
+      argsPtr,
+      argsLen,
+      keysCount,
+    );
     if (result === undefined) {
       throw new Error("Unexpected PtrLen return type");
     }
@@ -493,10 +263,6 @@ export class LuaWasmEngine {
 
   /**
    * Reads a PtrLen struct from WASM memory.
-   * Layout: [ptr: u32le][len: u32le]
-   *
-   * @param base - Base pointer to the struct
-   * @returns Object with ptr and len fields
    * @private
    */
   private readPtrLen(base: number): { ptr: number; len: number } {
@@ -519,19 +285,14 @@ export class LuaWasmEngine {
 
   /**
    * Decodes a PtrLen result from WASM into a ReplyValue.
-   *
-   * Handles various result formats and applies maxReplyBytes limit.
-   *
-   * @param result - Raw result from WASM function
-   * @returns Decoded ReplyValue
    * @private
    */
-  private decodeResult(result: bigint | number[] | { ptr: number; len: number } | number): ReplyValue {
+  private decodeResult(
+    result: bigint | number[] | { ptr: number; len: number } | number,
+  ): ReplyValue {
     let ptrLen: { ptr: number; len: number };
 
-    // Handle different result formats
     if (typeof result === "number") {
-      // Legacy Emscripten returns ptr in function result, len via getTempRet0
       if (this.exports.getTempRet0) {
         const len = this.exports.getTempRet0();
         if (!len) {
@@ -539,7 +300,6 @@ export class LuaWasmEngine {
         }
         ptrLen = { ptr: result >>> 0, len };
       } else {
-        // Result is a pointer to PtrLen struct
         ptrLen = this.readPtrLen(result >>> 0);
       }
     } else {
@@ -548,22 +308,354 @@ export class LuaWasmEngine {
 
     const { ptr, len } = ptrLen;
 
-    // Null result (ptr=0 or len=0)
     if (!ptr || !len) {
       return null;
     }
 
-    // Enforce maxReplyBytes limit
     if (this.limits?.maxReplyBytes && len > this.limits.maxReplyBytes) {
       this.exports._free_mem(ptr);
       return { err: Buffer.from("ERR reply exceeds configured limit", "utf8") };
     }
 
-    // Read and decode the reply buffer
     const buffer = Buffer.from(this.exports.HEAPU8.subarray(ptr, ptr + len));
     this.exports._free_mem(ptr);
     return decodeReply(buffer).value;
   }
 }
 
-export type { EngineOptions, ReplyValue, RedisCallHandler, RedisHost, RedisLogHandler, StandaloneOptions };
+/**
+ * Mutable handlers that can be swapped after WASM instantiation.
+ * The WASM imports capture wrapper functions that delegate to these.
+ */
+type MutableHandlers = {
+  log: (level: number, ptr: number, len: number) => void;
+  sha1hex: (...args: number[]) => bigint | void;
+  call: (...args: number[]) => bigint | void;
+  pcall: (...args: number[]) => bigint | void;
+};
+
+/**
+ * Loaded WASM module that can create engine instances.
+ *
+ * This class holds a loaded WASM module and provides factory methods
+ * to create `LuaEngine` instances. It can only be used once - after
+ * calling `create()` or `createStandalone()`, subsequent calls will throw.
+ *
+ * @example
+ * ```typescript
+ * const module = await load({ limits: { maxFuel: 1_000_000 } });
+ *
+ * // Create with Redis host
+ * const engine = module.create(myRedisHost);
+ *
+ * // OR create standalone (no redis.call support)
+ * const standalone = module.createStandalone();
+ * ```
+ */
+export class LuaWasmModule {
+  private consumed = false;
+
+  /**
+   * @internal
+   */
+  constructor(
+    private exports: WasmExports,
+    private handlers: MutableHandlers,
+    private options: LoadOptions,
+  ) {}
+
+  /**
+   * Creates an engine with full Redis host integration.
+   *
+   * This binds the host callbacks to the WASM module. The host provides
+   * implementations for `redis.call()`, `redis.pcall()`, and `redis.log()`.
+   *
+   * This method can only be called once per module instance.
+   *
+   * @param host - Redis host implementation
+   * @returns Configured LuaEngine instance
+   * @throws Error if module has already been used
+   *
+   * @example
+   * ```typescript
+   * const engine = module.create({
+   *   redisCall(args) {
+   *     const cmd = args[0].toString().toUpperCase();
+   *     if (cmd === "PING") return { ok: Buffer.from("PONG") };
+   *     throw new Error("ERR unknown command");
+   *   },
+   *   redisPcall(args) {
+   *     try { return this.redisCall(args); }
+   *     catch (e) { return { err: Buffer.from(e.message) }; }
+   *   },
+   *   log(level, msg) { console.log(msg.toString()); }
+   * });
+   * ```
+   */
+  create(host: RedisHost): LuaEngine {
+    this.ensureNotConsumed();
+    this.consumed = true;
+
+    this.wireHostCallbacks(host);
+    this.initializeLua();
+
+    return new LuaEngine(this.exports, this.options.limits);
+  }
+
+  /**
+   * Creates a standalone engine without Redis host integration.
+   *
+   * In standalone mode, `redis.call()` and `redis.pcall()` return errors.
+   * This is useful for running pure Lua computations or testing.
+   *
+   * This method can only be called once per module instance.
+   *
+   * @returns Configured LuaEngine instance
+   * @throws Error if module has already been used
+   *
+   * @example
+   * ```typescript
+   * const engine = module.createStandalone();
+   *
+   * engine.eval("return math.sqrt(16)");  // Returns: 4
+   * engine.eval("redis.call('PING')");    // Returns: {err: "ERR..."}
+   * ```
+   */
+  createStandalone(): LuaEngine {
+    this.ensureNotConsumed();
+    this.consumed = true;
+
+    this.wireStandaloneCallbacks();
+    this.initializeLua();
+
+    return new LuaEngine(this.exports, this.options.limits);
+  }
+
+  /**
+   * Returns the default path to the bundled WASM binary.
+   */
+  static defaultWasmPath(): string {
+    return defaultWasmPath();
+  }
+
+  /**
+   * Returns the default path to the bundled Emscripten JS module.
+   */
+  static defaultModulePath(): string {
+    return defaultModulePath();
+  }
+
+  private ensureNotConsumed(): void {
+    if (this.consumed) {
+      throw new Error(
+        "LuaWasmModule has already been used. Load a new module with load().",
+      );
+    }
+  }
+
+  private initializeLua(): void {
+    if (this.exports._set_limits && this.options.limits) {
+      this.exports._set_limits(
+        this.options.limits.maxFuel ?? 0,
+        this.options.limits.maxReplyBytes ?? 0,
+        this.options.limits.maxArgBytes ?? 0,
+      );
+    }
+
+    const initResult = this.exports._init();
+    if (typeof initResult === "number" && initResult !== 0) {
+      throw new Error("Failed to initialize Lua WASM engine");
+    }
+  }
+
+  private wireHostCallbacks(host: RedisHost): void {
+    const exports = this.exports;
+
+    const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
+      try {
+        return isPcall
+          ? host.redisPcall.call(host, args)
+          : host.redisCall.call(host, args);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { err: Buffer.from(message, "utf8") };
+      }
+    };
+
+    this.handlers.log = (level: number, ptr: number, len: number): void => {
+      const msg = readBytes(exports.HEAPU8, ptr, len);
+      host.log(level, msg);
+    };
+
+    this.handlers.sha1hex = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
+      const bytes = computeSha1Hex(data);
+      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+
+    this.handlers.call = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const decoded = decodeArgs(
+        readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len),
+      );
+      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, false));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+
+    this.handlers.pcall = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const decoded = decodeArgs(
+        readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len),
+      );
+      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, true));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+  }
+
+  private wireStandaloneCallbacks(): void {
+    const exports = this.exports;
+
+    const notSupported = (action: string): ReplyValue => ({
+      err: Buffer.from(
+        `ERR ${action} is not available in standalone mode`,
+        "utf8",
+      ),
+    });
+
+    this.handlers.log = (): void => {};
+
+    this.handlers.sha1hex = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
+      const bytes = computeSha1Hex(data);
+      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+
+    this.handlers.call = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.call"));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+
+    this.handlers.pcall = (...args: number[]): bigint | void => {
+      const abiArgs = parseAbiArgs(args);
+      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.pcall"));
+      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    };
+  }
+}
+
+/**
+ * Loads the WASM module and returns a LuaWasmModule for creating engines.
+ *
+ * This is the main entry point for the package. It handles async WASM loading
+ * and returns a module that can be used to create engine instances synchronously.
+ *
+ * @param options - Optional configuration for paths and limits
+ * @returns Promise resolving to a LuaWasmModule
+ *
+ * @example
+ * ```typescript
+ * // Basic usage
+ * const module = await load();
+ * const engine = module.create(myRedisHost);
+ *
+ * // With options
+ * const module = await load({
+ *   limits: { maxFuel: 10_000_000 },
+ *   wasmPath: "/custom/path/to/redis_lua.wasm"
+ * });
+ * ```
+ */
+export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
+  // Mutable handlers - these will be set by wireHostCallbacks/wireStandaloneCallbacks
+  const handlers: MutableHandlers = {
+    log: () => {},
+    sha1hex: () => BigInt(0),
+    call: () => BigInt(0),
+    pcall: () => BigInt(0),
+  };
+
+  // Create wrapper imports that delegate to mutable handlers
+  // These wrappers are captured by WASM at instantiation, but they call handlers which can be swapped
+  const hostImports: Record<string, HostImport> = {
+    host_redis_log: (level: number, ptr: number, len: number) =>
+      handlers.log(level, ptr, len),
+    host_sha1hex: (...args: number[]) => handlers.sha1hex(...args),
+    host_redis_call: (...args: number[]) => handlers.call(...args),
+    host_redis_pcall: (...args: number[]) => handlers.pcall(...args),
+  };
+
+  const { exports } = await loadModule(options, hostImports);
+
+  return new LuaWasmModule(exports, handlers, options);
+}
+
+/**
+ * This class provides a convenience API
+ * where `create()` and `createStandalone()` are static async methods.
+ *
+ * @example
+ * ```typescript
+ * // Convenience API
+ * const engine = await LuaWasmEngine.create({ host: myHost });
+ *
+ * // Modular API
+ * const module = await load();
+ * const engine = module.create(myHost);
+ * ```
+ */
+export class LuaWasmEngine {
+  private constructor(private engine: LuaEngine) {}
+
+  static async create(options: EngineOptions): Promise<LuaWasmEngine> {
+    const module = await load(options);
+    const engine = module.create(options.host);
+    return new LuaWasmEngine(engine);
+  }
+
+  static async createStandalone(
+    options: StandaloneOptions = {},
+  ): Promise<LuaWasmEngine> {
+    const module = await load(options);
+    const engine = module.createStandalone();
+    return new LuaWasmEngine(engine);
+  }
+
+  static defaultWasmPath(): string {
+    return defaultWasmPath();
+  }
+
+  static defaultModulePath(): string {
+    return defaultModulePath();
+  }
+
+  eval(script: Buffer | Uint8Array | string): ReplyValue {
+    return this.engine.eval(script);
+  }
+
+  evalWithArgs(
+    script: Buffer | Uint8Array | string,
+    keys: Array<Buffer | Uint8Array | string> = [],
+    args: Array<Buffer | Uint8Array | string> = [],
+  ): ReplyValue {
+    return this.engine.evalWithArgs(script, keys, args);
+  }
+
+  getLimits(): EngineLimits | undefined {
+    return this.engine.getLimits();
+  }
+}
+
+export type {
+  EngineOptions,
+  ReplyValue,
+  RedisCallHandler,
+  RedisHost,
+  RedisLogHandler,
+  StandaloneOptions,
+  LoadOptions,
+};

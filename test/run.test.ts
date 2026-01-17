@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LuaWasmEngine } from "../src/index.ts";
+import { load } from "../src/index.ts";
 
 async function resolveWasmPath(): Promise<string> {
   const candidates = [
@@ -29,38 +29,37 @@ test("eval + redis.call + binary safety + error paths", async () => {
   let lastCallArgs: Buffer[] | null = null;
   let lastPcallArgs: Buffer[] | null = null;
 
-  const engine = await LuaWasmEngine.create({
-    host: {
-      redisCall(args) {
-        lastCallArgs = args.map((arg) => Buffer.from(arg));
-        const command = args[0]?.toString("utf8").toUpperCase();
-        if (command === "PING") {
-          return { ok: Buffer.from("PONG", "utf8") };
-        }
-        if (command === "ECHO" && args[1]) {
-          return Buffer.from(args[1]);
-        }
-        if (command === "THROW") {
-          throw new Error("ERR boom");
-        }
-        return { err: Buffer.from("ERR unknown command", "utf8") };
-      },
-      redisPcall(args) {
-        lastPcallArgs = args.map((arg) => Buffer.from(arg));
-        const command = args[0]?.toString("utf8").toUpperCase();
-        if (command === "PING") {
-          return { ok: Buffer.from("PONG", "utf8") };
-        }
-        if (command === "ECHO" && args[1]) {
-          return Buffer.from(args[1]);
-        }
-        if (command === "THROW") {
-          throw new Error("ERR boom");
-        }
-        return { err: Buffer.from("ERR unknown command", "utf8") };
-      },
-      log() {},
+  const module = await load();
+  const engine = module.create({
+    redisCall(args) {
+      lastCallArgs = args.map((arg) => Buffer.from(arg));
+      const command = args[0]?.toString("utf8").toUpperCase();
+      if (command === "PING") {
+        return { ok: Buffer.from("PONG", "utf8") };
+      }
+      if (command === "ECHO" && args[1]) {
+        return Buffer.from(args[1]);
+      }
+      if (command === "THROW") {
+        throw new Error("ERR boom");
+      }
+      return { err: Buffer.from("ERR unknown command", "utf8") };
     },
+    redisPcall(args) {
+      lastPcallArgs = args.map((arg) => Buffer.from(arg));
+      const command = args[0]?.toString("utf8").toUpperCase();
+      if (command === "PING") {
+        return { ok: Buffer.from("PONG", "utf8") };
+      }
+      if (command === "ECHO" && args[1]) {
+        return Buffer.from(args[1]);
+      }
+      if (command === "THROW") {
+        throw new Error("ERR boom");
+      }
+      return { err: Buffer.from("ERR unknown command", "utf8") };
+    },
+    log() {},
   });
 
   assert.equal(engine.eval("return 1+1"), 2);
@@ -99,19 +98,19 @@ test("eval + redis.call + binary safety + error paths", async () => {
 
 test("limits: maxArgBytes", async () => {
   await resolveWasmPath();
-  const limitedEngine = await LuaWasmEngine.create({
+  const module = await load({
     limits: {
       maxArgBytes: 4,
     },
-    host: {
-      redisCall() {
-        return { ok: Buffer.from("OK", "utf8") };
-      },
-      redisPcall() {
-        return { ok: Buffer.from("OK", "utf8") };
-      },
-      log() {},
+  });
+  const limitedEngine = module.create({
+    redisCall() {
+      return { ok: Buffer.from("OK", "utf8") };
     },
+    redisPcall() {
+      return { ok: Buffer.from("OK", "utf8") };
+    },
+    log() {},
   });
 
   const limitResult = limitedEngine.evalWithArgs(

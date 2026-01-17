@@ -15,7 +15,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LuaWasmEngine } from "../src/index.js";
+import { load } from "../src/index.js";
 
 // Helper to resolve WASM path
 async function resolveWasmPath(): Promise<string> {
@@ -53,7 +53,8 @@ function createConformanceHost() {
 
 test("conformance: basic_eval - arithmetic", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval("return 1 + 1");
   assert.equal(result, 2);
@@ -61,7 +62,8 @@ test("conformance: basic_eval - arithmetic", async () => {
 
 test("conformance: binary_return - null bytes in string", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   // Lua: return "a\0b" -> binary string with null byte
   const result = engine.eval('return "a\\0b"');
@@ -76,7 +78,8 @@ test("conformance: binary_return - null bytes in string", async () => {
 
 test("conformance: cjson_basic - encode object", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval("return cjson.encode({ a = 1 })");
   assert.ok(Buffer.isBuffer(result));
@@ -86,7 +89,8 @@ test("conformance: cjson_basic - encode object", async () => {
 
 test("conformance: cjson_advanced - roundtrip with nested structures", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local orig = {
@@ -117,7 +121,8 @@ test("conformance: cjson_advanced - roundtrip with nested structures", async () 
 
 test("conformance: cmsgpack_basic - pack array", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval("return cmsgpack.pack({ 1, 2, 3 })");
   assert.ok(Buffer.isBuffer(result));
@@ -127,7 +132,8 @@ test("conformance: cmsgpack_basic - pack array", async () => {
 
 test("conformance: cmsgpack_advanced - roundtrip with various types", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local orig = {
@@ -158,7 +164,8 @@ test("conformance: cmsgpack_advanced - roundtrip with various types", async () =
 
 test("conformance: struct_basic - pack big-endian uint16", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval('return struct.pack(">I2", 0x1234)');
   assert.ok(Buffer.isBuffer(result));
@@ -168,7 +175,8 @@ test("conformance: struct_basic - pack big-endian uint16", async () => {
 
 test("conformance: struct - pack and unpack", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local packed = struct.pack('>I2', 0x1234)
@@ -186,7 +194,8 @@ test("conformance: struct - pack and unpack", async () => {
 
 test("conformance: bit_basic - xor and tohex", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval("return bit.tohex(bit.bxor(0x0f, 0xf0))");
   assert.ok(Buffer.isBuffer(result));
@@ -196,7 +205,8 @@ test("conformance: bit_basic - xor and tohex", async () => {
 
 test("conformance: bit_advanced - comprehensive bitwise operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local results = {}
@@ -243,7 +253,8 @@ test("conformance: bit_advanced - comprehensive bitwise operations", async () =>
 
 test("conformance: string_lib - string operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local results = {}
@@ -267,7 +278,8 @@ test("conformance: string_lib - string operations", async () => {
 
 test("conformance: math_lib - math operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local results = {}
@@ -292,7 +304,8 @@ test("conformance: math_lib - math operations", async () => {
 
 test("conformance: table_lib - table operations", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local results = {}
@@ -330,7 +343,8 @@ test("conformance: table_lib - table operations", async () => {
 
 test("conformance: sha1hex - compute SHA1 hash", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local hash = redis.sha1hex("hello")
@@ -346,7 +360,8 @@ test("conformance: sha1hex - compute SHA1 hash", async () => {
 
 test("conformance: sha1hex - empty string", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval('return redis.sha1hex("")');
   assert.ok(Buffer.isBuffer(result));
@@ -360,7 +375,8 @@ test("conformance: sha1hex - empty string", async () => {
 
 test("conformance: cjson - decode and access", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const result = engine.eval('local t = cjson.decode(\'{"x":10}\'); return t.x');
   assert.equal(result, 10);
@@ -368,7 +384,8 @@ test("conformance: cjson - decode and access", async () => {
 
 test("conformance: cmsgpack - nested roundtrip", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   const script = `
     local packed = cmsgpack.pack({1, 2, 3})
@@ -382,7 +399,8 @@ test("conformance: cmsgpack - nested roundtrip", async () => {
 
 test("conformance: bit - tobit and tohex", async () => {
   await resolveWasmPath();
-  const engine = await LuaWasmEngine.create({ host: createConformanceHost() });
+  const module = await load();
+  const engine = module.create(createConformanceHost());
 
   assert.equal(engine.eval("return bit.band(0xff, 0x0f)"), 0x0f);
   assert.equal(engine.eval("return bit.bor(0xf0, 0x0f)"), 0xff);
