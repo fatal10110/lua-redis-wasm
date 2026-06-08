@@ -61,6 +61,7 @@ import {
   decodeReply,
   encodeArgArray,
   ensureBuffer,
+  REPLY_SCRIPT_ERROR,
   unpackPtrLen,
 } from "./codec.js";
 import {
@@ -322,23 +323,45 @@ export class LuaEngine {
 
     const buffer = Buffer.from(this.exports.HEAPU8.subarray(ptr, ptr + len));
     this.exports._free_mem(ptr);
+    const topTag = len > 0 ? buffer.readUInt8(0) : -1;
     const value = decodeReply(buffer).value;
 
-    // Format Lua script errors to match Redis format
-    // Lua errors look like: "user_script:N: message"
-    if (value && typeof value === "object" && "err" in value) {
-      const errStr = value.err.toString("utf8");
-      if (errStr.startsWith("user_script:")) {
-        // Extract line number: "user_script:N: message" -> N
-        const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
-        const line = colonIdx > 12 ? errStr.substring(12, colonIdx) : "1";
-        const formatted = `${errStr} script: ${sha}, on @user_script:${line}.`;
-        return { err: Buffer.from(formatted, "utf8") };
-      }
+    // Decorate only errors that aborted the script (REPLY_SCRIPT_ERROR): an
+    // uncaught Lua runtime error or an error that propagated out of redis.call.
+    // Error values the script returns (REPLY_ERROR, e.g. `return redis.pcall`)
+    // are passed through untouched, matching Redis.
+    if (
+      topTag === REPLY_SCRIPT_ERROR &&
+      value &&
+      typeof value === "object" &&
+      "err" in value
+    ) {
+      return decorateScriptError(value, sha);
     }
 
     return value;
   }
+}
+
+/**
+ * Appends the Redis script source context to a script-aborting error message.
+ *
+ * Lua runtime errors carry a `user_script:N:` prefix (N is the line); command
+ * errors propagated out of redis.call have no prefix and are reported at line 1.
+ * The error `code` (if any) is preserved.
+ */
+function decorateScriptError(
+  value: { err: Buffer; code?: Buffer },
+  sha: string,
+): ReplyValue {
+  const errStr = value.err.toString("utf8");
+  let line = "1";
+  if (errStr.startsWith("user_script:")) {
+    const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
+    line = colonIdx > 12 ? errStr.substring(12, colonIdx) : "1";
+  }
+  const formatted = `${errStr} script: ${sha}, on @user_script:${line}.`;
+  return { err: Buffer.from(formatted, "utf8"), code: value.code };
 }
 
 /**

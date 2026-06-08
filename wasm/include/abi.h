@@ -15,7 +15,12 @@ typedef enum ReplyType {
   REPLY_BULK = 0x02,
   REPLY_ARRAY = 0x03,
   REPLY_STATUS = 0x04,
-  REPLY_ERROR = 0x05
+  REPLY_ERROR = 0x05,
+  /* Error that aborted the script (uncaught runtime error or an error that
+   * propagated out of redis.call). The host decorates these with the script
+   * sha / source context; plain REPLY_ERROR values returned by the script
+   * (e.g. `return redis.pcall(...)`) are left undecorated. */
+  REPLY_SCRIPT_ERROR = 0x06
 } ReplyType;
 
 #if defined(__GNUC__)

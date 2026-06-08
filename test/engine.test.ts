@@ -817,3 +817,72 @@ test("LuaWasmModule: throws on createStandalone after create", async () => {
     module.createStandalone();
   }, /already been used/);
 });
+
+// =============================================================================
+// Script error decoration + zero-arg delegation
+// =============================================================================
+
+test("redis.call() with no args is delegated to the host", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  let received: Buffer[] | undefined;
+  const engine = module.create(
+    createTestHost({
+      redisCall(args) {
+        received = args;
+        return { err: Buffer.from("ERR Please specify at least one argument"), code: Buffer.from("ERR") };
+      },
+    }),
+  );
+
+  const result = engine.eval("return redis.call()");
+  assert.deepEqual(received, []); // host saw the empty argument list, not a lib short-circuit
+  assert.ok(result && typeof result === "object" && "err" in result);
+});
+
+test("redis.call command error is decorated and code is split out", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(
+    createTestHost({
+      redisCall() {
+        return {
+          err: Buffer.from("Operation against a key holding the wrong kind of value"),
+          code: Buffer.from("WRONGTYPE"),
+        };
+      },
+    }),
+  );
+
+  const result = engine.eval("return redis.call('GET', 'k')") as { err: Buffer; code?: Buffer };
+  assert.ok(result && typeof result === "object" && "err" in result);
+  // Command errors have no user_script prefix -> reported at line 1, code preserved.
+  assert.match(
+    result.err.toString("utf8"),
+    /^Operation against a key holding the wrong kind of value script: [a-f0-9]{40}, on @user_script:1\.$/,
+  );
+  assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+});
+
+test("redis.pcall error value returned by the script is not decorated", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(
+    createTestHost({
+      redisCall() {
+        return {
+          err: Buffer.from("Operation against a key holding the wrong kind of value"),
+          code: Buffer.from("WRONGTYPE"),
+        };
+      },
+    }),
+  );
+
+  const result = engine.eval("return redis.pcall('GET', 'k')") as { err: Buffer; code?: Buffer };
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal(
+    result.err.toString("utf8"),
+    "Operation against a key holding the wrong kind of value",
+  );
+  assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+});
