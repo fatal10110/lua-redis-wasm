@@ -7,6 +7,13 @@
 
 A WebAssembly-based Redis Lua 5.1 script engine for Node.js. Execute Redis-compatible Lua scripts in JavaScript/TypeScript environments without a live Redis server.
 
+> **Primary purpose:** this engine powers the Lua scripting (`EVAL`/`EVALSHA`)
+> support in [js-redis-server](https://github.com/fatal10110/js-redis-server), an
+> in-memory Redis-compatible server. It is published as a standalone package so
+> it can be reused, but its API and error semantics are driven by what
+> js-redis-server needs to match real Redis. If you embed it directly, expect it
+> to behave the way Redis behaves inside that server.
+
 ## Features
 
 - **Redis-compatible Lua 5.1** - Uses the exact Lua version embedded in Redis
@@ -27,7 +34,7 @@ npm install lua-redis-wasm
 ## Quick Start
 
 ```typescript
-import { LuaWasmEngine } from "redis-lua-wasm";
+import { LuaWasmEngine } from "lua-redis-wasm";
 
 const engine = await LuaWasmEngine.create({
   host: {
@@ -133,11 +140,31 @@ type RedisHost = {
 
 ### redisCall
 
-Called when Lua executes `redis.call(...)`. Arguments arrive as `Buffer[]`. Throw an error to return it to Lua.
+Called when Lua executes `redis.call(...)`. Arguments arrive as `Buffer[]`. Return a
+`ReplyValue`, or signal an error by returning `{ err, code? }` (or throwing).
+
+A zero-argument `redis.call()` / `redis.pcall()` is delegated to the host with an
+empty `args` array — the host decides the error — rather than being short-circuited
+by the engine.
 
 ### redisPcall
 
-Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer }` instead of throwing to match Redis behavior.
+Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
+instead of throwing to match Redis behavior.
+
+### Error decoration
+
+The engine, not the host, owns Redis error formatting:
+
+- An error that **aborts** a script (a `redis.call` error that propagates out, or an
+  uncaught Lua runtime error) is decorated with `script: <sha>, on @user_script:<line>.`,
+  matching Redis.
+- An error **value** the script returns (e.g. `return redis.pcall(...)`) is passed
+  through untouched.
+
+So hosts should return plain, undecorated error messages; the engine adds the script
+context. The error `code` (e.g. `WRONGTYPE`) is preserved through this process — see
+[Reply Types](#reply-types).
 
 ### log
 
@@ -154,9 +181,13 @@ type ReplyValue =
   | bigint // Integer (64-bit)
   | Buffer // Bulk string
   | { ok: Buffer } // Status reply (+OK)
-  | { err: Buffer } // Error reply (-ERR)
+  | { err: Buffer; code?: Buffer } // Error reply (-ERR); code is the leading token, e.g. WRONGTYPE
   | ReplyValue[]; // Array
 ```
+
+On decode, an error payload of the form `CODE message` is split into `err` (the
+message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
+`code` is prepended back, so the wire form is always Redis's `CODE message`.
 
 ### Determining the Response Type
 
@@ -225,7 +256,7 @@ engine.eval("return redis.call('SET', 'k', 'v').ok"); // Buffer.from("OK")
 
 // Error reply: redis.pcall catches errors as {err: "..."}
 // In Lua: local resp = redis.pcall('INVALID') → resp.err == "ERR ..."
-engine.eval("return redis.pcall('INVALID')"); // { err: Buffer.from("ERR ...") }
+engine.eval("return redis.pcall('INVALID')"); // { err: Buffer.from("..."), code: Buffer.from("ERR") }
 ```
 
 > **Note**: Status replies (`+OK`) become `{ok: "..."}` tables in Lua, matching real Redis behavior.
@@ -267,6 +298,7 @@ Plus standard Lua 5.1 libraries: `base`, `table`, `string`, `math`.
 
 ## Use Cases
 
+- **Powering [js-redis-server](https://github.com/fatal10110/js-redis-server)** - the primary use case: providing `EVAL`/`EVALSHA` scripting for an in-memory Redis-compatible server
 - **Testing** - Unit test Redis Lua scripts without a Redis server
 - **Sandboxing** - Execute untrusted Lua with resource limits
 - **Development** - Rapid iteration on Lua scripts locally
