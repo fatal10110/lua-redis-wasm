@@ -111,6 +111,24 @@ static PtrLen reply_error(const char *msg, size_t len) {
   return out;
 }
 
+/* Like reply_error, but tags the reply as a script-aborting error so the host
+ * decorates it with the script sha / source context. Used for load and runtime
+ * (lua_pcall) failures, including errors that propagated out of redis.call. */
+static PtrLen reply_script_error(const char *msg, size_t len) {
+  ReplyBuffer rb;
+  rb_init(&rb);
+  if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)len) != 0) {
+    return (PtrLen){0, 0};
+  }
+  if (rb_append(&rb, msg, len) != 0) {
+    free(rb.data);
+    return (PtrLen){0, 0};
+  }
+  PtrLen out = rb_finalize(&rb);
+  free(rb.data);
+  return out;
+}
+
 static PtrLen reply_status(const char *msg, size_t len) {
   ReplyBuffer rb;
   rb_init(&rb);
@@ -411,14 +429,14 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_error(err ? err : "ERR script load failed", err ? err_len : 23);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23);
     lua_settop(g_state, 0);
     return out;
   }
   if (lua_pcall(g_state, 0, LUA_MULTRET, 0) != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_error(err ? err : "ERR script execution failed", err ? err_len : 28);
+    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28);
     lua_settop(g_state, 0);
     return out;
   }
@@ -465,14 +483,14 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_error(err ? err : "ERR script load failed", err ? err_len : 23);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23);
     lua_settop(g_state, 0);
     return out;
   }
   if (lua_pcall(g_state, 0, LUA_MULTRET, 0) != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_error(err ? err : "ERR script execution failed", err ? err_len : 28);
+    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28);
     lua_settop(g_state, 0);
     return out;
   }

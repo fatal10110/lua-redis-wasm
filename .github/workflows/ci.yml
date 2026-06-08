@@ -22,9 +22,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: "npm"
 
       - name: Install deps
-        run: npm install
+        run: npm ci
 
+      # WASM is already built above, so skip the docker rebuild inside `test`.
       - name: Tests
-        run: npm run test
+        run: npm run test:skip-wasm

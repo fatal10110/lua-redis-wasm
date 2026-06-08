@@ -20,7 +20,10 @@
  * - `bigint` - Integer outside safe range (uses BigInt)
  * - `Buffer` - Bulk string (binary-safe bytes)
  * - `{ ok: Buffer }` - Status reply (Redis +OK style)
- * - `{ err: Buffer }` - Error reply (Redis -ERR style)
+ * - `{ err: Buffer; code?: Buffer }` - Error reply (Redis -ERR style). `err` is
+ *   the message; `code` is the optional leading error code (e.g. `WRONGTYPE`).
+ *   On decode the code is split out of the wire payload; on encode it is
+ *   prepended back. When `code` is omitted the message is used verbatim.
  * - `ReplyValue[]` - Array of nested values
  *
  * @example
@@ -47,7 +50,7 @@ export type ReplyValue =
   | bigint
   | Buffer
   | { ok: Buffer }
-  | { err: Buffer }
+  | { err: Buffer; code?: Buffer }
   | ReplyValue[];
 
 /**

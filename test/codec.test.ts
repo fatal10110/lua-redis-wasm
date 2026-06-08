@@ -143,6 +143,18 @@ test("encodeReplyValue: error reply (err)", () => {
   assert.equal(encoded.subarray(5).toString("utf8"), "ERR unknown");
 });
 
+test("encodeReplyValue: error reply prepends code", () => {
+  const encoded = encodeReplyValue({
+    err: Buffer.from("Operation against a key holding the wrong kind of value"),
+    code: Buffer.from("WRONGTYPE"),
+  });
+  assert.equal(encoded[0], 0x05); // REPLY_ERROR
+  assert.equal(
+    encoded.subarray(5).toString("utf8"),
+    "WRONGTYPE Operation against a key holding the wrong kind of value",
+  );
+});
+
 test("encodeReplyValue: empty array", () => {
   const encoded = encodeReplyValue([]);
   assert.equal(encoded[0], 0x03); // REPLY_ARRAY
@@ -249,7 +261,7 @@ test("decodeReply: status reply", () => {
   assert.equal((value as { ok: Buffer }).ok.toString("utf8"), "OK");
 });
 
-test("decodeReply: error reply", () => {
+test("decodeReply: error reply splits leading code", () => {
   const content = Buffer.from("ERR boom");
   const buf = Buffer.alloc(5 + content.length);
   buf[0] = 0x05; // REPLY_ERROR
@@ -257,7 +269,20 @@ test("decodeReply: error reply", () => {
   content.copy(buf, 5);
   const { value } = decodeReply(buf);
   assert.ok(value && typeof value === "object" && "err" in value);
-  assert.equal((value as { err: Buffer }).err.toString("utf8"), "ERR boom");
+  assert.equal((value as { err: Buffer }).err.toString("utf8"), "boom");
+  assert.equal((value as { code?: Buffer }).code?.toString("utf8"), "ERR");
+});
+
+test("decodeReply: error reply without a code is left whole", () => {
+  const content = Buffer.from("lowercase message");
+  const buf = Buffer.alloc(5 + content.length);
+  buf[0] = 0x05; // REPLY_ERROR
+  buf.writeUInt32LE(content.length, 1);
+  content.copy(buf, 5);
+  const { value } = decodeReply(buf);
+  assert.ok(value && typeof value === "object" && "err" in value);
+  assert.equal((value as { err: Buffer }).err.toString("utf8"), "lowercase message");
+  assert.equal((value as { code?: Buffer }).code, undefined);
 });
 
 test("decodeReply: empty array", () => {

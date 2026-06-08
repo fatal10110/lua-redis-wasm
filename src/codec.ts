@@ -54,6 +54,51 @@ const REPLY_STATUS = 0x04;
 const REPLY_ERROR = 0x05;
 
 /**
+ * Reply type tag: script-aborting error. Same wire payload as REPLY_ERROR, but
+ * signals that the error aborted the script (uncaught runtime error or an error
+ * that propagated out of redis.call) and should be decorated with the script
+ * sha / source context by the engine. Returned error *values* (e.g.
+ * `return redis.pcall(...)`) use REPLY_ERROR and are left undecorated.
+ * Wire format: [0x06][length: u32le][bytes...]
+ */
+export const REPLY_SCRIPT_ERROR = 0x06;
+
+/**
+ * Splits a raw error payload (`CODE message`) into a structured error reply.
+ *
+ * The leading token is treated as the error code only when it matches
+ * `/^[A-Z][A-Z0-9]*$/` (Redis error-code convention); otherwise the whole
+ * payload is the message and `code` is omitted. Binary-safe: the message bytes
+ * are preserved verbatim.
+ */
+function splitErrorPayload(payload: Buffer): { err: Buffer; code?: Buffer } {
+  const space = payload.indexOf(0x20);
+  if (space > 0 && isErrorCode(payload, space)) {
+    return {
+      err: Buffer.from(payload.subarray(space + 1)),
+      code: Buffer.from(payload.subarray(0, space)),
+    };
+  }
+  return { err: Buffer.from(payload) };
+}
+
+/** Tests whether `buffer[0, end)` matches the Redis error-code shape `[A-Z][A-Z0-9]*`. */
+function isErrorCode(buffer: Buffer, end: number): boolean {
+  if (buffer[0] < 0x41 || buffer[0] > 0x5a) {
+    return false;
+  }
+  for (let i = 1; i < end; i += 1) {
+    const c = buffer[i];
+    const isUpper = c >= 0x41 && c <= 0x5a;
+    const isDigit = c >= 0x30 && c <= 0x39;
+    if (!isUpper && !isDigit) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Converts various input types to a Buffer for binary-safe processing.
  *
  * This function is the foundation of binary safety in the codec - it ensures
@@ -145,14 +190,26 @@ export function encodeReplyValue(value: ReplyValue): Buffer {
   // Handle objects with 'ok' or 'err' properties -> STATUS/ERROR reply
   if (typeof value === "object") {
     if (Object.prototype.hasOwnProperty.call(value, "ok")) {
-      const payload = ensureBuffer((value as { ok: Buffer }).ok, "status reply");
+      const payload = ensureBuffer(
+        (value as { ok: Buffer }).ok,
+        "status reply",
+      );
       const header = Buffer.alloc(5);
       header[0] = REPLY_STATUS;
       header.writeUInt32LE(payload.length, 1);
       return Buffer.concat([header, payload]);
     }
     if (Object.prototype.hasOwnProperty.call(value, "err")) {
-      const payload = ensureBuffer((value as { err: Buffer }).err, "error reply");
+      const errValue = value as { err: Buffer; code?: Buffer };
+      const message = ensureBuffer(errValue.err, "error reply");
+      // Prepend the code so the wire payload is the Redis "CODE message" form.
+      const payload = errValue.code
+        ? Buffer.concat([
+            ensureBuffer(errValue.code, "error code"),
+            Buffer.from(" "),
+            message,
+          ])
+        : message;
       const header = Buffer.alloc(5);
       header[0] = REPLY_ERROR;
       header.writeUInt32LE(payload.length, 1);
@@ -187,7 +244,10 @@ export function encodeReplyValue(value: ReplyValue): Buffer {
  * // offset is the position after the decoded data
  * ```
  */
-export function decodeReply(buffer: Buffer, offset = 0): { value: ReplyValue; offset: number } {
+export function decodeReply(
+  buffer: Buffer,
+  offset = 0,
+): { value: ReplyValue; offset: number } {
   // Validate minimum header size (1 byte type + 4 bytes count/len)
   if (offset + 5 > buffer.length) {
     throw new Error("ERR reply decoding failed");
@@ -210,7 +270,8 @@ export function decodeReply(buffer: Buffer, offset = 0): { value: ReplyValue; of
     cursor += 8;
     // Return number if within safe integer range, otherwise bigint
     const value =
-      big >= BigInt(Number.MIN_SAFE_INTEGER) && big <= BigInt(Number.MAX_SAFE_INTEGER)
+      big >= BigInt(Number.MIN_SAFE_INTEGER) &&
+      big <= BigInt(Number.MAX_SAFE_INTEGER)
         ? Number(big)
         : big;
     return { value, offset: cursor };
@@ -228,10 +289,10 @@ export function decodeReply(buffer: Buffer, offset = 0): { value: ReplyValue; of
     return { value: { ok: Buffer.from(payload) }, offset: cursor };
   }
 
-  if (type === REPLY_ERROR) {
+  if (type === REPLY_ERROR || type === REPLY_SCRIPT_ERROR) {
     const payload = buffer.subarray(cursor, cursor + countOrLen);
     cursor += countOrLen;
-    return { value: { err: Buffer.from(payload) }, offset: cursor };
+    return { value: splitErrorPayload(payload), offset: cursor };
   }
 
   if (type === REPLY_ARRAY) {
@@ -268,7 +329,9 @@ export function decodeReply(buffer: Buffer, offset = 0): { value: ReplyValue; of
  * encodeArgArray(["SET", "key", "value"]);  // Strings are UTF-8 encoded
  * ```
  */
-export function encodeArgArray(args: Array<Buffer | Uint8Array | string>): Buffer {
+export function encodeArgArray(
+  args: Array<Buffer | Uint8Array | string>,
+): Buffer {
   const parts: Buffer[] = [];
 
   // Write argument count
@@ -328,7 +391,9 @@ export function packPtrLen(ptr: number, len: number): bigint {
  * unpackPtrLen({ ptr: 0x1000, len: 256 }); // { ptr: 0x1000, len: 256 }
  * ```
  */
-export function unpackPtrLen(result: bigint | number[] | { ptr: number; len: number }): {
+export function unpackPtrLen(
+  result: bigint | number[] | { ptr: number; len: number },
+): {
   ptr: number;
   len: number;
 } {
@@ -340,7 +405,12 @@ export function unpackPtrLen(result: bigint | number[] | { ptr: number; len: num
   if (Array.isArray(result)) {
     return { ptr: Number(result[0]), len: Number(result[1]) };
   }
-  if (result && typeof result === "object" && "ptr" in result && "len" in result) {
+  if (
+    result &&
+    typeof result === "object" &&
+    "ptr" in result &&
+    "len" in result
+  ) {
     return { ptr: Number(result.ptr), len: Number(result.len) };
   }
   throw new Error("Unexpected PtrLen return type");

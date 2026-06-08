@@ -216,9 +216,9 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
 
 static int redis_call_common(lua_State *L, int raise_on_error) {
   int argc = lua_gettop(L);
-  if (argc == 0) {
-    return luaL_error(L, "ERR redis.call requires arguments");
-  }
+  /* A zero-arg redis.call()/redis.pcall() is dispatched to the host with an
+   * empty argument list so the host owns the exact error message and the
+   * call/pcall distinction (raise_on_error) is preserved natively. */
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
