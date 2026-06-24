@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-IMAGE_NAME="emscripten/emsdk:3.1.56"
+IMAGE_NAME="emscripten/emsdk:6.0.1"
 
-# Default to amd64 since emscripten/emsdk does not publish arm64 images.
-PLATFORM="${DOCKER_PLATFORM:---platform=linux/amd64}"
+# emscripten/emsdk publishes multi-arch images (amd64 + arm64), so build on the
+# host architecture natively — no qemu emulation (which segfaults the compiler on
+# Apple Silicon). Override DOCKER_PLATFORM to force a specific arch if needed.
+PLATFORM="${DOCKER_PLATFORM:-}"
 
 # Run the build inside Docker, mounting the repo.
 docker run $PLATFORM --rm -v "$ROOT_DIR":/work -w /work "$IMAGE_NAME" \
