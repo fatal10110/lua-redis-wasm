@@ -36,15 +36,18 @@
  * @module loader
  */
 
-import fs from "node:fs";
-import fsPromises from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
 import type { LoadOptions } from "./types.js";
 
-/** Directory containing this module, resolved at load time */
-const currentDir = path.dirname(fileURLToPath(import.meta.url));
+// Browser-safe by construction: NO top-level `node:*` imports. The Node-only
+// path resolution and filesystem reads are loaded via dynamic `import("node:*")`
+// inside `isNode` branches, so a browser bundler (Vite/Rollup) never has to
+// resolve a Node builtin to put this module in the graph. The browser branch
+// instead resolves the co-located Emscripten glue + `.wasm` via `import.meta.url`
+// so the bundler emits them as assets.
+const isNode =
+  typeof process !== "undefined" &&
+  process.versions != null &&
+  process.versions.node != null;
 
 /**
  * Type definition for the Emscripten module exports.
@@ -167,53 +170,46 @@ type EmscriptenModuleFactory = (options: {
 }) => Promise<WasmExports>;
 
 /**
- * Resolves the first existing path from a list of candidates.
+ * Node-only: resolve a co-located asset, preferring the built dist/ layout and
+ * falling back to the dev wasm/build/ layout. Dynamic-imports node builtins so
+ * this module stays browser-safe.
  *
- * Used for fallback path resolution - tries each candidate in order
- * and returns the first one that exists on the filesystem.
- *
- * @param candidates - Array of file paths to check
- * @returns First existing path, or first candidate if none exist
+ * @param file - Bare asset filename, e.g. "redis_lua.wasm"
+ * @returns Absolute filesystem path to the first existing candidate
  */
-function resolveExistingPath(candidates: string[]): string {
-  for (const candidate of candidates) {
+async function nodeAssetPath(file: string): Promise<string> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const rel of [`./${file}`, `../wasm/build/${file}`]) {
+    const candidate = path.resolve(here, rel);
     if (fs.existsSync(candidate)) {
       return candidate;
     }
   }
-  return candidates[0];
+  return path.resolve(here, `./${file}`);
 }
 
 /**
- * Returns the default path to the WASM binary.
+ * Returns the default location of the WASM binary as a URL href co-located with
+ * this module (e.g. `file://.../dist/redis_lua.wasm` in Node, the served asset
+ * URL in a browser bundle). String-returning and browser-safe.
  *
- * Checks for the bundled WASM file in the dist/ directory first,
- * then falls back to wasm/build/ for development environments.
- *
- * @returns Absolute path to the WASM binary
+ * @returns URL href of the bundled WASM binary
  */
 export function defaultWasmPath(): string {
-  const here = currentDir;
-  return resolveExistingPath([
-    path.resolve(here, "./redis_lua.wasm"),
-    path.resolve(here, "../wasm/build/redis_lua.wasm")
-  ]);
+  return new URL("./redis_lua.wasm", import.meta.url).href;
 }
 
 /**
- * Returns the default path to the Emscripten JS glue module.
+ * Returns the default location of the Emscripten JS glue module as a URL href
+ * co-located with this module. String-returning and browser-safe.
  *
- * Checks for the bundled module in dist/ first, then falls back
- * to wasm/build/ for development environments.
- *
- * @returns Absolute path to the JS module
+ * @returns URL href of the bundled JS glue module
  */
 export function defaultModulePath(): string {
-  const here = currentDir;
-  return resolveExistingPath([
-    path.resolve(here, "./redis_lua.mjs"),
-    path.resolve(here, "../wasm/build/redis_lua.mjs")
-  ]);
+  return new URL("./redis_lua.mjs", import.meta.url).href;
 }
 
 /**
@@ -248,28 +244,14 @@ export async function loadModule(
   options: LoadOptions,
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
-  // Resolve module and WASM paths
-  const modulePath = options.modulePath ?? defaultModulePath();
-  const moduleUrl = pathToFileURL(modulePath).href;
-  // Dynamic import works in both ESM and CJS (Node.js 12+)
-  const imported = await import(moduleUrl);
-  const moduleFactory = (imported.default ?? imported) as EmscriptenModuleFactory;
-  const wasmPath = options.wasmPath ?? defaultWasmPath();
-
-  // Load WASM binary from provided bytes or file
-  const wasmBinary = options.wasmBytes
-    ? options.wasmBytes
-    : new Uint8Array(await fsPromises.readFile(wasmPath));
+  const moduleFactory = await loadGlueFactory(options);
+  const wasmBinary = await loadWasmBinary(options);
 
   // Instantiate the Emscripten module with custom WASM instantiation
   const module = await moduleFactory({
-    // Override file location for WASM loading
-    locateFile: (file) => {
-      if (file.endsWith(".wasm")) {
-        return wasmPath;
-      }
-      return file;
-    },
+    // wasmBinary + the custom instantiateWasm below fully drive instantiation,
+    // so locateFile is never consulted for the .wasm — pass other files through.
+    locateFile: (file) => file,
     wasmBinary,
 
     // Custom instantiation to inject host imports
@@ -293,4 +275,62 @@ export async function loadModule(
   });
 
   return { module, exports: module };
+}
+
+/**
+ * Load the Emscripten glue module factory.
+ * - Browser: literal `import("./redis_lua.mjs")` so the bundler statically emits
+ *   and resolves the glue as an asset.
+ * - Node: dynamic import of the resolved `file://` URL (dist/ or dev wasm/build/),
+ *   honoring an explicit `options.modulePath`.
+ */
+async function loadGlueFactory(
+  options: LoadOptions
+): Promise<EmscriptenModuleFactory> {
+  if (!isNode) {
+    if (options.modulePath) {
+      // Explicit URL (e.g. a jsdelivr CDN URL). Fully dynamic so the bundler
+      // doesn't try to resolve/emit it; @vite-ignore silences the warning.
+      const imported = await import(/* @vite-ignore */ options.modulePath);
+      return (imported.default ?? imported) as EmscriptenModuleFactory;
+    }
+    // Bundled default: literal specifier so the bundler emits + resolves the glue
+    // as a co-located asset.
+    // @ts-ignore - Emscripten glue has no type declarations; resolved by the bundler.
+    const imported = await import("./redis_lua.mjs");
+    return (imported.default ?? imported) as EmscriptenModuleFactory;
+  }
+  const { pathToFileURL } = await import("node:url");
+  const modulePath = options.modulePath ?? (await nodeAssetPath("redis_lua.mjs"));
+  const moduleUrl = /^[a-z]+:\/\//i.test(modulePath)
+    ? modulePath
+    : pathToFileURL(modulePath).href;
+  const imported = await import(moduleUrl);
+  return (imported.default ?? imported) as EmscriptenModuleFactory;
+}
+
+/**
+ * Load the WASM binary bytes.
+ * - `options.wasmBytes` always wins (lets callers bypass any file/network read).
+ * - Browser: fetch the co-located asset resolved via `import.meta.url`.
+ * - Node: read the resolved file (`options.wasmPath`, else dist/ or dev wasm/build/).
+ */
+async function loadWasmBinary(options: LoadOptions): Promise<Uint8Array> {
+  if (options.wasmBytes) {
+    return options.wasmBytes;
+  }
+  if (!isNode) {
+    // Explicit URL (e.g. jsdelivr) wins; otherwise the co-located bundled asset.
+    const wasmUrl = options.wasmPath ?? new URL("./redis_lua.wasm", import.meta.url);
+    const response = await fetch(wasmUrl);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch redis_lua.wasm: ${response.status} ${response.statusText}`
+      );
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  const { readFile } = await import("node:fs/promises");
+  const wasmPath = options.wasmPath ?? (await nodeAssetPath("redis_lua.wasm"));
+  return new Uint8Array(await readFile(wasmPath));
 }
