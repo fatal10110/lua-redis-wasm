@@ -45,23 +45,25 @@
  * ```
  */
 /**
- * Machine-readable detail for engine-originated errors whose user-facing wording
- * is Redis-version-specific. The default `err` message already carries a valid
- * (modern Redis) wording, so standalone consumers need not look at this; a host
- * that targets older Redis versions can use it to re-render the message.
+ * Machine-readable detail attached to every script-aborting error reply. The
+ * engine composes NO user-facing prose; it classifies the error and lets the
+ * host pick the wording (which for these is Redis-version-specific).
  *
- * - `global-write`: a script tried to create/modify a global. `name` is the
- *   variable. Redis >= 7.0 reports "Attempt to modify a readonly table";
- *   Redis < 7.0 reports "Script attempted to create global variable '<name>'".
- *
- * `line` (1-based script line) and `sha` (the script's SHA1, already computed by
- * the engine) let a host rebuild the full
- * `user_script:<line>: ... script: <sha>, on @user_script:<line>.` decoration
- * for the version-specific wording without recomputing anything.
+ * - `line` (1-based script line) and `sha` (the script's SHA1, already computed
+ *   by the engine) are always present.
+ * - `kind`/`name` are present only for errors the engine itself originates (the
+ *   globals protection). `kind` is an opaque machine tag the host maps to wording;
+ *   `name` is the variable involved. The reply's `err` carries the bare `kind`.
+ *   Known kinds:
+ *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
+ *     "Script attempted to access nonexistent global variable '<name>'".
+ *   - `global-write`: create/modify of a global. Redis >= 7.0:
+ *     "Attempt to modify a readonly table"; Redis < 7.0:
+ *     "Script attempted to create global variable '<name>'".
  */
 export type ReplyErrorMeta = {
-  kind: 'global-write';
-  name: string;
+  kind?: string;
+  name?: string;
   line: number;
   sha: string;
 };

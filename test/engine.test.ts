@@ -194,16 +194,14 @@ test("eval: Lua error format matches Redis format", async () => {
   const result = engine.eval(script);
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
-
-  // Should match Redis format: "user_script:N: message script: <sha>, on @user_script:N."
+  // Lua runtime error: err is Lua's raw message (line prefix, no decoration); the
+  // engine adds no prose, only line/sha metadata for the host to render with.
+  const r = result as { err: Buffer; meta?: { line: number; sha: string } };
+  const errStr = r.err.toString("utf8");
   assert.ok(errStr.startsWith("user_script:1:"), `Error should start with 'user_script:1:', got: ${errStr}`);
-  assert.ok(errStr.includes(" script: "), `Error should contain ' script: ', got: ${errStr}`);
-  assert.ok(errStr.includes(", on @user_script:1."), `Error should end with ', on @user_script:1.', got: ${errStr}`);
-
-  // SHA should be 40 hex chars
-  const shaMatch = errStr.match(/script: ([a-f0-9]{40}),/);
-  assert.ok(shaMatch, `Error should contain 40-char SHA hex, got: ${errStr}`);
+  assert.ok(!errStr.includes(" script: "), `Raw err should not be decorated, got: ${errStr}`);
+  assert.equal(r.meta?.line, 1);
+  assert.match(r.meta?.sha ?? "", /^[a-f0-9]{40}$/);
 });
 
 test("eval: Lua error on different line includes correct line number", async () => {
@@ -218,55 +216,50 @@ redis.nonexistent()  -- line 4
   const result = engine.eval(script);
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  const r = result as { err: Buffer; meta?: { line: number } };
 
-  // Should reference line 4
-  assert.ok(errStr.startsWith("user_script:4:"), `Error should start with 'user_script:4:', got: ${errStr}`);
-  assert.ok(errStr.includes(", on @user_script:4."), `Error should end with ', on @user_script:4.', got: ${errStr}`);
+  // Raw err references line 4; meta carries it for the host to decorate.
+  assert.ok(r.err.toString("utf8").startsWith("user_script:4:"), `Error should start with 'user_script:4:', got: ${r.err}`);
+  assert.equal(r.meta?.line, 4);
 });
 
-test("eval: accessing nonexistent global (print) errors like Redis", async () => {
+test("eval: reading a nonexistent global is classified as global-read", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(createTestHost());
-  const result = engine.eval("print('a')");
-
-  assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
-  assert.ok(
-    errStr.includes("Script attempted to access nonexistent global variable 'print'"),
-    `got: ${errStr}`,
-  );
-  assert.ok(errStr.startsWith("user_script:1:"), `got: ${errStr}`);
-});
-
-test("eval: creating a global errors like Redis (readonly table) with metadata", async () => {
-  await resolveWasmPath();
-  const module = await load();
-  const engine = module.create(createTestHost());
-  const result = engine.eval("x = 5") as {
+  const result = engine.eval("print('a')") as {
     err: Buffer;
     meta?: { kind: string; name: string; line: number; sha: string };
   };
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  // Default wording is the modern (Redis 7) message; no coded marker leaks out.
-  const errStr = result.err.toString("utf8");
-  assert.ok(
-    errStr.includes("Attempt to modify a readonly table"),
-    `got: ${errStr}`,
-  );
-  assert.ok(!errStr.includes("__RLUA_E__"), `marker leaked: ${errStr}`);
-  // Structured metadata lets a host re-render the pre-7.0 wording. The sha is the
-  // one the engine already computed (also present in the decorated message).
+  // Engine emits a machine kind, not wording; no marker leaks into err.
+  assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
+  assert.equal(result.meta?.kind, "global-read");
+  assert.equal(result.meta?.name, "print");
+  assert.equal(result.meta?.line, 1);
+  assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
+});
+
+test("eval: creating a global is classified as global-write", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("x = 5") as {
+    err: Buffer;
+    code?: Buffer;
+    meta?: { kind: string; name: string; line: number; sha: string };
+  };
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  // The engine composes no user-facing wording; it forwards a machine kind and
+  // the host maps it (e.g. to "Attempt to modify a readonly table"). No leak.
+  assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
   assert.equal(result.meta?.kind, "global-write");
   assert.equal(result.meta?.name, "x");
   assert.equal(result.meta?.line, 1);
   assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
-  assert.ok(
-    errStr.includes(`script: ${result.meta?.sha},`),
-    `sha mismatch: ${errStr}`,
-  );
+  assert.equal(result.code?.toString("utf8"), "ERR");
 });
 
 test("eval: non-integer number return is truncated to integer", async () => {
@@ -929,7 +922,7 @@ test("redis.call() with no args is delegated to the host", async () => {
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
-test("redis.call command error is decorated and code is split out", async () => {
+test("redis.call command error passes through with code and line/sha metadata", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(
@@ -943,14 +936,22 @@ test("redis.call command error is decorated and code is split out", async () => 
     }),
   );
 
-  const result = engine.eval("return redis.call('GET', 'k')") as { err: Buffer; code?: Buffer };
+  const result = engine.eval("return redis.call('GET', 'k')") as {
+    err: Buffer;
+    code?: Buffer;
+    meta?: { line: number; sha: string; kind?: string };
+  };
   assert.ok(result && typeof result === "object" && "err" in result);
-  // Command errors have no user_script prefix -> reported at line 1, code preserved.
-  assert.match(
+  // Command errors already carry their message + code; the engine passes them
+  // through undecorated (no kind), attaching only line/sha for the host.
+  assert.equal(
     result.err.toString("utf8"),
-    /^Operation against a key holding the wrong kind of value script: [a-f0-9]{40}, on @user_script:1\.$/,
+    "Operation against a key holding the wrong kind of value",
   );
   assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+  assert.equal(result.meta?.line, 1);
+  assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
+  assert.equal(result.meta?.kind, undefined);
 });
 
 test("redis.pcall error value returned by the script is not decorated", async () => {

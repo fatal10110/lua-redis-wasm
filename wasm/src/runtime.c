@@ -306,18 +306,17 @@ static void disable_non_determinism(lua_State *L) {
 // Globals protection: mirror real Redis. Reading a global that does not exist,
 // or creating a new one from a script, raises an error instead of silently
 // returning nil / mutating the shared environment.
+//
+// Both cases emit a coded marker `__RLUA_E__:<kind>:<name>` rather than a
+// user-facing string: the wording is Redis-version-specific and is the host's
+// to choose. The TS layer forwards { kind, name } to the host; it composes no
+// prose. `name` is the global at __index/__newindex key (stack index 2).
 static int protect_globals_index(lua_State *L) {
   const char *name = lua_tostring(L, 2);
-  return luaL_error(L, "Script attempted to access nonexistent global variable '%s'",
-                    name ? name : "?");
+  return luaL_error(L, "__RLUA_E__:global-read:%s", name ? name : "?");
 }
 
 static int protect_globals_newindex(lua_State *L) {
-  // The pre-7.0 and 7.0+ wordings for this differ (and the older one references
-  // the variable name), so emit a coded marker carrying the name. The TS layer
-  // renders the default (Redis 7) message and attaches structured metadata that
-  // a host can use to pick the version-specific wording. The name is the global
-  // being assigned (the __newindex key at stack index 2).
   const char *name = lua_tostring(L, 2);
   return luaL_error(L, "__RLUA_E__:global-write:%s", name ? name : "?");
 }
