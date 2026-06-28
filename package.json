@@ -24,14 +24,18 @@
     "url": "https://github.com/fatal10110/lua-redis-wasm/issues"
   },
   "homepage": "https://github.com/fatal10110/lua-redis-wasm#readme",
-  "main": "dist/index.cjs",
-  "module": "dist/index.mjs",
+  "main": "dist/index.node.cjs",
+  "module": "dist/index.node.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs"
+      "browser": "./dist/index.browser.mjs",
+      "node": {
+        "import": "./dist/index.node.mjs",
+        "require": "./dist/index.node.cjs"
+      },
+      "default": "./dist/index.node.mjs"
     }
   },
   "sideEffects": false,
@@ -51,6 +55,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
+    "@rollup/plugin-alias": "^6.0.0",
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.0",
