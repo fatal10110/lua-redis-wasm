@@ -129,6 +129,17 @@ static PtrLen reply_script_error(const char *msg, size_t len) {
   return out;
 }
 
+static PtrLen reply_null(void) {
+  ReplyBuffer rb;
+  rb_init(&rb);
+  if (rb_write_header(&rb, REPLY_NULL, 0) != 0) {
+    return (PtrLen){0, 0};
+  }
+  PtrLen out = rb_finalize(&rb);
+  free(rb.data);
+  return out;
+}
+
 static PtrLen reply_status(const char *msg, size_t len) {
   ReplyBuffer rb;
   rb_init(&rb);
@@ -148,39 +159,44 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb);
 
 static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   size_t len = 0;
-  int has_ok = 0;
-  int has_err = 0;
   const char *msg = NULL;
+
+  // Redis checks `err` before `ok`: a table carrying both fields is an error.
+  lua_getfield(L, idx, "err");
+  if (lua_isstring(L, -1)) {
+    msg = lua_tolstring(L, -1, &len);
+    int rc = rb_write_header(rb, REPLY_ERROR, (uint32_t)len);
+    if (rc == 0) {
+      rc = rb_append(rb, msg, len);
+    }
+    lua_pop(L, 1);
+    return rc;
+  }
+  lua_pop(L, 1);
 
   lua_getfield(L, idx, "ok");
   if (lua_isstring(L, -1)) {
     msg = lua_tolstring(L, -1, &len);
-    has_ok = 1;
+    int rc = rb_write_header(rb, REPLY_STATUS, (uint32_t)len);
+    if (rc == 0) {
+      rc = rb_append(rb, msg, len);
+    }
+    lua_pop(L, 1);
+    return rc;
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "err");
-  if (!has_ok && lua_isstring(L, -1)) {
-    msg = lua_tolstring(L, -1, &len);
-    has_err = 1;
-  }
-  lua_pop(L, 1);
-
-  if (has_ok) {
-    if (rb_write_header(rb, REPLY_STATUS, (uint32_t)len) != 0) {
-      return -1;
+  // Array reply: iterate from index 1 and stop at the first nil, like Redis.
+  size_t count = 0;
+  for (;;) {
+    lua_rawgeti(L, idx, (int)count + 1);
+    int is_nil = lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (is_nil) {
+      break;
     }
-    return rb_append(rb, msg, len);
+    count++;
   }
-
-  if (has_err) {
-    if (rb_write_header(rb, REPLY_ERROR, (uint32_t)len) != 0) {
-      return -1;
-    }
-    return rb_append(rb, msg, len);
-  }
-
-  size_t count = lua_objlen(L, idx);
   if (rb_write_header(rb, REPLY_ARRAY, (uint32_t)count) != 0) {
     return -1;
   }
@@ -201,25 +217,15 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
     case LUA_TNIL:
       return rb_write_header(rb, REPLY_NULL, 0);
     case LUA_TNUMBER: {
+      // Real Redis converts a Lua number return value to an integer reply,
+      // truncating any fractional part (e.g. `return 3.7` -> 3).
       lua_Number num = lua_tonumber(L, idx);
-      lua_Number int_part = (lua_Number)(int64_t)num;
-      if (num == int_part) {
-        if (rb_write_header(rb, REPLY_INT, 8) != 0) {
-          return -1;
-        }
-        uint8_t payload[8];
-        write_i64_le(payload, (int64_t)num);
-        return rb_append(rb, payload, sizeof(payload));
-      }
-      size_t len = 0;
-      const char *str = lua_tolstring(L, idx, &len);
-      if (!str) {
+      if (rb_write_header(rb, REPLY_INT, 8) != 0) {
         return -1;
       }
-      if (rb_write_header(rb, REPLY_BULK, (uint32_t)len) != 0) {
-        return -1;
-      }
-      return rb_append(rb, str, len);
+      uint8_t payload[8];
+      write_i64_le(payload, (int64_t)num);
+      return rb_append(rb, payload, sizeof(payload));
     }
     case LUA_TBOOLEAN:
       if (lua_toboolean(L, idx)) {
@@ -283,7 +289,6 @@ static void disable_non_determinism(lua_State *L) {
   remove_global(L, "collectgarbage");
   remove_global(L, "gcinfo");
   remove_global(L, "newproxy");
-  remove_global(L, "coroutine");
   remove_package_entry(L, "io");
   remove_package_entry(L, "os");
   remove_package_entry(L, "debug");
@@ -308,9 +313,9 @@ static int protect_globals_index(lua_State *L) {
 }
 
 static int protect_globals_newindex(lua_State *L) {
-  const char *name = lua_tostring(L, 2);
-  return luaL_error(L, "Script attempted to create global variable '%s'",
-                    name ? name : "?");
+  // Real Redis exposes the globals table as a readonly table; any write raises
+  // this exact message (with no variable name).
+  return luaL_error(L, "Attempt to modify a readonly table");
 }
 
 static void enable_globals_protection(lua_State *L) {
@@ -489,7 +494,8 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   }
   int top = lua_gettop(g_state);
   if (top == 0) {
-    return reply_status("OK", 2);
+    // A script with no return value replies with nil, matching real Redis.
+    return reply_null();
   }
   ReplyBuffer rb;
   rb_init(&rb);
@@ -543,7 +549,8 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   }
   int top = lua_gettop(g_state);
   if (top == 0) {
-    return reply_status("OK", 2);
+    // A script with no return value replies with nil, matching real Redis.
+    return reply_null();
   }
   ReplyBuffer rb;
   rb_init(&rb);

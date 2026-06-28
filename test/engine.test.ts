@@ -240,7 +240,7 @@ test("eval: accessing nonexistent global (print) errors like Redis", async () =>
   assert.ok(errStr.startsWith("user_script:1:"), `got: ${errStr}`);
 });
 
-test("eval: creating a global errors like Redis", async () => {
+test("eval: creating a global errors like Redis (readonly table)", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(createTestHost());
@@ -249,7 +249,52 @@ test("eval: creating a global errors like Redis", async () => {
   assert.ok(result && typeof result === "object" && "err" in result);
   const errStr = (result as { err: Buffer }).err.toString("utf8");
   assert.ok(
-    errStr.includes("Script attempted to create global variable 'x'"),
+    errStr.includes("Attempt to modify a readonly table"),
+    `got: ${errStr}`,
+  );
+});
+
+test("eval: non-integer number return is truncated to integer", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return 3.7"), 3);
+  assert.equal(engine.eval("return 3.3"), 3);
+});
+
+test("eval: script with no return value replies with nil", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("local a = 1"), null);
+  assert.equal(engine.eval("return"), null);
+});
+
+test("eval: table with both ok and err is an error (err wins)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("return {ok='STAT', err='ERRR'}");
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal((result as { err: Buffer }).err.toString("utf8"), "ERRR");
+});
+
+test("eval: coroutine library remains available", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal((engine.eval("return type(coroutine)") as Buffer).toString(), "table");
+});
+
+test("redis.call: boolean argument is rejected like Redis", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("return redis.call('set','k',true)");
+  assert.ok(result && typeof result === "object" && "err" in result);
+  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  assert.ok(
+    errStr.includes("must be strings or integers"),
     `got: ${errStr}`,
   );
 });

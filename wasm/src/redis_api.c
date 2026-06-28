@@ -99,17 +99,10 @@ static int arg_to_bytes(lua_State *L, int idx, const char **out, size_t *len) {
   switch (type) {
     case LUA_TSTRING:
     case LUA_TNUMBER: {
+      // Real Redis accepts only strings and numbers as command arguments;
+      // numbers are stringified (e.g. 3.3 -> "3.3"). Booleans, nil and tables
+      // are rejected by the caller.
       *out = lua_tolstring(L, idx, len);
-      return 0;
-    }
-    case LUA_TBOOLEAN: {
-      if (lua_toboolean(L, idx)) {
-        *out = "1";
-        *len = 1;
-      } else {
-        *out = "0";
-        *len = 1;
-      }
       return 0;
     }
     default:
@@ -222,7 +215,9 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
-    return luaL_error(L, "ERR invalid argument to redis.call");
+    // Real Redis raises this without a "user_script:N:" position prefix.
+    lua_pushliteral(L, "Lua redis lib command arguments must be strings or integers");
+    return lua_error(L);
   }
   PtrLen reply = raise_on_error ? host_redis_call((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len)
                                 : host_redis_pcall((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len);
