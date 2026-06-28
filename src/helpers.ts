@@ -3,7 +3,7 @@
  * @module helpers
  */
 
-import { createHash } from "node:crypto";
+import { sha1Hex } from "./sha1.js";
 import { encodeReplyValue, packPtrLen } from "./codec.js";
 import type { ReplyValue } from "./types.js";
 import type { WasmExports } from "./loader.js";
@@ -150,6 +150,5 @@ export function decodeArgs(buf: Buffer): Buffer[] {
  * Returns 40-char hex string as Buffer.
  */
 export function computeSha1Hex(data: Buffer): Buffer {
-  const hex = createHash("sha1").update(data).digest("hex");
-  return Buffer.from(hex, "utf8");
+  return Buffer.from(sha1Hex(data), "utf8");
 }

@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Dedicated **browser** build with no `node:*` imports, selected automatically via
+  the `browser` condition in `package.json` `exports`. Browser bundlers (Vite,
+  webpack, Rollup) now resolve the package without aliasing or stubbing `node:fs`,
+  `node:fs/promises`, `node:path`, `node:url`, or `node:crypto`. The Node build is
+  unchanged in behavior and selected via the `node` condition.
+
+### Changed
+
+- The loader is split into `loader.ts` (Node: reads glue/`.wasm` from disk) and
+  `loader.browser.ts` (browser: `fetch`), over a shared platform-agnostic
+  `loader-core.ts`. The browser build aliases `./loader.js` to the browser loader,
+  so no Node builtin enters the browser graph.
+- SHA-1 (for EVALSHA digests) now uses a dependency-free synchronous implementation
+  (`sha1.ts`) instead of `node:crypto`, so the browser build needs no `crypto`
+  polyfill. Output is byte-for-byte identical to `crypto.createHash("sha1")`.
+- Build outputs renamed: `dist/index.node.{mjs,cjs}` (Node) and
+  `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
+  is unchanged; only internal file names moved.
+
 ## [1.3.0] - 2026-06-08
 
 ### Added
