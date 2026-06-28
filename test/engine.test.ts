@@ -225,6 +225,35 @@ redis.nonexistent()  -- line 4
   assert.ok(errStr.includes(", on @user_script:4."), `Error should end with ', on @user_script:4.', got: ${errStr}`);
 });
 
+test("eval: accessing nonexistent global (print) errors like Redis", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("print('a')");
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  assert.ok(
+    errStr.includes("Script attempted to access nonexistent global variable 'print'"),
+    `got: ${errStr}`,
+  );
+  assert.ok(errStr.startsWith("user_script:1:"), `got: ${errStr}`);
+});
+
+test("eval: creating a global errors like Redis", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("x = 5");
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  assert.ok(
+    errStr.includes("Script attempted to create global variable 'x'"),
+    `got: ${errStr}`,
+  );
+});
+
 // =============================================================================
 // evalWithArgs() tests
 // =============================================================================

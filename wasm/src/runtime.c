@@ -276,6 +276,14 @@ static void disable_non_determinism(lua_State *L) {
   remove_global(L, "require");
   remove_global(L, "dofile");
   remove_global(L, "loadfile");
+  // Base-lib globals real Redis does not expose to scripts. With globals
+  // protection installed, accessing these raises the nonexistent-global error.
+  remove_global(L, "print");
+  remove_global(L, "loadstring");
+  remove_global(L, "collectgarbage");
+  remove_global(L, "gcinfo");
+  remove_global(L, "newproxy");
+  remove_global(L, "coroutine");
   remove_package_entry(L, "io");
   remove_package_entry(L, "os");
   remove_package_entry(L, "debug");
@@ -288,6 +296,43 @@ static void disable_non_determinism(lua_State *L) {
     lua_setfield(L, -2, "randomseed");
   }
   lua_pop(L, 1);
+}
+
+// Globals protection: mirror real Redis. Reading a global that does not exist,
+// or creating a new one from a script, raises an error instead of silently
+// returning nil / mutating the shared environment.
+static int protect_globals_index(lua_State *L) {
+  const char *name = lua_tostring(L, 2);
+  return luaL_error(L, "Script attempted to access nonexistent global variable '%s'",
+                    name ? name : "?");
+}
+
+static int protect_globals_newindex(lua_State *L) {
+  const char *name = lua_tostring(L, 2);
+  return luaL_error(L, "Script attempted to create global variable '%s'",
+                    name ? name : "?");
+}
+
+static void enable_globals_protection(lua_State *L) {
+  lua_pushvalue(L, LUA_GLOBALSINDEX);
+  lua_newtable(L);
+  lua_pushcfunction(L, protect_globals_index);
+  lua_setfield(L, -2, "__index");
+  lua_pushcfunction(L, protect_globals_newindex);
+  lua_setfield(L, -2, "__newindex");
+  lua_setmetatable(L, -2);
+  lua_pop(L, 1);
+}
+
+// Set a global by raw assignment, bypassing the protection metatable above.
+// Value to assign must be on top of the stack; it is popped.
+static void raw_setglobal(lua_State *L, const char *name) {
+  lua_pushvalue(L, LUA_GLOBALSINDEX); // [.., value, G]
+  lua_insert(L, -2);                  // [.., G, value]
+  lua_pushstring(L, name);            // [.., G, value, name]
+  lua_insert(L, -2);                  // [.., G, name, value]
+  lua_rawset(L, -3);                  // G[name] = value; pops name, value -> [.., G]
+  lua_pop(L, 1);                      // [..]
 }
 
 static void luaLoadLib(lua_State *L, const char *name, lua_CFunction func) {
@@ -309,14 +354,14 @@ static void load_redis_modules(lua_State *L) {
 }
 
 static void open_allowed_libs(lua_State *L) {
+  // luaopen_base pushes TWO tables (the globals table and the coroutine table);
+  // the rest push one. Clear the stack afterwards so no library table is left
+  // behind to masquerade as a script return value.
   luaopen_base(L);
-  lua_pop(L, 1);
   luaopen_table(L);
-  lua_pop(L, 1);
   luaopen_string(L);
-  lua_pop(L, 1);
   luaopen_math(L);
-  lua_pop(L, 1);
+  lua_settop(L, 0);
   disable_non_determinism(L);
   load_redis_modules(L);
 }
@@ -375,16 +420,16 @@ static int set_keys_argv(lua_State *L, const uint8_t *buf, size_t len, uint32_t 
     offset += item_len;
   }
 
-  lua_setglobal(L, "ARGV");
-  lua_setglobal(L, "KEYS");
+  raw_setglobal(L, "ARGV");
+  raw_setglobal(L, "KEYS");
   return 0;
 }
 
 static void set_empty_keys_argv(lua_State *L) {
   lua_createtable(L, 0, 0);
-  lua_setglobal(L, "KEYS");
+  raw_setglobal(L, "KEYS");
   lua_createtable(L, 0, 0);
-  lua_setglobal(L, "ARGV");
+  raw_setglobal(L, "ARGV");
 }
 
 int32_t init(void) {
@@ -398,6 +443,7 @@ int32_t init(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
@@ -414,6 +460,7 @@ int32_t reset(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
