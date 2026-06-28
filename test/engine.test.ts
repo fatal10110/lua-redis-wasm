@@ -240,17 +240,32 @@ test("eval: accessing nonexistent global (print) errors like Redis", async () =>
   assert.ok(errStr.startsWith("user_script:1:"), `got: ${errStr}`);
 });
 
-test("eval: creating a global errors like Redis (readonly table)", async () => {
+test("eval: creating a global errors like Redis (readonly table) with metadata", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(createTestHost());
-  const result = engine.eval("x = 5");
+  const result = engine.eval("x = 5") as {
+    err: Buffer;
+    meta?: { kind: string; name: string; line: number; sha: string };
+  };
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  // Default wording is the modern (Redis 7) message; no coded marker leaks out.
+  const errStr = result.err.toString("utf8");
   assert.ok(
     errStr.includes("Attempt to modify a readonly table"),
     `got: ${errStr}`,
+  );
+  assert.ok(!errStr.includes("__RLUA_E__"), `marker leaked: ${errStr}`);
+  // Structured metadata lets a host re-render the pre-7.0 wording. The sha is the
+  // one the engine already computed (also present in the decorated message).
+  assert.equal(result.meta?.kind, "global-write");
+  assert.equal(result.meta?.name, "x");
+  assert.equal(result.meta?.line, 1);
+  assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
+  assert.ok(
+    errStr.includes(`script: ${result.meta?.sha},`),
+    `sha mismatch: ${errStr}`,
   );
 });
 

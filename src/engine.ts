@@ -51,6 +51,7 @@ import type {
   EngineLimits,
   LoadOptions,
   ReplyValue,
+  ReplyErrorMeta,
   RedisHost,
   RedisCallHandler,
   RedisLogHandler,
@@ -354,14 +355,48 @@ function decorateScriptError(
   value: { err: Buffer; code?: Buffer },
   sha: string,
 ): ReplyValue {
-  const errStr = value.err.toString("utf8");
+  let errStr = value.err.toString("utf8");
   let line = "1";
   if (errStr.startsWith("user_script:")) {
     const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
     line = colonIdx > 12 ? errStr.substring(12, colonIdx) : "1";
   }
+
+  // Coded sandbox markers carry no user-facing wording. The protection is a
+  // readonly globals table, so its native error is the modern Redis (7.0+)
+  // "readonly table" message; render that as the default. Structured metadata is
+  // attached below so a host targeting an older Redis can re-render instead.
+  const marker = parseSandboxMarker(errStr);
+  if (marker) {
+    errStr = `user_script:${line}: Attempt to modify a readonly table`;
+  }
+
   const formatted = `${errStr} script: ${sha}, on @user_script:${line}.`;
-  return { err: Buffer.from(formatted, "utf8"), code: value.code };
+  const decorated: { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta } = {
+    err: Buffer.from(formatted, "utf8"),
+    // Script-aborting errors are reported with an explicit code so the host never
+    // has to infer one: a propagated command code (e.g. WRONGTYPE) is preserved,
+    // otherwise the default "ERR" is used (matching real Redis runtime errors).
+    code: value.code ?? Buffer.from("ERR", "utf8"),
+  };
+  if (marker) {
+    decorated.meta = { ...marker, line: Number(line), sha };
+  }
+  return decorated;
+}
+
+/**
+ * Recognizes engine-emitted sandbox error markers (see runtime.c) and extracts
+ * their structured fields. Returns undefined for ordinary error messages.
+ */
+function parseSandboxMarker(
+  errStr: string,
+): { kind: "global-write"; name: string } | undefined {
+  const match = errStr.match(/__RLUA_E__:global-write:(.*)$/s);
+  if (match) {
+    return { kind: "global-write", name: match[1] };
+  }
+  return undefined;
 }
 
 /**

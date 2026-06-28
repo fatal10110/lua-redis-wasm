@@ -44,13 +44,35 @@
  * const arr: ReplyValue = [1, Buffer.from("a"), null];
  * ```
  */
+/**
+ * Machine-readable detail for engine-originated errors whose user-facing wording
+ * is Redis-version-specific. The default `err` message already carries a valid
+ * (modern Redis) wording, so standalone consumers need not look at this; a host
+ * that targets older Redis versions can use it to re-render the message.
+ *
+ * - `global-write`: a script tried to create/modify a global. `name` is the
+ *   variable. Redis >= 7.0 reports "Attempt to modify a readonly table";
+ *   Redis < 7.0 reports "Script attempted to create global variable '<name>'".
+ *
+ * `line` (1-based script line) and `sha` (the script's SHA1, already computed by
+ * the engine) let a host rebuild the full
+ * `user_script:<line>: ... script: <sha>, on @user_script:<line>.` decoration
+ * for the version-specific wording without recomputing anything.
+ */
+export type ReplyErrorMeta = {
+  kind: 'global-write';
+  name: string;
+  line: number;
+  sha: string;
+};
+
 export type ReplyValue =
   | null
   | number
   | bigint
   | Buffer
   | { ok: Buffer }
-  | { err: Buffer; code?: Buffer }
+  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta }
   | ReplyValue[];
 
 /**

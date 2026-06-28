@@ -267,6 +267,15 @@ static int l_redis_sha1hex(lua_State *L) {
 static int l_redis_error_reply(lua_State *L) {
   size_t len = 0;
   const char *msg = luaL_checklstring(L, 1, &len);
+  // Real Redis prepends the default "ERR " code when the message carries no code
+  // of its own. The code is the leading token, so its absence is signalled by
+  // there being no space in the message.
+  if (memchr(msg, ' ', len) == NULL) {
+    lua_pushliteral(L, "ERR ");
+    lua_pushvalue(L, 1);
+    lua_concat(L, 2);
+    msg = lua_tolstring(L, -1, &len);
+  }
   return push_error_table(L, (const uint8_t *)msg, (uint32_t)len);
 }
 
