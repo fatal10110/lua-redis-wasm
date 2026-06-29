@@ -57,12 +57,13 @@
  *   Known kinds:
  *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
  *     "Script attempted to access nonexistent global variable '<name>'".
- *   - `global-write`: create/modify of a global. Redis >= 7.0:
- *     "Attempt to modify a readonly table"; Redis < 7.0:
- *     "Script attempted to create global variable '<name>'".
  *   - `command-arg-type`: a redis.call/pcall argument was not a string or number
  *     (no `name`). Redis: "Lua redis lib command arguments must be strings or
  *     integers".
+ *
+ * Note: writing a global has no kind. It is blocked by Lua's native readonly
+ * flag (as in real Redis), so the VM itself raises "Attempt to modify a readonly
+ * table"; that message passes through in `err` untouched.
  */
 export type ReplyErrorMeta = {
   kind?: string;

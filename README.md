@@ -160,8 +160,11 @@ lets the host render. When a script aborts, the reply carries:
 - `code` — the RESP error class (e.g. `WRONGTYPE`, default `ERR`); preserved from
   `redis.call`. See [Reply Types](#reply-types).
 - `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
-  originates (the globals protection). `kind` is an opaque machine tag the host maps
-  to wording (`global-read`, `global-write`); `name` is the variable involved.
+  classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
+  `redis.call` argument). `kind` is an opaque machine tag the host maps to wording;
+  `name` is the variable involved. Writing a global has no `kind`: it is blocked by
+  Lua's native readonly flag (as in real Redis), which recursively locks the whole
+  globals tree, so the VM itself raises "Attempt to modify a readonly table".
 - `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
   runtime / `redis.call` errors, the original message, passed through untouched.
 

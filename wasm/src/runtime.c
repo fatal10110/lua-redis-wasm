@@ -289,6 +289,11 @@ static void disable_non_determinism(lua_State *L) {
   remove_global(L, "collectgarbage");
   remove_global(L, "gcinfo");
   remove_global(L, "newproxy");
+  // Sandbox-escape vectors: setfenv swaps the running function's environment
+  // for a writable table and getfenv(0) reaches the real global table,
+  // bypassing globals protection. Redis removes these too (lua_builtins_deprecated).
+  remove_global(L, "setfenv");
+  remove_global(L, "getfenv");
   remove_package_entry(L, "io");
   remove_package_entry(L, "os");
   remove_package_entry(L, "debug");
@@ -303,44 +308,109 @@ static void disable_non_determinism(lua_State *L) {
   lua_pop(L, 1);
 }
 
-// Globals protection: mirror real Redis. Reading a global that does not exist,
-// or creating a new one from a script, raises an error instead of silently
-// returning nil / mutating the shared environment.
+// Globals protection: mirror real Redis exactly.
 //
-// Both cases emit a coded marker `__RLUA_E__:<kind>:<name>` rather than a
-// user-facing string: the wording is Redis-version-specific and is the host's
-// to choose. The TS layer forwards { kind, name } to the host; it composes no
-// prose. `name` is the global at __index/__newindex key (stack index 2).
+// READ of a nonexistent global -> a metatable __index handler (this function)
+// raises, matching Redis's luaSetErrorMetatable. We control this string, so we
+// emit a coded marker `__RLUA_E__:global-read:<name>`; the TS layer forwards
+// { kind, name } and the host picks the wording. `name` is the __index key
+// (stack index 2).
+//
+// WRITE of any global (creation or reassignment of an existing one) -> the
+// patched Lua's native readonly flag (lua_enablereadonlytable), enabled in
+// enable_globals_protection below. The VM raises "Attempt to modify a readonly
+// table" itself; that string is Redis's own (vendored), so it passes through
+// untouched. The flag blocks every write, including reassigning an existing
+// global -- which a __newindex metatable would miss.
 static int protect_globals_index(lua_State *L) {
   const char *name = lua_tostring(L, 2);
   return luaL_error(L, "__RLUA_E__:global-read:%s", name ? name : "?");
 }
 
-static int protect_globals_newindex(lua_State *L) {
-  const char *name = lua_tostring(L, 2);
-  return luaL_error(L, "__RLUA_E__:global-write:%s", name ? name : "?");
+// Recursively set the native readonly flag on the table at the top of the stack
+// and every table reachable from it (values and metatables). Mirrors Redis's
+// luaSetTableProtectionRecursively. The readonly check both guards against cycles
+// (e.g. _G._G points back at globals) and stops re-walking shared tables.
+static void protect_table_recursively(lua_State *L) {
+  if (lua_isreadonlytable(L, -1)) {
+    return;
+  }
+  lua_enablereadonlytable(L, -1, 1);
+
+  lua_checkstack(L, 2);
+  lua_pushnil(L);
+  while (lua_next(L, -2)) {
+    // Stack: table, key, value
+    if (lua_istable(L, -1)) {
+      protect_table_recursively(L);
+    }
+    lua_pop(L, 1); // pop value, keep key for the next iteration
+  }
+
+  if (lua_getmetatable(L, -1)) {
+    protect_table_recursively(L);
+    lua_pop(L, 1);
+  }
+}
+
+// Lock the metatables of basic types so a script cannot escape the sandbox by
+// mutating e.g. the shared string metatable. Mirrors Redis's
+// luaSetTableProtectionForBasicTypes.
+static void protect_basic_type_metatables(lua_State *L) {
+  static const int types[] = {LUA_TSTRING,   LUA_TNUMBER, LUA_TBOOLEAN, LUA_TNIL,
+                              LUA_TFUNCTION,  LUA_TTHREAD, LUA_TLIGHTUSERDATA};
+  for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+    switch (types[i]) {
+      case LUA_TSTRING: lua_pushstring(L, ""); break;
+      case LUA_TNUMBER: lua_pushnumber(L, 0); break;
+      case LUA_TBOOLEAN: lua_pushboolean(L, 0); break;
+      case LUA_TNIL: lua_pushnil(L); break;
+      case LUA_TFUNCTION: lua_pushcfunction(L, NULL); break;
+      case LUA_TTHREAD: lua_newthread(L); break;
+      case LUA_TLIGHTUSERDATA: lua_pushlightuserdata(L, (void *)L); break;
+    }
+    if (lua_getmetatable(L, -1)) {
+      protect_table_recursively(L);
+      lua_pop(L, 1); // pop metatable
+    }
+    lua_pop(L, 1); // pop dummy value
+  }
 }
 
 static void enable_globals_protection(lua_State *L) {
+  // Read protection: __index handler raises on reads of a nonexistent global.
   lua_pushvalue(L, LUA_GLOBALSINDEX);
   lua_newtable(L);
   lua_pushcfunction(L, protect_globals_index);
   lua_setfield(L, -2, "__index");
-  lua_pushcfunction(L, protect_globals_newindex);
-  lua_setfield(L, -2, "__newindex");
   lua_setmetatable(L, -2);
+
+  // Write protection: recursively lock the globals table and everything reachable
+  // from it (redis, cjson, string, math, ... and the metatable just set), matching
+  // real Redis. Must come after all engine setup (libs, redis API); raw_setglobal
+  // toggles the globals flag off for KEYS/ARGV injection at eval time.
+  protect_table_recursively(L);
   lua_pop(L, 1);
+  protect_basic_type_metatables(L);
 }
 
-// Set a global by raw assignment, bypassing the protection metatable above.
-// Value to assign must be on top of the stack; it is popped.
+// Set a global by raw assignment, bypassing write protection. Value to assign
+// must be on top of the stack; it is popped. Toggles the native readonly flag
+// off around the write and restores it (matching Redis's setup sequence).
 static void raw_setglobal(lua_State *L, const char *name) {
+  int was_ro = lua_isreadonlytable(L, LUA_GLOBALSINDEX);
+  if (was_ro) {
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 0);
+  }
   lua_pushvalue(L, LUA_GLOBALSINDEX); // [.., value, G]
   lua_insert(L, -2);                  // [.., G, value]
   lua_pushstring(L, name);            // [.., G, value, name]
   lua_insert(L, -2);                  // [.., G, name, value]
   lua_rawset(L, -3);                  // G[name] = value; pops name, value -> [.., G]
   lua_pop(L, 1);                      // [..]
+  if (was_ro) {
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 1);
+  }
 }
 
 static void luaLoadLib(lua_State *L, const char *name, lua_CFunction func) {

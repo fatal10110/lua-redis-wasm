@@ -152,7 +152,10 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
   *offset += 5;
   switch (type) {
     case REPLY_NULL:
-      lua_pushnil(L);
+      /* RESP null (bulk/multibulk) maps to Lua false, matching real Redis
+       * (redisProtocolToLuaType). This is the call path only; the return
+       * path still maps nil/false -> null. */
+      lua_pushboolean(L, 0);
       return 1;
     case REPLY_INT: {
       if (*offset + 8 > len) {
@@ -266,13 +269,30 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
+// Tests whether the message opens with a Redis error code: a space-terminated
+// leading token matching `[A-Z][A-Z0-9]*`. Mirrors isErrorCode in src/codec.ts.
+static int has_error_code(const char *msg, size_t len) {
+  const char *space = memchr(msg, ' ', len);
+  if (space == NULL || space == msg) {
+    return 0;
+  }
+  for (const char *p = msg; p < space; p++) {
+    unsigned char c = (unsigned char)*p;
+    int is_upper = c >= 'A' && c <= 'Z';
+    int is_digit = c >= '0' && c <= '9';
+    if (!is_upper && !(p > msg && is_digit)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int l_redis_error_reply(lua_State *L) {
   size_t len = 0;
   const char *msg = luaL_checklstring(L, 1, &len);
-  // Real Redis prepends the default "ERR " code when the message carries no code
-  // of its own. The code is the leading token, so its absence is signalled by
-  // there being no space in the message.
-  if (memchr(msg, ' ', len) == NULL) {
+  // Real Redis prepends the default "ERR " code when the message does not already
+  // begin with an uppercase error code (the leading token before the first space).
+  if (!has_error_code(msg, len)) {
     lua_pushliteral(L, "ERR ");
     lua_pushvalue(L, 1);
     lua_concat(L, 2);
