@@ -44,13 +44,41 @@
  * const arr: ReplyValue = [1, Buffer.from("a"), null];
  * ```
  */
+/**
+ * Machine-readable detail attached to every script-aborting error reply. The
+ * engine composes NO user-facing prose; it classifies the error and lets the
+ * host pick the wording (which for these is Redis-version-specific).
+ *
+ * - `line` (1-based script line) and `sha` (the script's SHA1, already computed
+ *   by the engine) are always present.
+ * - `kind`/`name` are present only for errors the engine itself originates (the
+ *   globals protection). `kind` is an opaque machine tag the host maps to wording;
+ *   `name` is the variable involved. The reply's `err` carries the bare `kind`.
+ *   Known kinds:
+ *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
+ *     "Script attempted to access nonexistent global variable '<name>'".
+ *   - `command-arg-type`: a redis.call/pcall argument was not a string or number
+ *     (no `name`). Redis: "Lua redis lib command arguments must be strings or
+ *     integers".
+ *
+ * Note: writing a global has no kind. It is blocked by Lua's native readonly
+ * flag (as in real Redis), so the VM itself raises "Attempt to modify a readonly
+ * table"; that message passes through in `err` untouched.
+ */
+export type ReplyErrorMeta = {
+  kind?: string;
+  name?: string;
+  line: number;
+  sha: string;
+};
+
 export type ReplyValue =
   | null
   | number
   | bigint
   | Buffer
   | { ok: Buffer }
-  | { err: Buffer; code?: Buffer }
+  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta }
   | ReplyValue[];
 
 /**

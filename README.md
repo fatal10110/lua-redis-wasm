@@ -152,19 +152,28 @@ by the engine.
 Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
 instead of throwing to match Redis behavior.
 
-### Error decoration
+### Error metadata
 
-The engine, not the host, owns Redis error formatting:
+The engine composes **no** user-facing error wording — it classifies the error and
+lets the host render. When a script aborts, the reply carries:
 
-- An error that **aborts** a script (a `redis.call` error that propagates out, or an
-  uncaught Lua runtime error) is decorated with `script: <sha>, on @user_script:<line>.`,
-  matching Redis.
-- An error **value** the script returns (e.g. `return redis.pcall(...)`) is passed
-  through untouched.
+- `code` — the RESP error class (e.g. `WRONGTYPE`, default `ERR`); preserved from
+  `redis.call`. See [Reply Types](#reply-types).
+- `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
+  classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
+  `redis.call` argument). `kind` is an opaque machine tag the host maps to wording;
+  `name` is the variable involved. Writing a global has no `kind`: it is blocked by
+  Lua's native readonly flag (as in real Redis), which recursively locks the whole
+  globals tree, so the VM itself raises "Attempt to modify a readonly table".
+- `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
+  runtime / `redis.call` errors, the original message, passed through untouched.
 
-So hosts should return plain, undecorated error messages; the engine adds the script
-context. The error `code` (e.g. `WRONGTYPE`) is preserved through this process — see
-[Reply Types](#reply-types).
+The host owns wording: map `kind` to the Redis message (version-specific if you care)
+and decorate with `line`/`sha` as needed
+(`<message> script: <sha>, on @user_script:<line>.`). An error **value** the script
+returns (e.g. `return redis.pcall(...)`) is passed through untouched.
+
+Hosts should return plain, undecorated error messages.
 
 ### log
 
@@ -181,7 +190,7 @@ type ReplyValue =
   | bigint // Integer (64-bit)
   | Buffer // Bulk string
   | { ok: Buffer } // Status reply (+OK)
-  | { err: Buffer; code?: Buffer } // Error reply (-ERR); code is the leading token, e.g. WRONGTYPE
+  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta } // Error reply (-ERR); code e.g. WRONGTYPE, meta for rendering
   | ReplyValue[]; // Array
 ```
 

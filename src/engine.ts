@@ -51,6 +51,7 @@ import type {
   EngineLimits,
   LoadOptions,
   ReplyValue,
+  ReplyErrorMeta,
   RedisHost,
   RedisCallHandler,
   RedisLogHandler,
@@ -336,7 +337,7 @@ export class LuaEngine {
       typeof value === "object" &&
       "err" in value
     ) {
-      return decorateScriptError(value, sha);
+      return buildScriptError(value, sha);
     }
 
     return value;
@@ -344,24 +345,69 @@ export class LuaEngine {
 }
 
 /**
- * Appends the Redis script source context to a script-aborting error message.
+ * Builds a script-aborting error reply. The engine composes no user-facing prose:
+ *
+ * - Engine-originated errors (globals protection) arrive as a coded marker; we
+ *   forward `{ kind, name }` in `meta` and the host chooses the wording. `err`
+ *   carries the bare `kind` as a machine-readable default.
+ * - Lua runtime / redis.call errors already carry their own message (and code);
+ *   they pass through untouched, with only `line`/`sha` attached for the host to
+ *   decorate.
  *
  * Lua runtime errors carry a `user_script:N:` prefix (N is the line); command
  * errors propagated out of redis.call have no prefix and are reported at line 1.
- * The error `code` (if any) is preserved.
  */
-function decorateScriptError(
+function buildScriptError(
   value: { err: Buffer; code?: Buffer },
   sha: string,
-): ReplyValue {
+): { err: Buffer; code: Buffer; meta: ReplyErrorMeta } {
   const errStr = value.err.toString("utf8");
-  let line = "1";
+  let line = 1;
   if (errStr.startsWith("user_script:")) {
     const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
-    line = colonIdx > 12 ? errStr.substring(12, colonIdx) : "1";
+    if (colonIdx > 12) {
+      line = Number(errStr.substring(12, colonIdx)) || 1;
+    }
   }
-  const formatted = `${errStr} script: ${sha}, on @user_script:${line}.`;
-  return { err: Buffer.from(formatted, "utf8"), code: value.code };
+
+  const marker = parseErrorMarker(errStr);
+  if (marker) {
+    return {
+      err: Buffer.from(marker.kind, "utf8"),
+      code: Buffer.from("ERR", "utf8"),
+      meta: { kind: marker.kind, name: marker.name, line, sha },
+    };
+  }
+
+  return {
+    err: value.err,
+    // Preserve a propagated command code (e.g. WRONGTYPE); otherwise "ERR".
+    code: value.code ?? Buffer.from("ERR", "utf8"),
+    meta: { line, sha },
+  };
+}
+
+const ERROR_MARKER = "__RLUA_E__:";
+
+/**
+ * Engine-originated errors (globals protection, see runtime.c) cross the
+ * Lua->WASM->JS boundary as a coded string `__RLUA_E__:<kind>:<name>` (Lua errors
+ * carry no type tag, so the discriminator travels in the string). Splits out the
+ * opaque `kind` and `name`; the library forwards them and never interprets the
+ * kind. Returns undefined for ordinary error messages.
+ */
+function parseErrorMarker(
+  errStr: string,
+): { kind: string; name?: string } | undefined {
+  const idx = errStr.indexOf(ERROR_MARKER);
+  if (idx < 0) {
+    return undefined;
+  }
+  const rest = errStr.slice(idx + ERROR_MARKER.length); // "<kind>" or "<kind>:<name>"
+  const sep = rest.indexOf(":");
+  return sep < 0
+    ? { kind: rest }
+    : { kind: rest.slice(0, sep), name: rest.slice(sep + 1) };
 }
 
 /**

@@ -114,6 +114,24 @@ test("eval: returns nil as null", async () => {
   assert.equal(result, null);
 });
 
+test("redis.call: null reply becomes Lua false (not nil)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost({ redisCall: () => null, redisPcall: () => null }));
+  // Real Redis maps a RESP null reply to Lua false.
+  assert.equal((engine.eval("return type(redis.call('GET','x'))") as Buffer).toString(), "boolean");
+  assert.equal(engine.eval("if redis.call('GET','x') == false then return 1 else return 0 end"), 1);
+});
+
+test("redis.call: null nested in array reply becomes false", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(
+    createTestHost({ redisCall: () => [Buffer.from("a"), null], redisPcall: () => [Buffer.from("a"), null] })
+  );
+  assert.equal(engine.eval("local r = redis.call('MGET','a','b'); return type(r[2])").toString(), "boolean");
+});
+
 test("eval: returns empty table as empty array", async () => {
   await resolveWasmPath();
   const module = await load();
@@ -194,16 +212,14 @@ test("eval: Lua error format matches Redis format", async () => {
   const result = engine.eval(script);
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
-
-  // Should match Redis format: "user_script:N: message script: <sha>, on @user_script:N."
+  // Lua runtime error: err is Lua's raw message (line prefix, no decoration); the
+  // engine adds no prose, only line/sha metadata for the host to render with.
+  const r = result as { err: Buffer; meta?: { line: number; sha: string } };
+  const errStr = r.err.toString("utf8");
   assert.ok(errStr.startsWith("user_script:1:"), `Error should start with 'user_script:1:', got: ${errStr}`);
-  assert.ok(errStr.includes(" script: "), `Error should contain ' script: ', got: ${errStr}`);
-  assert.ok(errStr.includes(", on @user_script:1."), `Error should end with ', on @user_script:1.', got: ${errStr}`);
-
-  // SHA should be 40 hex chars
-  const shaMatch = errStr.match(/script: ([a-f0-9]{40}),/);
-  assert.ok(shaMatch, `Error should contain 40-char SHA hex, got: ${errStr}`);
+  assert.ok(!errStr.includes(" script: "), `Raw err should not be decorated, got: ${errStr}`);
+  assert.equal(r.meta?.line, 1);
+  assert.match(r.meta?.sha ?? "", /^[a-f0-9]{40}$/);
 });
 
 test("eval: Lua error on different line includes correct line number", async () => {
@@ -218,11 +234,167 @@ redis.nonexistent()  -- line 4
   const result = engine.eval(script);
 
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
+  const r = result as { err: Buffer; meta?: { line: number } };
 
-  // Should reference line 4
-  assert.ok(errStr.startsWith("user_script:4:"), `Error should start with 'user_script:4:', got: ${errStr}`);
-  assert.ok(errStr.includes(", on @user_script:4."), `Error should end with ', on @user_script:4.', got: ${errStr}`);
+  // Raw err references line 4; meta carries it for the host to decorate.
+  assert.ok(r.err.toString("utf8").startsWith("user_script:4:"), `Error should start with 'user_script:4:', got: ${r.err}`);
+  assert.equal(r.meta?.line, 4);
+});
+
+test("eval: reading a nonexistent global is classified as global-read", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("print('a')") as {
+    err: Buffer;
+    meta?: { kind: string; name: string; line: number; sha: string };
+  };
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  // Engine emits a machine kind, not wording; no marker leaks into err.
+  assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
+  assert.equal(result.meta?.kind, "global-read");
+  assert.equal(result.meta?.name, "print");
+  assert.equal(result.meta?.line, 1);
+  assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
+});
+
+test("eval: writing a global is blocked by the native readonly flag", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  // Write protection is the patched Lua's native readonly flag (as in Redis):
+  // the VM raises its own message, which passes through. No engine kind.
+  for (const script of ["x = 5", "redis = 5", "KEYS = 5", "tostring = 1"]) {
+    const result = engine.eval(script) as {
+      err: Buffer;
+      code?: Buffer;
+      meta?: { kind?: string; line: number; sha: string };
+    };
+    assert.ok(result && typeof result === "object" && "err" in result, `not blocked: ${script}`);
+    assert.match(
+      result.err.toString("utf8"),
+      /Attempt to modify a readonly table/,
+      `${script} -> ${result.err}`,
+    );
+    assert.equal(result.meta?.kind, undefined, `${script} should have no kind`);
+    assert.equal(result.code?.toString("utf8"), "ERR");
+  }
+});
+
+test("eval: reassigning an existing global is blocked (regression: __newindex gap)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // A fresh engine: KEYS exists as a real global, so a __newindex metatable would
+  // miss this write. The readonly flag catches it, and the corruption does not
+  // leak into the next script.
+  const reassign = engine.eval("KEYS = 5\nreturn 1");
+  assert.ok(reassign && typeof reassign === "object" && "err" in reassign, `KEYS reassign not blocked`);
+  assert.equal(engine.eval("return type(KEYS)").toString(), "table");
+});
+
+test("eval: setfenv/getfenv are removed (sandbox-escape vectors)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // Redis removes these via lua_builtins_deprecated; they let a script swap its
+  // environment and reach the real global table, bypassing globals protection.
+  // With them gone, globals protection turns access into a global-read error.
+  for (const name of ["setfenv", "getfenv"]) {
+    const r = engine.eval(`return ${name}`) as { err: Buffer; meta?: { kind: string; name: string } };
+    assert.ok(r && typeof r === "object" && "err" in r, `${name} still reachable`);
+    assert.equal(r.meta?.kind, "global-read", `${name} -> ${JSON.stringify(r)}`);
+    assert.equal(r.meta?.name, name);
+  }
+});
+
+test("eval: library tables are locked recursively like Redis", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // The whole globals tree is readonly (redis, string, cjson, table, ...), not
+  // just the globals table -- so mutating a library field is blocked too.
+  for (const script of ["redis.call = 5", "string.len = nil", "cjson.encode = 1", "table.insert = 1"]) {
+    const r = engine.eval(script);
+    assert.ok(r && typeof r === "object" && "err" in r, `not blocked: ${script}`);
+    assert.match(
+      (r as { err: Buffer }).err.toString("utf8"),
+      /Attempt to modify a readonly table/,
+      `${script} -> ${JSON.stringify(r)}`,
+    );
+  }
+  // Reads/calls on those tables still work.
+  assert.equal(engine.eval("return type(redis.call)").toString(), "function");
+});
+
+test("eval: non-integer number return is truncated to integer", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return 3.7"), 3);
+  assert.equal(engine.eval("return 3.3"), 3);
+});
+
+test("eval: script with no return value replies with nil", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("local a = 1"), null);
+  assert.equal(engine.eval("return"), null);
+});
+
+test("eval: table with both ok and err is an error (err wins)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("return {ok='STAT', err='ERRR'}");
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal((result as { err: Buffer }).err.toString("utf8"), "ERRR");
+});
+
+test("redis.error_reply: prepends ERR to lowercase multi-word messages", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  const lower = engine.eval("return redis.error_reply('my bad')") as { err: Buffer; code?: Buffer };
+  assert.equal(lower.err.toString("utf8"), "my bad");
+  assert.equal(lower.code?.toString("utf8"), "ERR");
+
+  // Single-word still gets the prefix.
+  const word = engine.eval("return redis.error_reply('foo')") as { err: Buffer; code?: Buffer };
+  assert.equal(word.err.toString("utf8"), "foo");
+  assert.equal(word.code?.toString("utf8"), "ERR");
+
+  // Existing uppercase code is left untouched.
+  const coded = engine.eval("return redis.error_reply('WRONGTYPE x')") as { err: Buffer; code?: Buffer };
+  assert.equal(coded.err.toString("utf8"), "x");
+  assert.equal(coded.code?.toString("utf8"), "WRONGTYPE");
+});
+
+test("eval: coroutine library remains available", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal((engine.eval("return type(coroutine)") as Buffer).toString(), "table");
+});
+
+test("redis.call: non-string/number argument is classified as command-arg-type", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("return redis.call('set','k',true)") as {
+    err: Buffer;
+    meta?: { kind?: string; name?: string; line: number };
+  };
+  assert.ok(result && typeof result === "object" && "err" in result);
+  // Engine forwards a machine kind, not Redis's wording; no marker leaks.
+  assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
+  assert.equal(result.meta?.kind, "command-arg-type");
+  assert.equal(result.meta?.name, undefined);
+  assert.equal(result.meta?.line, 1); // raised without a user_script: prefix, like Redis
 });
 
 // =============================================================================
@@ -840,7 +1012,7 @@ test("redis.call() with no args is delegated to the host", async () => {
   assert.ok(result && typeof result === "object" && "err" in result);
 });
 
-test("redis.call command error is decorated and code is split out", async () => {
+test("redis.call command error passes through with code and line/sha metadata", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(
@@ -854,14 +1026,22 @@ test("redis.call command error is decorated and code is split out", async () => 
     }),
   );
 
-  const result = engine.eval("return redis.call('GET', 'k')") as { err: Buffer; code?: Buffer };
+  const result = engine.eval("return redis.call('GET', 'k')") as {
+    err: Buffer;
+    code?: Buffer;
+    meta?: { line: number; sha: string; kind?: string };
+  };
   assert.ok(result && typeof result === "object" && "err" in result);
-  // Command errors have no user_script prefix -> reported at line 1, code preserved.
-  assert.match(
+  // Command errors already carry their message + code; the engine passes them
+  // through undecorated (no kind), attaching only line/sha for the host.
+  assert.equal(
     result.err.toString("utf8"),
-    /^Operation against a key holding the wrong kind of value script: [a-f0-9]{40}, on @user_script:1\.$/,
+    "Operation against a key holding the wrong kind of value",
   );
   assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+  assert.equal(result.meta?.line, 1);
+  assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
+  assert.equal(result.meta?.kind, undefined);
 });
 
 test("redis.pcall error value returned by the script is not decorated", async () => {

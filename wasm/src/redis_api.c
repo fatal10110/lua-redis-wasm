@@ -99,17 +99,10 @@ static int arg_to_bytes(lua_State *L, int idx, const char **out, size_t *len) {
   switch (type) {
     case LUA_TSTRING:
     case LUA_TNUMBER: {
+      // Real Redis accepts only strings and numbers as command arguments;
+      // numbers are stringified (e.g. 3.3 -> "3.3"). Booleans, nil and tables
+      // are rejected by the caller.
       *out = lua_tolstring(L, idx, len);
-      return 0;
-    }
-    case LUA_TBOOLEAN: {
-      if (lua_toboolean(L, idx)) {
-        *out = "1";
-        *len = 1;
-      } else {
-        *out = "0";
-        *len = 1;
-      }
       return 0;
     }
     default:
@@ -159,7 +152,10 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
   *offset += 5;
   switch (type) {
     case REPLY_NULL:
-      lua_pushnil(L);
+      /* RESP null (bulk/multibulk) maps to Lua false, matching real Redis
+       * (redisProtocolToLuaType). This is the call path only; the return
+       * path still maps nil/false -> null. */
+      lua_pushboolean(L, 0);
       return 1;
     case REPLY_INT: {
       if (*offset + 8 > len) {
@@ -222,7 +218,11 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
-    return luaL_error(L, "ERR invalid argument to redis.call");
+    // Coded kind, no name (Redis's wording for this takes no variable). Raised
+    // without a "user_script:N:" position prefix, matching real Redis; the host
+    // renders "Lua redis lib command arguments must be strings or integers".
+    lua_pushliteral(L, "__RLUA_E__:command-arg-type");
+    return lua_error(L);
   }
   PtrLen reply = raise_on_error ? host_redis_call((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len)
                                 : host_redis_pcall((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len);
@@ -269,9 +269,35 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
+// Tests whether the message opens with a Redis error code: a space-terminated
+// leading token matching `[A-Z][A-Z0-9]*`. Mirrors isErrorCode in src/codec.ts.
+static int has_error_code(const char *msg, size_t len) {
+  const char *space = memchr(msg, ' ', len);
+  if (space == NULL || space == msg) {
+    return 0;
+  }
+  for (const char *p = msg; p < space; p++) {
+    unsigned char c = (unsigned char)*p;
+    int is_upper = c >= 'A' && c <= 'Z';
+    int is_digit = c >= '0' && c <= '9';
+    if (!is_upper && !(p > msg && is_digit)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int l_redis_error_reply(lua_State *L) {
   size_t len = 0;
   const char *msg = luaL_checklstring(L, 1, &len);
+  // Real Redis prepends the default "ERR " code when the message does not already
+  // begin with an uppercase error code (the leading token before the first space).
+  if (!has_error_code(msg, len)) {
+    lua_pushliteral(L, "ERR ");
+    lua_pushvalue(L, 1);
+    lua_concat(L, 2);
+    msg = lua_tolstring(L, -1, &len);
+  }
   return push_error_table(L, (const uint8_t *)msg, (uint32_t)len);
 }
 

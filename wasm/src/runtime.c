@@ -129,6 +129,17 @@ static PtrLen reply_script_error(const char *msg, size_t len) {
   return out;
 }
 
+static PtrLen reply_null(void) {
+  ReplyBuffer rb;
+  rb_init(&rb);
+  if (rb_write_header(&rb, REPLY_NULL, 0) != 0) {
+    return (PtrLen){0, 0};
+  }
+  PtrLen out = rb_finalize(&rb);
+  free(rb.data);
+  return out;
+}
+
 static PtrLen reply_status(const char *msg, size_t len) {
   ReplyBuffer rb;
   rb_init(&rb);
@@ -148,39 +159,44 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb);
 
 static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   size_t len = 0;
-  int has_ok = 0;
-  int has_err = 0;
   const char *msg = NULL;
+
+  // Redis checks `err` before `ok`: a table carrying both fields is an error.
+  lua_getfield(L, idx, "err");
+  if (lua_isstring(L, -1)) {
+    msg = lua_tolstring(L, -1, &len);
+    int rc = rb_write_header(rb, REPLY_ERROR, (uint32_t)len);
+    if (rc == 0) {
+      rc = rb_append(rb, msg, len);
+    }
+    lua_pop(L, 1);
+    return rc;
+  }
+  lua_pop(L, 1);
 
   lua_getfield(L, idx, "ok");
   if (lua_isstring(L, -1)) {
     msg = lua_tolstring(L, -1, &len);
-    has_ok = 1;
+    int rc = rb_write_header(rb, REPLY_STATUS, (uint32_t)len);
+    if (rc == 0) {
+      rc = rb_append(rb, msg, len);
+    }
+    lua_pop(L, 1);
+    return rc;
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "err");
-  if (!has_ok && lua_isstring(L, -1)) {
-    msg = lua_tolstring(L, -1, &len);
-    has_err = 1;
-  }
-  lua_pop(L, 1);
-
-  if (has_ok) {
-    if (rb_write_header(rb, REPLY_STATUS, (uint32_t)len) != 0) {
-      return -1;
+  // Array reply: iterate from index 1 and stop at the first nil, like Redis.
+  size_t count = 0;
+  for (;;) {
+    lua_rawgeti(L, idx, (int)count + 1);
+    int is_nil = lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (is_nil) {
+      break;
     }
-    return rb_append(rb, msg, len);
+    count++;
   }
-
-  if (has_err) {
-    if (rb_write_header(rb, REPLY_ERROR, (uint32_t)len) != 0) {
-      return -1;
-    }
-    return rb_append(rb, msg, len);
-  }
-
-  size_t count = lua_objlen(L, idx);
   if (rb_write_header(rb, REPLY_ARRAY, (uint32_t)count) != 0) {
     return -1;
   }
@@ -201,25 +217,15 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
     case LUA_TNIL:
       return rb_write_header(rb, REPLY_NULL, 0);
     case LUA_TNUMBER: {
+      // Real Redis converts a Lua number return value to an integer reply,
+      // truncating any fractional part (e.g. `return 3.7` -> 3).
       lua_Number num = lua_tonumber(L, idx);
-      lua_Number int_part = (lua_Number)(int64_t)num;
-      if (num == int_part) {
-        if (rb_write_header(rb, REPLY_INT, 8) != 0) {
-          return -1;
-        }
-        uint8_t payload[8];
-        write_i64_le(payload, (int64_t)num);
-        return rb_append(rb, payload, sizeof(payload));
-      }
-      size_t len = 0;
-      const char *str = lua_tolstring(L, idx, &len);
-      if (!str) {
+      if (rb_write_header(rb, REPLY_INT, 8) != 0) {
         return -1;
       }
-      if (rb_write_header(rb, REPLY_BULK, (uint32_t)len) != 0) {
-        return -1;
-      }
-      return rb_append(rb, str, len);
+      uint8_t payload[8];
+      write_i64_le(payload, (int64_t)num);
+      return rb_append(rb, payload, sizeof(payload));
     }
     case LUA_TBOOLEAN:
       if (lua_toboolean(L, idx)) {
@@ -276,6 +282,18 @@ static void disable_non_determinism(lua_State *L) {
   remove_global(L, "require");
   remove_global(L, "dofile");
   remove_global(L, "loadfile");
+  // Base-lib globals real Redis does not expose to scripts. With globals
+  // protection installed, accessing these raises the nonexistent-global error.
+  remove_global(L, "print");
+  remove_global(L, "loadstring");
+  remove_global(L, "collectgarbage");
+  remove_global(L, "gcinfo");
+  remove_global(L, "newproxy");
+  // Sandbox-escape vectors: setfenv swaps the running function's environment
+  // for a writable table and getfenv(0) reaches the real global table,
+  // bypassing globals protection. Redis removes these too (lua_builtins_deprecated).
+  remove_global(L, "setfenv");
+  remove_global(L, "getfenv");
   remove_package_entry(L, "io");
   remove_package_entry(L, "os");
   remove_package_entry(L, "debug");
@@ -288,6 +306,111 @@ static void disable_non_determinism(lua_State *L) {
     lua_setfield(L, -2, "randomseed");
   }
   lua_pop(L, 1);
+}
+
+// Globals protection: mirror real Redis exactly.
+//
+// READ of a nonexistent global -> a metatable __index handler (this function)
+// raises, matching Redis's luaSetErrorMetatable. We control this string, so we
+// emit a coded marker `__RLUA_E__:global-read:<name>`; the TS layer forwards
+// { kind, name } and the host picks the wording. `name` is the __index key
+// (stack index 2).
+//
+// WRITE of any global (creation or reassignment of an existing one) -> the
+// patched Lua's native readonly flag (lua_enablereadonlytable), enabled in
+// enable_globals_protection below. The VM raises "Attempt to modify a readonly
+// table" itself; that string is Redis's own (vendored), so it passes through
+// untouched. The flag blocks every write, including reassigning an existing
+// global -- which a __newindex metatable would miss.
+static int protect_globals_index(lua_State *L) {
+  const char *name = lua_tostring(L, 2);
+  return luaL_error(L, "__RLUA_E__:global-read:%s", name ? name : "?");
+}
+
+// Recursively set the native readonly flag on the table at the top of the stack
+// and every table reachable from it (values and metatables). Mirrors Redis's
+// luaSetTableProtectionRecursively. The readonly check both guards against cycles
+// (e.g. _G._G points back at globals) and stops re-walking shared tables.
+static void protect_table_recursively(lua_State *L) {
+  if (lua_isreadonlytable(L, -1)) {
+    return;
+  }
+  lua_enablereadonlytable(L, -1, 1);
+
+  lua_checkstack(L, 2);
+  lua_pushnil(L);
+  while (lua_next(L, -2)) {
+    // Stack: table, key, value
+    if (lua_istable(L, -1)) {
+      protect_table_recursively(L);
+    }
+    lua_pop(L, 1); // pop value, keep key for the next iteration
+  }
+
+  if (lua_getmetatable(L, -1)) {
+    protect_table_recursively(L);
+    lua_pop(L, 1);
+  }
+}
+
+// Lock the metatables of basic types so a script cannot escape the sandbox by
+// mutating e.g. the shared string metatable. Mirrors Redis's
+// luaSetTableProtectionForBasicTypes.
+static void protect_basic_type_metatables(lua_State *L) {
+  static const int types[] = {LUA_TSTRING,   LUA_TNUMBER, LUA_TBOOLEAN, LUA_TNIL,
+                              LUA_TFUNCTION,  LUA_TTHREAD, LUA_TLIGHTUSERDATA};
+  for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+    switch (types[i]) {
+      case LUA_TSTRING: lua_pushstring(L, ""); break;
+      case LUA_TNUMBER: lua_pushnumber(L, 0); break;
+      case LUA_TBOOLEAN: lua_pushboolean(L, 0); break;
+      case LUA_TNIL: lua_pushnil(L); break;
+      case LUA_TFUNCTION: lua_pushcfunction(L, NULL); break;
+      case LUA_TTHREAD: lua_newthread(L); break;
+      case LUA_TLIGHTUSERDATA: lua_pushlightuserdata(L, (void *)L); break;
+    }
+    if (lua_getmetatable(L, -1)) {
+      protect_table_recursively(L);
+      lua_pop(L, 1); // pop metatable
+    }
+    lua_pop(L, 1); // pop dummy value
+  }
+}
+
+static void enable_globals_protection(lua_State *L) {
+  // Read protection: __index handler raises on reads of a nonexistent global.
+  lua_pushvalue(L, LUA_GLOBALSINDEX);
+  lua_newtable(L);
+  lua_pushcfunction(L, protect_globals_index);
+  lua_setfield(L, -2, "__index");
+  lua_setmetatable(L, -2);
+
+  // Write protection: recursively lock the globals table and everything reachable
+  // from it (redis, cjson, string, math, ... and the metatable just set), matching
+  // real Redis. Must come after all engine setup (libs, redis API); raw_setglobal
+  // toggles the globals flag off for KEYS/ARGV injection at eval time.
+  protect_table_recursively(L);
+  lua_pop(L, 1);
+  protect_basic_type_metatables(L);
+}
+
+// Set a global by raw assignment, bypassing write protection. Value to assign
+// must be on top of the stack; it is popped. Toggles the native readonly flag
+// off around the write and restores it (matching Redis's setup sequence).
+static void raw_setglobal(lua_State *L, const char *name) {
+  int was_ro = lua_isreadonlytable(L, LUA_GLOBALSINDEX);
+  if (was_ro) {
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 0);
+  }
+  lua_pushvalue(L, LUA_GLOBALSINDEX); // [.., value, G]
+  lua_insert(L, -2);                  // [.., G, value]
+  lua_pushstring(L, name);            // [.., G, value, name]
+  lua_insert(L, -2);                  // [.., G, name, value]
+  lua_rawset(L, -3);                  // G[name] = value; pops name, value -> [.., G]
+  lua_pop(L, 1);                      // [..]
+  if (was_ro) {
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 1);
+  }
 }
 
 static void luaLoadLib(lua_State *L, const char *name, lua_CFunction func) {
@@ -309,14 +432,14 @@ static void load_redis_modules(lua_State *L) {
 }
 
 static void open_allowed_libs(lua_State *L) {
+  // luaopen_base pushes TWO tables (the globals table and the coroutine table);
+  // the rest push one. Clear the stack afterwards so no library table is left
+  // behind to masquerade as a script return value.
   luaopen_base(L);
-  lua_pop(L, 1);
   luaopen_table(L);
-  lua_pop(L, 1);
   luaopen_string(L);
-  lua_pop(L, 1);
   luaopen_math(L);
-  lua_pop(L, 1);
+  lua_settop(L, 0);
   disable_non_determinism(L);
   load_redis_modules(L);
 }
@@ -375,16 +498,16 @@ static int set_keys_argv(lua_State *L, const uint8_t *buf, size_t len, uint32_t 
     offset += item_len;
   }
 
-  lua_setglobal(L, "ARGV");
-  lua_setglobal(L, "KEYS");
+  raw_setglobal(L, "ARGV");
+  raw_setglobal(L, "KEYS");
   return 0;
 }
 
 static void set_empty_keys_argv(lua_State *L) {
   lua_createtable(L, 0, 0);
-  lua_setglobal(L, "KEYS");
+  raw_setglobal(L, "KEYS");
   lua_createtable(L, 0, 0);
-  lua_setglobal(L, "ARGV");
+  raw_setglobal(L, "ARGV");
 }
 
 int32_t init(void) {
@@ -398,6 +521,7 @@ int32_t init(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
@@ -414,6 +538,7 @@ int32_t reset(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
@@ -442,7 +567,8 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   }
   int top = lua_gettop(g_state);
   if (top == 0) {
-    return reply_status("OK", 2);
+    // A script with no return value replies with nil, matching real Redis.
+    return reply_null();
   }
   ReplyBuffer rb;
   rb_init(&rb);
@@ -496,7 +622,8 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   }
   int top = lua_gettop(g_state);
   if (top == 0) {
-    return reply_status("OK", 2);
+    // A script with no return value replies with nil, matching real Redis.
+    return reply_null();
   }
   ReplyBuffer rb;
   rb_init(&rb);
