@@ -259,6 +259,22 @@ test("eval: reading a nonexistent global is classified as global-read", async ()
   assert.match(result.meta?.sha ?? "", /^[a-f0-9]{40}$/);
 });
 
+test("eval: Redis-allowed builtins are exposed (issue #16)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // These are on Redis's allow lists (lua_builtins_allow_list / libraries_allow_list);
+  // we must not over-restrict them.
+  assert.equal(engine.eval("return type(loadstring)").toString(), "function");
+  assert.equal(engine.eval("return type(load)").toString(), "function");
+  assert.equal(engine.eval("return type(collectgarbage)").toString(), "function");
+  assert.equal(engine.eval("return type(gcinfo)").toString(), "function");
+  assert.equal(engine.eval("return type(os)").toString(), "table");
+  // os is sandboxed to os.clock only (vendored loslib sandbox_syslib).
+  assert.equal(engine.eval("return type(os.clock)").toString(), "function");
+  assert.equal(engine.eval("return type(os.execute)").toString(), "nil");
+});
+
 test("eval: writing a global is blocked by the native readonly flag", async () => {
   await resolveWasmPath();
   const module = await load();

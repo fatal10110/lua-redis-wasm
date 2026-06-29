@@ -274,20 +274,19 @@ static void remove_package_entry(lua_State *L, const char *name) {
   lua_pop(L, 2);
 }
 
+// Mirror Redis's allow/deny arrays (src/script_lua.c) rather than a hand-rolled
+// deny set. Redis exposes loadstring/load/collectgarbage/gcinfo (lua_builtins_
+// allow_list) and a sandboxed os (libraries_allow_list); we keep those. We only
+// strip what Redis strips: its deny_list (dofile/loadfile/print), the libs it
+// never loads (io/debug/package/require), and lua_builtins_deprecated.
 static void disable_non_determinism(lua_State *L) {
   remove_global(L, "io");
-  remove_global(L, "os");
   remove_global(L, "debug");
   remove_global(L, "package");
   remove_global(L, "require");
   remove_global(L, "dofile");
   remove_global(L, "loadfile");
-  // Base-lib globals real Redis does not expose to scripts. With globals
-  // protection installed, accessing these raises the nonexistent-global error.
   remove_global(L, "print");
-  remove_global(L, "loadstring");
-  remove_global(L, "collectgarbage");
-  remove_global(L, "gcinfo");
   remove_global(L, "newproxy");
   // Sandbox-escape vectors: setfenv swaps the running function's environment
   // for a writable table and getfenv(0) reaches the real global table,
@@ -295,7 +294,6 @@ static void disable_non_determinism(lua_State *L) {
   remove_global(L, "setfenv");
   remove_global(L, "getfenv");
   remove_package_entry(L, "io");
-  remove_package_entry(L, "os");
   remove_package_entry(L, "debug");
   remove_package_entry(L, "package");
   lua_getglobal(L, "math");
@@ -439,6 +437,9 @@ static void open_allowed_libs(lua_State *L) {
   luaopen_table(L);
   luaopen_string(L);
   luaopen_math(L);
+  // Redis exposes os via libraries_allow_list; the vendored loslib.c sandboxes
+  // it to only os.clock (sandbox_syslib), so opening it here is safe.
+  luaopen_os(L);
   lua_settop(L, 0);
   disable_non_determinism(L);
   load_redis_modules(L);
