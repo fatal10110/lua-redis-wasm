@@ -215,8 +215,10 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
-    // Real Redis raises this without a "user_script:N:" position prefix.
-    lua_pushliteral(L, "Lua redis lib command arguments must be strings or integers");
+    // Coded kind, no name (Redis's wording for this takes no variable). Raised
+    // without a "user_script:N:" position prefix, matching real Redis; the host
+    // renders "Lua redis lib command arguments must be strings or integers".
+    lua_pushliteral(L, "__RLUA_E__:command-arg-type");
     return lua_error(L);
   }
   PtrLen reply = raise_on_error ? host_redis_call((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len)

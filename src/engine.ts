@@ -398,17 +398,16 @@ const ERROR_MARKER = "__RLUA_E__:";
  */
 function parseErrorMarker(
   errStr: string,
-): { kind: string; name: string } | undefined {
+): { kind: string; name?: string } | undefined {
   const idx = errStr.indexOf(ERROR_MARKER);
   if (idx < 0) {
     return undefined;
   }
-  const rest = errStr.slice(idx + ERROR_MARKER.length); // "<kind>:<name>"
+  const rest = errStr.slice(idx + ERROR_MARKER.length); // "<kind>" or "<kind>:<name>"
   const sep = rest.indexOf(":");
-  if (sep < 0) {
-    return undefined;
-  }
-  return { kind: rest.slice(0, sep), name: rest.slice(sep + 1) };
+  return sep < 0
+    ? { kind: rest }
+    : { kind: rest.slice(0, sep), name: rest.slice(sep + 1) };
 }
 
 /**

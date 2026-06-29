@@ -294,17 +294,20 @@ test("eval: coroutine library remains available", async () => {
   assert.equal((engine.eval("return type(coroutine)") as Buffer).toString(), "table");
 });
 
-test("redis.call: boolean argument is rejected like Redis", async () => {
+test("redis.call: non-string/number argument is classified as command-arg-type", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(createTestHost());
-  const result = engine.eval("return redis.call('set','k',true)");
+  const result = engine.eval("return redis.call('set','k',true)") as {
+    err: Buffer;
+    meta?: { kind?: string; name?: string; line: number };
+  };
   assert.ok(result && typeof result === "object" && "err" in result);
-  const errStr = (result as { err: Buffer }).err.toString("utf8");
-  assert.ok(
-    errStr.includes("must be strings or integers"),
-    `got: ${errStr}`,
-  );
+  // Engine forwards a machine kind, not Redis's wording; no marker leaks.
+  assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
+  assert.equal(result.meta?.kind, "command-arg-type");
+  assert.equal(result.meta?.name, undefined);
+  assert.equal(result.meta?.line, 1); // raised without a user_script: prefix, like Redis
 });
 
 // =============================================================================

@@ -60,6 +60,9 @@
  *   - `global-write`: create/modify of a global. Redis >= 7.0:
  *     "Attempt to modify a readonly table"; Redis < 7.0:
  *     "Script attempted to create global variable '<name>'".
+ *   - `command-arg-type`: a redis.call/pcall argument was not a string or number
+ *     (no `name`). Redis: "Lua redis lib command arguments must be strings or
+ *     integers".
  */
 export type ReplyErrorMeta = {
   kind?: string;
