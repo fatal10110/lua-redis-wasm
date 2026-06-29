@@ -19,7 +19,7 @@ REDIS_LUA_DEPS="$ROOT_DIR/vendor/redis/deps/lua/src"
 REDIS_SRC="$ROOT_DIR/vendor/redis/src"
 LUA_SRC_DIR="$REDIS_LUA_DEPS"
 LUA_CORE="lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c"
-LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c"
+LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c loslib.c"
 REDIS_LUA_MODULES="lua_cjson.c lua_cmsgpack.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
 
 CORE_FILES=""
