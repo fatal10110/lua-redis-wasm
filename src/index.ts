@@ -8,7 +8,9 @@ export type {
   RedisCallHandler,
   RedisHost,
   RedisLogHandler,
-  StandaloneOptions
+  StandaloneOptions,
+  RedisProp,
+  RedisProps
 } from "./types.js";
 import { encodeReplyValue, decodeReply, encodeArgArray } from "./codec.js";
 import type { ReplyValue as ReplyValueType } from "./types.js";

@@ -522,6 +522,21 @@ int32_t init(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  {
+    PtrLen props = host_redis_props();
+    if (props.ptr && props.len) {
+      int rc = apply_redis_props(g_state, (const uint8_t *)(uintptr_t)props.ptr,
+                                 (size_t)props.len);
+      free_mem(props.ptr);
+      if (rc != 0) {
+        return -1;
+      }
+    }
+  }
+  /* Redis 7.4+ exposes `server` as an alias of `redis`; same table reference so
+   * both share the host-injected props. Must run before protection locks them. */
+  lua_getglobal(g_state, "redis");
+  lua_setglobal(g_state, "server");
   enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
@@ -539,6 +554,21 @@ int32_t reset(void) {
   }
   open_allowed_libs(g_state);
   register_redis_api(g_state);
+  {
+    PtrLen props = host_redis_props();
+    if (props.ptr && props.len) {
+      int rc = apply_redis_props(g_state, (const uint8_t *)(uintptr_t)props.ptr,
+                                 (size_t)props.len);
+      free_mem(props.ptr);
+      if (rc != 0) {
+        return -1;
+      }
+    }
+  }
+  /* Redis 7.4+ exposes `server` as an alias of `redis`; same table reference so
+   * both share the host-injected props. Must run before protection locks them. */
+  lua_getglobal(g_state, "redis");
+  lua_setglobal(g_state, "server");
   enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();

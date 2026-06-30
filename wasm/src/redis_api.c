@@ -38,6 +38,12 @@ static int64_t read_i64_le(const uint8_t *src) {
   return (int64_t)value;
 }
 
+static double read_f64_le(const uint8_t *src) {
+  double d;
+  memcpy(&d, src, sizeof(d)); /* wasm is little-endian */
+  return d;
+}
+
 typedef struct ArgBuffer {
   uint8_t *data;
   size_t len;
@@ -323,6 +329,112 @@ static void set_log_constants(lua_State *L) {
   lua_setfield(L, -2, "LOG_NOTICE");
   lua_pushnumber(L, LOG_WARNING);
   lua_setfield(L, -2, "LOG_WARNING");
+}
+
+/* Stub function bodies for host-injected props. l_const_return returns its single
+ * upvalue (the configured constant); l_noop returns nothing. */
+static int l_const_return(lua_State *L) {
+  lua_pushvalue(L, lua_upvalueindex(1));
+  return 1;
+}
+
+static int l_noop(lua_State *L) {
+  (void)L;
+  return 0;
+}
+
+/* redisProps wire kinds/value types. Mirrors src/codec.ts. */
+#define PROP_KIND_FIELD 0
+#define PROP_KIND_STUB 1
+#define PROP_VTYPE_NONE 0
+#define PROP_VTYPE_BOOL 1
+#define PROP_VTYPE_NUMBER 2
+#define PROP_VTYPE_STRING 3
+
+int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
+  if (len < 4) {
+    return 0; /* nothing to apply */
+  }
+  size_t off = 0;
+  uint32_t count = read_u32_le(buf);
+  off += 4;
+
+  lua_getglobal(L, "redis");
+  if (!lua_istable(L, -1)) {
+    lua_pop(L, 1);
+    return -1;
+  }
+  int redis_idx = lua_gettop(L);
+
+  for (uint32_t i = 0; i < count; i++) {
+    if (off > len || 4 > len - off) {
+      lua_pop(L, 1);
+      return -1;
+    }
+    uint32_t name_len = read_u32_le(buf + off);
+    off += 4;
+    if (off > len || name_len > len - off) {
+      lua_pop(L, 1);
+      return -1;
+    }
+    const char *name = (const char *)(buf + off);
+    off += name_len;
+
+    if (off > len || 2 > len - off) {
+      lua_pop(L, 1);
+      return -1;
+    }
+    uint8_t kind = buf[off++];
+    uint8_t vtype = buf[off++];
+
+    /* Push the value (constant, or the stub's return value). */
+    switch (vtype) {
+      case PROP_VTYPE_NONE:
+        lua_pushnil(L);
+        break;
+      case PROP_VTYPE_BOOL:
+        if (off > len || 1 > len - off) { lua_pop(L, 1); return -1; }
+        lua_pushboolean(L, buf[off] != 0);
+        off += 1;
+        break;
+      case PROP_VTYPE_NUMBER:
+        if (off > len || 8 > len - off) { lua_pop(L, 1); return -1; }
+        lua_pushnumber(L, (lua_Number)read_f64_le(buf + off));
+        off += 8;
+        break;
+      case PROP_VTYPE_STRING: {
+        if (off > len || 4 > len - off) { lua_pop(L, 1); return -1; }
+        uint32_t vlen = read_u32_le(buf + off);
+        off += 4;
+        if (off > len || vlen > len - off) { lua_pop(L, 1); return -1; }
+        lua_pushlstring(L, (const char *)(buf + off), vlen);
+        off += vlen;
+        break;
+      }
+      default:
+        /* Pops the redis table itself; nothing else is on the stack here. */
+        lua_pop(L, 1);
+        return -1;
+    }
+
+    /* Stack: [redis, value]. For a stub, replace value with a closure. */
+    if (kind == PROP_KIND_STUB) {
+      if (vtype == PROP_VTYPE_NONE) {
+        lua_pop(L, 1); /* drop the nil placeholder */
+        lua_pushcclosure(L, l_noop, 0);
+      } else {
+        lua_pushcclosure(L, l_const_return, 1); /* consumes value as upvalue */
+      }
+    }
+
+    /* redis[name] = top-of-stack, binary-safe name. */
+    lua_pushlstring(L, name, name_len); /* [redis, val, name] */
+    lua_insert(L, -2);                  /* [redis, name, val] */
+    lua_settable(L, redis_idx);         /* pops name+val */
+  }
+
+  lua_pop(L, 1); /* pop redis */
+  return 0;
 }
 
 void register_redis_api(lua_State *L) {

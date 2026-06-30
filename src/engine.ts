@@ -57,10 +57,13 @@ import type {
   RedisLogHandler,
   EngineOptions,
   StandaloneOptions,
+  RedisProp,
+  RedisProps,
 } from "./types.js";
 import {
   decodeReply,
   encodeArgArray,
+  encodeRedisProps,
   ensureBuffer,
   REPLY_SCRIPT_ERROR,
   unpackPtrLen,
@@ -387,6 +390,32 @@ function buildScriptError(
   };
 }
 
+/**
+ * Builds the `host_redis_props` handler. The import takes no input args and
+ * returns a PtrLen blob (the encoded redisProps). A `count == 0` blob (length 4)
+ * is treated as "no props" and returns a zero PtrLen so C skips application.
+ *
+ * ABI: under sret the runtime passes a single retPtr arg; under direct return it
+ * passes none. We detect via arg count, mirroring parseAbiArgs but with no input
+ * pointer.
+ *
+ * @internal exported for testing.
+ */
+export function makePropsHandler(
+  exports: WasmExports,
+  blob: Buffer,
+): (...args: number[]) => bigint | void {
+  const empty = blob.length <= 4; // only the u32 count, zero entries
+  return (...args: number[]): bigint | void => {
+    const hasRet = args.length >= 1;
+    const abiArgs = { hasRet, retPtr: hasRet ? args[0] : 0, ptr: 0, len: 0 };
+    const ptrLen = empty
+      ? { ptr: 0, len: 0 }
+      : { ptr: allocAndWrite(exports, blob), len: blob.length };
+    return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+  };
+}
+
 const ERROR_MARKER = "__RLUA_E__:";
 
 /**
@@ -419,6 +448,7 @@ type MutableHandlers = {
   sha1hex: (...args: number[]) => bigint | void;
   call: (...args: number[]) => bigint | void;
   pcall: (...args: number[]) => bigint | void;
+  props: (...args: number[]) => bigint | void;
 };
 
 /**
@@ -664,6 +694,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
     sha1hex: () => BigInt(0),
     call: () => BigInt(0),
     pcall: () => BigInt(0),
+    props: () => BigInt(0),
   };
 
   // Create wrapper imports that delegate to mutable handlers
@@ -674,9 +705,13 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
     host_sha1hex: (...args: number[]) => handlers.sha1hex(...args),
     host_redis_call: (...args: number[]) => handlers.call(...args),
     host_redis_pcall: (...args: number[]) => handlers.pcall(...args),
+    host_redis_props: (...args: number[]) => handlers.props(...args),
   };
 
   const { exports } = await loadModule(options, hostImports);
+
+  // Wire the props handler now that we have real exports + the encoded blob.
+  handlers.props = makePropsHandler(exports, encodeRedisProps(options.redisProps));
 
   return new LuaWasmModule(exports, handlers, options);
 }
@@ -745,4 +780,6 @@ export type {
   RedisLogHandler,
   StandaloneOptions,
   LoadOptions,
+  RedisProp,
+  RedisProps,
 };

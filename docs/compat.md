@@ -22,9 +22,28 @@
 
 ## Exclusions
 - Debug helpers: `redis.debug`, `redis.breakpoint`.
-- Replication helpers: `redis.set_repl`, `redis.get_repl`, `redis.replicate_commands`.
 - Redis function library helpers: `redis.register_function` and related APIs.
 - Any OS, IO, or time-dependent Lua libraries.
+
+## Host-Injectable `redis.*` Props
+
+The engine ships **none** of the version-specific `redis.*` members by default (a
+blank slate) — there is no bundled `REDIS_VERSION`, and `redis.replicate_commands()`
+etc. do not exist unless the host adds them. A host that needs them supplies the
+`redisProps` option (see [README](../README.md#injecting-redis-props)):
+
+- `REDIS_VERSION`, `REDIS_VERSION_NUM` — version constants.
+- `REPL_ALL`, `REPL_AOF`, `REPL_SLAVE`, `REPL_REPLICA`, `REPL_NONE` — replication
+  flag constants.
+- `replicate_commands` — stub function, typically `{ returns: true }`.
+- `set_repl` / `get_repl` — stub functions, typically `{ returns: null }` (noop) /
+  `{ returns: <flag> }`.
+
+`redisProps` supports two shapes per member: `{ value }` for a constant field, or
+`{ returns }` for a stub function that ignores its arguments and returns the given
+constant (`returns: null` makes it return nothing). `server` is created internally
+as an alias of `redis` (same table, same injected props) — it is not configured
+through `redisProps`.
 
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.

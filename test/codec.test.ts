@@ -8,9 +8,11 @@ import {
   encodeReplyValue,
   decodeReply,
   encodeArgArray,
+  encodeRedisProps,
   packPtrLen,
   unpackPtrLen
 } from "../src/codec.js";
+import type { RedisProps } from "../src/types.js";
 
 // -----------------------------------------------------------------------------
 // ensureBuffer tests
@@ -436,4 +438,76 @@ test("unpackPtrLen: roundtrip", () => {
   const { ptr, len } = unpackPtrLen(packed);
   assert.equal(ptr, originalPtr);
   assert.equal(len, originalLen);
+});
+
+// -----------------------------------------------------------------------------
+// encodeRedisProps tests
+// -----------------------------------------------------------------------------
+
+test("encodeRedisProps: encodes empty/undefined as a zero-count blob", () => {
+  const a = encodeRedisProps(undefined);
+  const b = encodeRedisProps({});
+  assert.equal(a.length, 4);
+  assert.equal(a.readUInt32LE(0), 0);
+  assert.deepEqual([...a], [...b]);
+});
+
+test("encodeRedisProps: encodes a string field", () => {
+  const buf = encodeRedisProps({ REDIS_VERSION: { value: "7.4.0" } });
+  assert.equal(buf.readUInt32LE(0), 1); // count
+  let off = 4;
+  assert.equal(buf.readUInt32LE(off), 13); // name len ("REDIS_VERSION")
+  off += 4;
+  assert.equal(buf.subarray(off, off + 13).toString(), "REDIS_VERSION");
+  off += 13;
+  assert.equal(buf[off++], 0); // kind = field
+  assert.equal(buf[off++], 3); // vtype = string
+  assert.equal(buf.readUInt32LE(off), 5); // value len
+  off += 4;
+  assert.equal(buf.subarray(off, off + 5).toString(), "7.4.0");
+});
+
+test("encodeRedisProps: encodes a number field as f64 le", () => {
+  const buf = encodeRedisProps({ N: { value: 0x070400 } });
+  // count(4) + nameLen(4) + "N"(1) + kind(1) + vtype(1) + f64(8)
+  assert.equal(buf.length, 4 + 4 + 1 + 1 + 1 + 8);
+  const vstart = 4 + 4 + 1 + 1 + 1;
+  assert.equal(buf[4 + 4 + 1], 0); // kind field
+  assert.equal(buf[4 + 4 + 1 + 1], 2); // vtype number
+  assert.equal(buf.readDoubleLE(vstart), 0x070400);
+});
+
+test("encodeRedisProps: encodes a boolean field", () => {
+  const buf = encodeRedisProps({ T: { value: true } });
+  const k = 4 + 4 + 1;
+  assert.equal(buf[k], 0); // kind field
+  assert.equal(buf[k + 1], 1); // vtype bool
+  assert.equal(buf[k + 2], 1); // true
+});
+
+test("encodeRedisProps: encodes a stub returning a constant", () => {
+  const buf = encodeRedisProps({ replicate_commands: { returns: true } });
+  const k = 4 + 4 + "replicate_commands".length;
+  assert.equal(buf[k], 1); // kind stub
+  assert.equal(buf[k + 1], 1); // vtype bool
+  assert.equal(buf[k + 2], 1); // true
+});
+
+test("encodeRedisProps: encodes a noop stub (returns null) with vtype none and no payload", () => {
+  const buf = encodeRedisProps({ set_repl: { returns: null } });
+  const k = 4 + 4 + "set_repl".length;
+  assert.equal(buf[k], 1); // kind stub
+  assert.equal(buf[k + 1], 0); // vtype none
+  assert.equal(buf.length, k + 2); // no payload after vtype
+});
+
+test("encodeRedisProps: throws when an entry has neither value nor returns", () => {
+  assert.throws(() => encodeRedisProps({ X: {} as never }), TypeError);
+});
+
+test("encodeRedisProps: throws when an entry has both value and returns", () => {
+  assert.throws(
+    () => encodeRedisProps({ X: { value: 1, returns: 2 } as never }),
+    TypeError,
+  );
 });
