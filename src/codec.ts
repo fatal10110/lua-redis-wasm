@@ -299,10 +299,23 @@ export function decodeReply(
     return { value: { ok: Buffer.from(payload) }, offset: cursor };
   }
 
-  if (type === REPLY_ERROR || type === REPLY_SCRIPT_ERROR) {
+  if (type === REPLY_ERROR) {
     const payload = buffer.subarray(cursor, cursor + countOrLen);
     cursor += countOrLen;
     return { value: splitErrorPayload(payload), offset: cursor };
+  }
+
+  if (type === REPLY_SCRIPT_ERROR) {
+    // Payload is a u32le `line` (0 = unknown, parse from message prefix) followed
+    // by the `CODE message` bytes. See reply_script_error in wasm/src/runtime.c.
+    const line = buffer.readUInt32LE(cursor);
+    const payload = buffer.subarray(cursor + 4, cursor + countOrLen);
+    cursor += countOrLen;
+    const error = splitErrorPayload(payload);
+    // `line` is internal plumbing consumed by buildScriptError; it is not part of
+    // the public ReplyValue contract, hence the cast.
+    const value = (line > 0 ? { ...error, line } : error) as ReplyValue;
+    return { value, offset: cursor };
   }
 
   if (type === REPLY_ARRAY) {
