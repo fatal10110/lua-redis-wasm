@@ -20,6 +20,9 @@ export type RedisHost = {
 };
 ```
 
+The host reply ABI supports RESP2 replies plus RESP3 booleans, doubles, maps,
+sets, big numbers, and verbatim strings. Push replies are not representable.
+
 ### redisCall
 - Invoked for `redis.call(...)`.
 - Receives the command name and arguments as `Buffer[]`.
@@ -42,9 +45,15 @@ export type ReplyValue =
   | null
   | number
   | bigint
+  | boolean
   | Buffer
   | { ok: Buffer }
   | { err: Buffer }
+  | { double: number }
+  | { big_number: Buffer }
+  | { verbatim_string: { format: Buffer; string: Buffer } }
+  | { map: [ReplyValue, ReplyValue][] }
+  | { set: ReplyValue[] }
   | ReplyValue[];
 ```
 
@@ -52,4 +61,3 @@ export type ReplyValue =
 - No string coercion is applied to arguments.
 - If you need strings, decode them from `Buffer` with an explicit encoding.
 - To return binary data, return a `Buffer` or `{ ok: Buffer }`.
-

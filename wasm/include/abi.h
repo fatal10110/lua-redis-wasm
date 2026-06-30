@@ -20,7 +20,13 @@ typedef enum ReplyType {
    * propagated out of redis.call). The host decorates these with the script
    * sha / source context; plain REPLY_ERROR values returned by the script
    * (e.g. `return redis.pcall(...)`) are left undecorated. */
-  REPLY_SCRIPT_ERROR = 0x06
+  REPLY_SCRIPT_ERROR = 0x06,
+  REPLY_BOOL = 0x07,
+  REPLY_DOUBLE = 0x08,
+  REPLY_MAP = 0x09,
+  REPLY_SET = 0x0a,
+  REPLY_BIG_NUMBER = 0x0b,
+  REPLY_VERBATIM = 0x0c
 } ReplyType;
 
 #if defined(__GNUC__)

@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 void register_redis_api(lua_State *L);
+uint32_t redis_resp_version(void);
+void redis_reset_resp_version(void);
 
 /* Decodes the host_redis_props blob and assigns each entry onto the global
  * `redis` table. Returns 0 on success, -1 on a malformed blob. */

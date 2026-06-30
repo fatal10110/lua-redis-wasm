@@ -33,6 +33,6 @@ const engine = await LuaWasmEngine.create({
 | Lua version | 5.1 |
 | Binary-safe strings | Yes |
 | `redis.call` / `redis.pcall` | Yes |
+| RESP3 conversions / `redis.setresp(3)` | Yes; RESP3 push is not a Lua return type |
 | Debug / REPL helpers | No |
 | Redis modules Lua API | Not yet |
-

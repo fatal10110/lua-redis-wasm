@@ -393,6 +393,94 @@ test("redis.error_reply: prepends ERR to lowercase multi-word messages", async (
   assert.equal(coded.code?.toString("utf8"), "WRONGTYPE");
 });
 
+test("redis.setresp: RESP2 is accepted and returns no value", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  assert.equal(engine.eval("return redis.setresp(2)"), null);
+});
+
+test("redis.setresp: enables RESP3 return conversions for the current script", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  const result = engine.eval(`
+    redis.setresp(3)
+    return {
+      true,
+      false,
+      {double=3.5},
+      {big_number='123456789012345678901234567890'},
+      {verbatim_string={format='txt', string='hello'}},
+      {map={a=1,b='two'}},
+      {set={a=true,b=true}}
+    }
+  `) as ReplyValue[];
+
+  assert.equal(result[0], true);
+  assert.equal(result[1], false);
+  assert.deepEqual(result[2], { double: 3.5 });
+  assert.deepEqual(result[3], { big_number: Buffer.from("123456789012345678901234567890") });
+  assert.deepEqual(result[4], {
+    verbatim_string: { format: Buffer.from("txt"), string: Buffer.from("hello") },
+  });
+
+  const map = (result[5] as { map: [ReplyValue, ReplyValue][] }).map
+    .map(([key, value]) => [
+      Buffer.isBuffer(key) ? key.toString("utf8") : key,
+      Buffer.isBuffer(value) ? value.toString("utf8") : value,
+    ])
+    .sort(([a], [b]) => String(a).localeCompare(String(b)));
+  assert.deepEqual(map, [["a", 1], ["b", "two"]]);
+
+  const set = (result[6] as { set: ReplyValue[] }).set
+    .map((value) => Buffer.isBuffer(value) ? value.toString("utf8") : value)
+    .sort();
+  assert.deepEqual(set, ["a", "b"]);
+
+  assert.equal(engine.eval("return true"), 1);
+});
+
+test("redis.setresp: rejects unsupported protocol versions", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  const result = engine.eval("return redis.setresp(4)") as {
+    err: Buffer;
+    code?: Buffer;
+    meta?: { line: number };
+  };
+
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal(result.code?.toString("utf8"), "ERR");
+  assert.match(result.err.toString("utf8"), /RESP version must be 2 or 3/);
+  assert.equal(result.meta?.line, 1);
+});
+
+test("redis.setresp: decodes RESP3 host replies for redis.call", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost({
+    redisCall: () => ({
+      map: [[
+        Buffer.from("score"),
+        { double: 2.5 },
+      ], [
+        Buffer.from("tags"),
+        { set: [Buffer.from("hot")] },
+      ]],
+    }),
+  }));
+
+  assert.deepEqual(engine.eval("redis.setresp(3); local r=redis.call('X'); return {double=r.map.score.double}"), {
+    double: 2.5,
+  });
+  assert.equal(engine.eval("redis.setresp(3); local r=redis.call('X'); return r.map.tags.set.hot"), true);
+});
+
 test("eval: coroutine library remains available", async () => {
   await resolveWasmPath();
   const module = await load();

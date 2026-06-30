@@ -210,11 +210,21 @@ type ReplyValue =
   | null // Lua nil
   | number // Integer (safe range)
   | bigint // Integer (64-bit)
+  | boolean // RESP3 boolean
   | Buffer // Bulk string
   | { ok: Buffer } // Status reply (+OK)
   | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta } // Error reply (-ERR); code e.g. WRONGTYPE, meta for rendering
+  | { double: number } // RESP3 double
+  | { big_number: Buffer } // RESP3 big number
+  | { verbatim_string: { format: Buffer; string: Buffer } } // RESP3 verbatim string
+  | { map: [ReplyValue, ReplyValue][] } // RESP3 map
+  | { set: ReplyValue[] } // RESP3 set
   | ReplyValue[]; // Array
 ```
+
+The ABI supports RESP2 replies and RESP3 booleans, doubles, maps, sets, big
+numbers, and verbatim strings. `redis.setresp(3)` enables RESP3 Lua conversions
+for the current script.
 
 On decode, an error payload of the form `CODE message` is split into `err` (the
 message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the

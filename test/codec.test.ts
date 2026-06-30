@@ -12,7 +12,7 @@ import {
   packPtrLen,
   unpackPtrLen
 } from "../src/codec.js";
-import type { RedisProps } from "../src/types.js";
+import type { RedisProps, ReplyValue } from "../src/types.js";
 
 // -----------------------------------------------------------------------------
 // ensureBuffer tests
@@ -189,6 +189,21 @@ test("encodeReplyValue: mixed array", () => {
   assert.equal(encoded.readUInt32LE(1), 5); // count
 });
 
+test("encodeReplyValue/decodeReply: RESP3 values roundtrip", () => {
+  const value: ReplyValue = [
+    true,
+    false,
+    { double: 3.5 },
+    { big_number: Buffer.from("123456789012345678901234567890") },
+    { verbatim_string: { format: Buffer.from("txt"), string: Buffer.from("hello") } },
+    { map: [[Buffer.from("a"), 1], [Buffer.from("b"), Buffer.from("two")]] },
+    { set: [Buffer.from("a"), Buffer.from("b")] },
+  ];
+
+  const { value: decoded } = decodeReply(encodeReplyValue(value));
+  assert.deepEqual(decoded, value);
+});
+
 // -----------------------------------------------------------------------------
 // decodeReply tests
 // -----------------------------------------------------------------------------
@@ -314,6 +329,12 @@ test("decodeReply: array with integers", () => {
 
 test("decodeReply: throws on truncated buffer", () => {
   const buf = Buffer.from([0x01]); // Too short
+  assert.throws(() => decodeReply(buf), { message: "ERR reply decoding failed" });
+});
+
+test("decodeReply: throws on truncated big number payload", () => {
+  // REPLY_BIG_NUMBER (0x0b) claims 4 bytes but only 2 follow.
+  const buf = Buffer.from([0x0b, 4, 0, 0, 0, 0x31, 0x32]);
   assert.throws(() => decodeReply(buf), { message: "ERR reply decoding failed" });
 });
 

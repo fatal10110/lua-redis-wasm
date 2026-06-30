@@ -13,6 +13,14 @@
 
 static uint32_t g_resp_version = 2;
 
+uint32_t redis_resp_version(void) {
+  return g_resp_version;
+}
+
+void redis_reset_resp_version(void) {
+  g_resp_version = 2;
+}
+
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
   dst[1] = (uint8_t)((value >> 8) & 0xFF);
@@ -211,6 +219,80 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       }
       return 1;
     }
+    case REPLY_BOOL:
+      if (*offset + 1 > len) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      lua_pushboolean(L, buf[*offset] != 0);
+      *offset += 1;
+      return 1;
+    case REPLY_DOUBLE:
+      if (*offset + 8 > len) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      lua_createtable(L, 0, 1);
+      lua_pushnumber(L, (lua_Number)read_f64_le(buf + *offset));
+      lua_setfield(L, -2, "double");
+      *offset += 8;
+      return 1;
+    case REPLY_BIG_NUMBER:
+      if (*offset + count_or_len > len) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      lua_createtable(L, 0, 1);
+      lua_pushlstring(L, (const char *)(buf + *offset), count_or_len);
+      lua_setfield(L, -2, "big_number");
+      *offset += count_or_len;
+      return 1;
+    case REPLY_VERBATIM: {
+      size_t payload_end = *offset + count_or_len;
+      if (count_or_len < 4 || payload_end > len) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      uint32_t format_len = read_u32_le(buf + *offset);
+      *offset += 4;
+      if (*offset + format_len > payload_end) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      size_t string_len = payload_end - *offset - format_len;
+      lua_createtable(L, 0, 1);
+      lua_createtable(L, 0, 2);
+      lua_pushlstring(L, (const char *)(buf + *offset), format_len);
+      lua_setfield(L, -2, "format");
+      *offset += format_len;
+      if (*offset + string_len > len) {
+        return luaL_error(L, "ERR reply decoding failed");
+      }
+      lua_pushlstring(L, (const char *)(buf + *offset), string_len);
+      lua_setfield(L, -2, "string");
+      *offset = payload_end;
+      lua_setfield(L, -2, "verbatim_string");
+      return 1;
+    }
+    case REPLY_MAP:
+      lua_createtable(L, 0, 1);
+      lua_createtable(L, 0, (int)count_or_len);
+      for (uint32_t i = 0; i < count_or_len; i++) {
+        if (decode_reply(L, buf, len, offset, raise_on_error) != 1 ||
+            decode_reply(L, buf, len, offset, raise_on_error) != 1) {
+          return luaL_error(L, "ERR reply decoding failed");
+        }
+        lua_settable(L, -3);
+      }
+      lua_setfield(L, -2, "map");
+      return 1;
+    case REPLY_SET:
+      lua_createtable(L, 0, 1);
+      lua_createtable(L, 0, (int)count_or_len);
+      for (uint32_t i = 0; i < count_or_len; i++) {
+        if (decode_reply(L, buf, len, offset, raise_on_error) != 1) {
+          return luaL_error(L, "ERR reply decoding failed");
+        }
+        lua_pushboolean(L, 1);
+        lua_settable(L, -3);
+      }
+      lua_setfield(L, -2, "set");
+      return 1;
     default:
       return luaL_error(L, "ERR unknown reply type");
   }
@@ -314,10 +396,12 @@ static int l_redis_status_reply(lua_State *L) {
 }
 
 static int l_redis_setresp(lua_State *L) {
-  uint32_t prev = g_resp_version;
-  g_resp_version = (uint32_t)luaL_checkinteger(L, 1);
-  lua_pushnumber(L, (lua_Number)prev);
-  return 1;
+  uint32_t next = (uint32_t)luaL_checkinteger(L, 1);
+  if (next != 2 && next != 3) {
+    return luaL_error(L, "ERR RESP version must be 2 or 3.");
+  }
+  g_resp_version = next;
+  return 0;
 }
 
 static void set_log_constants(lua_State *L) {
