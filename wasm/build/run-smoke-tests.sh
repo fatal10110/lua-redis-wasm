@@ -27,7 +27,7 @@ for file in $REDIS_LUA_MODULES; do
   MODULE_FILES="$MODULE_FILES $REDIS_LUA_DEPS/$file"
 done
 
-COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $CORE_FILES $LIB_FILES $MODULE_FILES"
+COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $CORE_FILES $LIB_FILES $MODULE_FILES"
 
 mkdir -p "$OUT_DIR"
 
