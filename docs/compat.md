@@ -48,7 +48,9 @@ through `redisProps`.
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.
 - No clock or time APIs available in Lua.
-- No randomness unless explicitly injected by the host.
+- `math.random` and `math.randomseed` are available; the random sequence resets
+  for each script run.
+- No other randomness unless explicitly injected by the host.
 - No native extensions beyond the supported Redis modules.
 
 ## Compatibility Criteria

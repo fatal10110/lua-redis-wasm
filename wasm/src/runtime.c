@@ -296,14 +296,6 @@ static void disable_non_determinism(lua_State *L) {
   remove_package_entry(L, "io");
   remove_package_entry(L, "debug");
   remove_package_entry(L, "package");
-  lua_getglobal(L, "math");
-  if (lua_istable(L, -1)) {
-    lua_pushnil(L);
-    lua_setfield(L, -2, "random");
-    lua_pushnil(L);
-    lua_setfield(L, -2, "randomseed");
-  }
-  lua_pop(L, 1);
 }
 
 // Globals protection: mirror real Redis exactly.
@@ -580,6 +572,7 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
+  srand(0);
   set_empty_keys_argv(g_state);
   const char *script = (const char *)(uintptr_t)ptr;
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
@@ -628,6 +621,7 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
+  srand(0);
   if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
     return reply_error("ERR KEYS/ARGV exceeds configured limit", 40);
   }
