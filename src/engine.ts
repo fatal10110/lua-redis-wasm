@@ -357,16 +357,19 @@ export class LuaEngine {
  *   they pass through untouched, with only `line`/`sha` attached for the host to
  *   decorate.
  *
- * Lua runtime errors carry a `user_script:N:` prefix (N is the line); command
- * errors propagated out of redis.call have no prefix and are reported at line 1.
+ * The line comes from the WASM error handler (`value.line`), which captures the
+ * script frame at the error point — including command errors propagated out of
+ * redis.call, which carry no `user_script:N:` text prefix. When the handler did
+ * not run (load/syntax errors), `value.line` is absent and the line is parsed
+ * from the message's `user_script:N:` prefix, defaulting to 1.
  */
 function buildScriptError(
-  value: { err: Buffer; code?: Buffer },
+  value: { err: Buffer; code?: Buffer; line?: number },
   sha: string,
 ): { err: Buffer; code: Buffer; meta: ReplyErrorMeta } {
   const errStr = value.err.toString("utf8");
-  let line = 1;
-  if (errStr.startsWith("user_script:")) {
+  let line = value.line ?? 1;
+  if (value.line === undefined && errStr.startsWith("user_script:")) {
     const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
     if (colonIdx > 12) {
       line = Number(errStr.substring(12, colonIdx)) || 1;
