@@ -57,6 +57,8 @@ import type {
   RedisLogHandler,
   EngineOptions,
   StandaloneOptions,
+  RedisProp,
+  RedisProps,
 } from "./types.js";
 import {
   decodeReply,
@@ -778,4 +780,6 @@ export type {
   RedisLogHandler,
   StandaloneOptions,
   LoadOptions,
+  RedisProp,
+  RedisProps,
 };

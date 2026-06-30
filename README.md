@@ -109,7 +109,7 @@ const engine = await LuaWasmEngine.create({
 `{ value }` sets a constant field; `{ returns }` sets a stub function that ignores
 its arguments and returns the given constant (`null` returns nothing). `server` is
 an internal alias of `redis` — both reference the same table with the same injected
-props, with or without `redisProps` set.
+props, with or without `redisProps` set. Numeric values follow Redis's number semantics — a Lua number returned from a script is truncated to an integer (e.g. a non-integer numeric prop reads back truncated).
 
 ### engine.eval(script)
 
