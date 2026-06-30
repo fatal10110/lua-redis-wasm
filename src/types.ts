@@ -241,6 +241,35 @@ export type EngineLimits = {
 };
 
 /**
+ * Named Redis/Valkey compatibility profile. Selects which of the three Lua
+ * sandbox behaviors that differ across versions are emulated. Aliases collapse
+ * to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
+ * valkey-8.0 == valkey-9.0). Use {@link CompatOverrides} to tweak a single flag.
+ */
+export type CompatProfile =
+  | "redis-6.2"
+  | "redis-7.0"
+  | "redis-7.2"
+  | "redis-7.4"
+  | "redis-8.0"
+  | "valkey-8.0"
+  | "valkey-9.0";
+
+/**
+ * Fine-grained overrides for the compatibility profile, merged over the
+ * selected {@link CompatProfile} (or the default). These are the only three Lua
+ * sandbox behaviors that actually differ across Redis 6.2-8.x and Valkey.
+ */
+export type CompatOverrides = {
+  /** Keep the Lua `print` global. Only Redis 6.2 did. Default: false. */
+  print?: boolean;
+  /** Expose the (sandboxed) `os` library. Redis 7.4+ / Valkey 8.0+. Default: true. */
+  os?: boolean;
+  /** Expose `server` as an alias of `redis`. Valkey 8.0+ only. Default: true. */
+  serverAlias?: boolean;
+};
+
+/**
  * Configuration options for creating a LuaWasmEngine with host integration.
  *
  * @example
@@ -275,6 +304,12 @@ export type EngineOptions = {
 
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
+
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  profile?: CompatProfile;
+
+  /** Per-flag compatibility overrides, merged over `profile` (or the default). */
+  compat?: CompatOverrides;
 };
 
 /**
@@ -308,6 +343,12 @@ export type StandaloneOptions = {
 
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
+
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  profile?: CompatProfile;
+
+  /** Per-flag compatibility overrides, merged over `profile` (or the default). */
+  compat?: CompatOverrides;
 };
 
 /**
@@ -340,4 +381,10 @@ export type LoadOptions = {
 
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
+
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  profile?: CompatProfile;
+
+  /** Per-flag compatibility overrides, merged over `profile` (or the default). */
+  compat?: CompatOverrides;
 };

@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { load, LuaWasmModule } from "../src/index.js";
+import { load, LuaWasmModule, LuaEngine } from "../src/index.js";
 import { LuaWasmEngine, makePropsHandler } from "../src/engine.js";
 import { encodeRedisProps } from "../src/codec.js";
 import type { ReplyValue, RedisHost } from "../src/types.js";
@@ -1340,4 +1340,66 @@ test("redisProps integration: makes injected props readonly under globals protec
   });
   const r = engine.eval("redis.REDIS_VERSION = 'x' return 1") as { err: Buffer };
   assert.ok(r && typeof r === "object" && "err" in r);
+});
+
+// =============================================================================
+// Compatibility profiles (print / os / server alias differ across versions)
+// =============================================================================
+
+type GlobalReadErr = { err: Buffer; meta?: { kind: string; name: string } };
+
+/** Assert reading `name` raises a global-read error (i.e. the global is absent). */
+function assertGlobalAbsent(engine: LuaEngine, name: string): void {
+  const r = engine.eval(`return ${name}`) as GlobalReadErr;
+  assert.ok(r && typeof r === "object" && "err" in r, `${name} should be absent`);
+  assert.equal(r.meta?.kind, "global-read");
+  assert.equal(r.meta?.name, name);
+}
+
+test("compat redis6.2: print kept, os absent, server absent", async () => {
+  const module = await load({ profile: "redis-6.2" });
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return type(print)").toString(), "function");
+  assert.equal(engine.eval("print('x') return 1"), 1); // print runs, returns nil
+  assertGlobalAbsent(engine, "os");
+  assertGlobalAbsent(engine, "server");
+});
+
+test("compat redis7.2: print absent, os absent, server absent", async () => {
+  const module = await load({ profile: "redis-7.2" });
+  const engine = module.create(createTestHost());
+  assertGlobalAbsent(engine, "print");
+  assertGlobalAbsent(engine, "os");
+  assertGlobalAbsent(engine, "server");
+});
+
+test("compat redis8.0: os present, server absent (redis has no server alias)", async () => {
+  const module = await load({ profile: "redis-8.0" });
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return type(os)").toString(), "table");
+  assertGlobalAbsent(engine, "print");
+  assertGlobalAbsent(engine, "server");
+});
+
+test("compat valkey8.0: os present, server aliases redis", async () => {
+  const module = await load({ profile: "valkey-8.0" });
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return type(os)").toString(), "table");
+  assert.equal(engine.eval("return server == redis"), 1);
+  assertGlobalAbsent(engine, "print");
+});
+
+test("compat: per-flag override is merged over the profile", async () => {
+  const module = await load({ profile: "redis-7.2", compat: { os: true } });
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return type(os)").toString(), "table");
+  assertGlobalAbsent(engine, "server"); // unchanged by the override
+});
+
+test("compat: default (no profile) keeps historical behavior", async () => {
+  const module = await load();
+  const engine = module.create(createTestHost());
+  assert.equal(engine.eval("return type(os)").toString(), "table");
+  assert.equal(engine.eval("return server == redis"), 1);
+  assertGlobalAbsent(engine, "print");
 });

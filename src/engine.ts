@@ -59,6 +59,8 @@ import type {
   StandaloneOptions,
   RedisProp,
   RedisProps,
+  CompatProfile,
+  CompatOverrides,
 } from "./types.js";
 import {
   decodeReply,
@@ -473,6 +475,44 @@ type MutableHandlers = {
  * const standalone = module.createStandalone();
  * ```
  */
+// Compatibility flag bits — must match the COMPAT_* macros in wasm/src/runtime.c.
+const COMPAT_PRINT = 0x1;
+const COMPAT_OS = 0x2;
+const COMPAT_SERVER_ALIAS = 0x4;
+
+/**
+ * Profile presets -> the three Lua sandbox behavior flags. Mirrors the
+ * Redis/Valkey version matrix (see redis-version-lua-behavior-matrix).
+ */
+const COMPAT_PROFILES: Record<CompatProfile, Required<CompatOverrides>> = {
+  "redis-6.2": { print: true, os: false, serverAlias: false },
+  "redis-7.0": { print: false, os: false, serverAlias: false },
+  "redis-7.2": { print: false, os: false, serverAlias: false },
+  "redis-7.4": { print: false, os: true, serverAlias: false },
+  "redis-8.0": { print: false, os: true, serverAlias: false },
+  "valkey-8.0": { print: false, os: true, serverAlias: true },
+  "valkey-9.0": { print: false, os: true, serverAlias: true },
+};
+
+// Default when no profile is given: preserve the historical behavior (≈ valkey-8.0).
+const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
+
+/** Resolve a profile + per-flag overrides to the u8 bitmask the WASM expects. */
+function resolveCompatFlags(
+  profile?: CompatProfile,
+  overrides?: CompatOverrides,
+): number {
+  const merged = {
+    ...(profile ? COMPAT_PROFILES[profile] : COMPAT_DEFAULT),
+    ...overrides,
+  };
+  return (
+    (merged.print ? COMPAT_PRINT : 0) |
+    (merged.os ? COMPAT_OS : 0) |
+    (merged.serverAlias ? COMPAT_SERVER_ALIAS : 0)
+  );
+}
+
 export class LuaWasmModule {
   private consumed = false;
 
@@ -580,6 +620,12 @@ export class LuaWasmModule {
         this.options.limits.maxFuel ?? 0,
         this.options.limits.maxReplyBytes ?? 0,
         this.options.limits.maxArgBytes ?? 0,
+      );
+    }
+
+    if (this.exports._set_compat) {
+      this.exports._set_compat(
+        resolveCompatFlags(this.options.profile, this.options.compat),
       );
     }
 
@@ -792,4 +838,6 @@ export type {
   LoadOptions,
   RedisProp,
   RedisProps,
+  CompatProfile,
+  CompatOverrides,
 };
