@@ -7,7 +7,10 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { load, LuaWasmModule } from "../src/index.js";
+import { makePropsHandler } from "../src/engine.js";
+import { encodeRedisProps } from "../src/codec.js";
 import type { ReplyValue, RedisHost } from "../src/types.js";
+import type { WasmExports } from "../src/loader-core.js";
 
 // Helper to resolve WASM path (checks dist/ first, then wasm/build/)
 async function resolveWasmPath(): Promise<string> {
@@ -1065,4 +1068,36 @@ test("redis.pcall error value returned by the script is not decorated", async ()
     "Operation against a key holding the wrong kind of value",
   );
   assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+});
+
+// =============================================================================
+// redisProps handler (Task 2: host_redis_props wiring)
+// =============================================================================
+
+test("redisProps handler: allocates the encoded blob and returns a PtrLen (direct ABI)", () => {
+  const heap = new Uint8Array(1024);
+  let next = 8;
+  const exports = {
+    HEAPU8: heap,
+    _alloc: (n: number) => {
+      const p = next;
+      next += n;
+      return p;
+    },
+  } as unknown as WasmExports;
+
+  const blob = encodeRedisProps({ V: { value: "7.4.0" } });
+  const handler = makePropsHandler(exports, blob);
+  const packed = handler() as bigint;
+  const ptr = Number(packed & 0xffffffffn);
+  const len = Number(packed >> 32n);
+  assert.equal(len, blob.length);
+  assert.deepEqual([...heap.subarray(ptr, ptr + len)], [...blob]);
+});
+
+test("redisProps handler: returns a zero PtrLen when there are no props", () => {
+  const handler = makePropsHandler({} as never, Buffer.alloc(4));
+  // count==0 blob is treated as "no props": ptr 0, len 0.
+  const packed = handler() as bigint;
+  assert.equal(packed, 0n);
 });
