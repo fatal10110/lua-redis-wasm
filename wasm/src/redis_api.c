@@ -367,20 +367,20 @@ int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
   int redis_idx = lua_gettop(L);
 
   for (uint32_t i = 0; i < count; i++) {
-    if (off + 4 > len) {
+    if (off > len || 4 > len - off) {
       lua_pop(L, 1);
       return -1;
     }
     uint32_t name_len = read_u32_le(buf + off);
     off += 4;
-    if (off + name_len > len) {
+    if (off > len || name_len > len - off) {
       lua_pop(L, 1);
       return -1;
     }
     const char *name = (const char *)(buf + off);
     off += name_len;
 
-    if (off + 2 > len) {
+    if (off > len || 2 > len - off) {
       lua_pop(L, 1);
       return -1;
     }
@@ -393,25 +393,26 @@ int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
         lua_pushnil(L);
         break;
       case PROP_VTYPE_BOOL:
-        if (off + 1 > len) { lua_pop(L, 1); return -1; }
+        if (off > len || 1 > len - off) { lua_pop(L, 1); return -1; }
         lua_pushboolean(L, buf[off] != 0);
         off += 1;
         break;
       case PROP_VTYPE_NUMBER:
-        if (off + 8 > len) { lua_pop(L, 1); return -1; }
+        if (off > len || 8 > len - off) { lua_pop(L, 1); return -1; }
         lua_pushnumber(L, (lua_Number)read_f64_le(buf + off));
         off += 8;
         break;
       case PROP_VTYPE_STRING: {
-        if (off + 4 > len) { lua_pop(L, 1); return -1; }
+        if (off > len || 4 > len - off) { lua_pop(L, 1); return -1; }
         uint32_t vlen = read_u32_le(buf + off);
         off += 4;
-        if (off + vlen > len) { lua_pop(L, 1); return -1; }
+        if (off > len || vlen > len - off) { lua_pop(L, 1); return -1; }
         lua_pushlstring(L, (const char *)(buf + off), vlen);
         off += vlen;
         break;
       }
       default:
+        /* Pops the redis table itself; nothing else is on the stack here. */
         lua_pop(L, 1);
         return -1;
     }
