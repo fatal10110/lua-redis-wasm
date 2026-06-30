@@ -72,10 +72,11 @@ Creates a new engine instance with host integration.
 
 ```typescript
 const engine = await LuaWasmEngine.create({
-  host: RedisHost,       // Required: host callbacks
-  limits?: EngineLimits, // Optional: resource limits
-  wasmPath?: string,     // Optional: custom WASM file path
-  wasmBytes?: Uint8Array // Optional: pre-loaded WASM binary
+  host: RedisHost,         // Required: host callbacks
+  limits?: EngineLimits,   // Optional: resource limits
+  wasmPath?: string,       // Optional: custom WASM file path
+  wasmBytes?: Uint8Array,  // Optional: pre-loaded WASM binary
+  redisProps?: RedisProps, // Optional: host-injected redis.* constants/stubs
 });
 ```
 
@@ -88,6 +89,27 @@ const engine = await LuaWasmEngine.createStandalone({});
 engine.eval("return math.sqrt(16)"); // Works
 engine.eval("return redis.call('PING')"); // Returns error
 ```
+
+### Injecting `redis.*` props
+
+The package ships no version-specific `redis.*` helpers by default. Supply them via `redisProps`:
+
+```typescript
+const engine = await LuaWasmEngine.create({
+  host,
+  redisProps: {
+    REDIS_VERSION:      { value: "7.4.0" },
+    REPL_ALL:           { value: 3 },
+    replicate_commands: { returns: true },  // function(...) return true end
+    set_repl:           { returns: null },  // function(...) end (noop)
+  },
+});
+```
+
+`{ value }` sets a constant field; `{ returns }` sets a stub function that ignores
+its arguments and returns the given constant (`null` returns nothing). `server` is
+an internal alias of `redis` — both reference the same table with the same injected
+props, with or without `redisProps` set.
 
 ### engine.eval(script)
 
