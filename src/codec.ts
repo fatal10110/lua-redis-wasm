@@ -20,6 +20,12 @@
  * - 0x03: ARRAY - count of nested Reply items
  * - 0x04: STATUS - raw bytes payload (Redis +OK style)
  * - 0x05: ERROR - raw bytes payload (Redis -ERR style)
+ * - 0x07: BOOL - 1-byte boolean payload
+ * - 0x08: DOUBLE - 8-byte f64le payload
+ * - 0x09: MAP - count of key/value pairs
+ * - 0x0a: SET - count of nested Reply items
+ * - 0x0b: BIG NUMBER - raw bytes payload
+ * - 0x0c: VERBATIM STRING - [format_len: u32le][format][string]
  *
  * ### Argument Array Format
  * ```
@@ -62,6 +68,13 @@ const REPLY_ERROR = 0x05;
  * Wire format: [0x06][length: u32le][bytes...]
  */
 export const REPLY_SCRIPT_ERROR = 0x06;
+
+const REPLY_BOOL = 0x07;
+const REPLY_DOUBLE = 0x08;
+const REPLY_MAP = 0x09;
+const REPLY_SET = 0x0a;
+const REPLY_BIG_NUMBER = 0x0b;
+const REPLY_VERBATIM = 0x0c;
 
 /** redisProps wire kinds. */
 const PROP_KIND_FIELD = 0;
@@ -153,6 +166,19 @@ function writeInt64LE(value: number | bigint): Buffer {
   return buf;
 }
 
+function writeDoubleLE(value: number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeDoubleLE(value, 0);
+  return buf;
+}
+
+function header(type: number, countOrLen: number): Buffer {
+  const out = Buffer.alloc(5);
+  out[0] = type;
+  out.writeUInt32LE(countOrLen, 1);
+  return out;
+}
+
 /**
  * Encodes a ReplyValue into the ABI wire format for transmission to WASM.
  *
@@ -179,35 +205,67 @@ export function encodeReplyValue(value: ReplyValue): Buffer {
     return Buffer.from([REPLY_NULL, 0, 0, 0, 0]);
   }
 
+  if (typeof value === "boolean") {
+    return Buffer.concat([
+      header(REPLY_BOOL, 1),
+      Buffer.from([value ? 1 : 0]),
+    ]);
+  }
+
   // Handle numbers and bigints -> INTEGER reply
   if (typeof value === "number" || typeof value === "bigint") {
     const payload = writeInt64LE(value);
-    const header = Buffer.alloc(5);
-    header[0] = REPLY_INT;
-    header.writeUInt32LE(payload.length, 1);
-    return Buffer.concat([header, payload]);
+    return Buffer.concat([header(REPLY_INT, payload.length), payload]);
   }
 
   // Handle arrays -> ARRAY reply (recursive encoding)
   if (Array.isArray(value)) {
     const items = value.map(encodeReplyValue);
-    const header = Buffer.alloc(5);
-    header[0] = REPLY_ARRAY;
-    header.writeUInt32LE(items.length, 1);
-    return Buffer.concat([header, ...items]);
+    return Buffer.concat([header(REPLY_ARRAY, items.length), ...items]);
   }
 
   // Handle objects with 'ok' or 'err' properties -> STATUS/ERROR reply
   if (typeof value === "object") {
+    if (Object.prototype.hasOwnProperty.call(value, "double")) {
+      const payload = writeDoubleLE((value as { double: number }).double);
+      return Buffer.concat([header(REPLY_DOUBLE, payload.length), payload]);
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "big_number")) {
+      const payload = ensureBuffer(
+        (value as { big_number: Buffer }).big_number,
+        "big number reply",
+      );
+      return Buffer.concat([header(REPLY_BIG_NUMBER, payload.length), payload]);
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "verbatim_string")) {
+      const verbatim = (value as {
+        verbatim_string: { format: Buffer; string: Buffer };
+      }).verbatim_string;
+      const format = ensureBuffer(verbatim.format, "verbatim format");
+      const string = ensureBuffer(verbatim.string, "verbatim string");
+      const formatHeader = Buffer.alloc(4);
+      formatHeader.writeUInt32LE(format.length, 0);
+      const payload = Buffer.concat([formatHeader, format, string]);
+      return Buffer.concat([header(REPLY_VERBATIM, payload.length), payload]);
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "map")) {
+      const pairs = (value as { map: [ReplyValue, ReplyValue][] }).map;
+      const encoded = pairs.flatMap(([key, item]) => [
+        encodeReplyValue(key),
+        encodeReplyValue(item),
+      ]);
+      return Buffer.concat([header(REPLY_MAP, pairs.length), ...encoded]);
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "set")) {
+      const items = (value as { set: ReplyValue[] }).set.map(encodeReplyValue);
+      return Buffer.concat([header(REPLY_SET, items.length), ...items]);
+    }
     if (Object.prototype.hasOwnProperty.call(value, "ok")) {
       const payload = ensureBuffer(
         (value as { ok: Buffer }).ok,
         "status reply",
       );
-      const header = Buffer.alloc(5);
-      header[0] = REPLY_STATUS;
-      header.writeUInt32LE(payload.length, 1);
-      return Buffer.concat([header, payload]);
+      return Buffer.concat([header(REPLY_STATUS, payload.length), payload]);
     }
     if (Object.prototype.hasOwnProperty.call(value, "err")) {
       const errValue = value as { err: Buffer; code?: Buffer };
@@ -220,19 +278,13 @@ export function encodeReplyValue(value: ReplyValue): Buffer {
             message,
           ])
         : message;
-      const header = Buffer.alloc(5);
-      header[0] = REPLY_ERROR;
-      header.writeUInt32LE(payload.length, 1);
-      return Buffer.concat([header, payload]);
+      return Buffer.concat([header(REPLY_ERROR, payload.length), payload]);
     }
   }
 
   // Default: treat as bulk string
   const payload = ensureBuffer(value, "bulk reply");
-  const header = Buffer.alloc(5);
-  header[0] = REPLY_BULK;
-  header.writeUInt32LE(payload.length, 1);
-  return Buffer.concat([header, payload]);
+  return Buffer.concat([header(REPLY_BULK, payload.length), payload]);
 }
 
 /**
@@ -313,6 +365,65 @@ export function decodeReply(
       cursor = decoded.offset;
     }
     return { value: items, offset: cursor };
+  }
+
+  if (type === REPLY_BOOL) {
+    if (cursor + 1 > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    return { value: buffer[cursor] !== 0, offset: cursor + 1 };
+  }
+
+  if (type === REPLY_DOUBLE) {
+    if (cursor + 8 > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    const value = buffer.readDoubleLE(cursor);
+    return { value: { double: value }, offset: cursor + 8 };
+  }
+
+  if (type === REPLY_BIG_NUMBER) {
+    const payload = buffer.subarray(cursor, cursor + countOrLen);
+    cursor += countOrLen;
+    return { value: { big_number: Buffer.from(payload) }, offset: cursor };
+  }
+
+  if (type === REPLY_VERBATIM) {
+    if (cursor + 4 > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    const end = cursor + countOrLen;
+    const formatLen = buffer.readUInt32LE(cursor);
+    cursor += 4;
+    if (cursor + formatLen > end || end > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    const format = Buffer.from(buffer.subarray(cursor, cursor + formatLen));
+    cursor += formatLen;
+    const string = Buffer.from(buffer.subarray(cursor, end));
+    return { value: { verbatim_string: { format, string } }, offset: end };
+  }
+
+  if (type === REPLY_MAP) {
+    const map: [ReplyValue, ReplyValue][] = [];
+    for (let i = 0; i < countOrLen; i += 1) {
+      const key = decodeReply(buffer, cursor);
+      cursor = key.offset;
+      const item = decodeReply(buffer, cursor);
+      cursor = item.offset;
+      map.push([key.value, item.value]);
+    }
+    return { value: { map }, offset: cursor };
+  }
+
+  if (type === REPLY_SET) {
+    const set: ReplyValue[] = [];
+    for (let i = 0; i < countOrLen; i += 1) {
+      const decoded = decodeReply(buffer, cursor);
+      set.push(decoded.value);
+      cursor = decoded.offset;
+    }
+    return { value: { set }, offset: cursor };
   }
 
   throw new Error("ERR unknown reply type");

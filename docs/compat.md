@@ -12,7 +12,7 @@
 - `redis.sha1hex`
 - `redis.error_reply`
 - `redis.status_reply`
-- `redis.setresp` (RESP2 only; `redis.setresp(3)` returns an error)
+- `redis.setresp` (RESP2 and RESP3)
 
 ## Supported Redis Lua Modules
 - `cjson`
@@ -55,4 +55,5 @@ through `redisProps`.
 - Return values and errors match Redis 7 behavior for the supported surface.
 - All input and output are binary-safe (no UTF-16 string assumptions).
 - Error messages and type coercion follow Redis 7 rules.
-- RESP3 reply conversions are not supported by the current ABI.
+- RESP3 booleans, doubles, maps, sets, big numbers, and verbatim strings are
+  supported for Lua returns and host replies.

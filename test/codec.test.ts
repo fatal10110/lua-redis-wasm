@@ -12,7 +12,7 @@ import {
   packPtrLen,
   unpackPtrLen
 } from "../src/codec.js";
-import type { RedisProps } from "../src/types.js";
+import type { RedisProps, ReplyValue } from "../src/types.js";
 
 // -----------------------------------------------------------------------------
 // ensureBuffer tests
@@ -187,6 +187,21 @@ test("encodeReplyValue: mixed array", () => {
   const encoded = encodeReplyValue(value);
   assert.equal(encoded[0], 0x03); // REPLY_ARRAY
   assert.equal(encoded.readUInt32LE(1), 5); // count
+});
+
+test("encodeReplyValue/decodeReply: RESP3 values roundtrip", () => {
+  const value: ReplyValue = [
+    true,
+    false,
+    { double: 3.5 },
+    { big_number: Buffer.from("123456789012345678901234567890") },
+    { verbatim_string: { format: Buffer.from("txt"), string: Buffer.from("hello") } },
+    { map: [[Buffer.from("a"), 1], [Buffer.from("b"), Buffer.from("two")]] },
+    { set: [Buffer.from("a"), Buffer.from("b")] },
+  ];
+
+  const { value: decoded } = decodeReply(encodeReplyValue(value));
+  assert.deepEqual(decoded, value);
 });
 
 // -----------------------------------------------------------------------------

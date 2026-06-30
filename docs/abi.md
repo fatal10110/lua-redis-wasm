@@ -35,11 +35,20 @@ Reply `type` values:
 - 0x03: array (payload: repeated Reply)
 - 0x04: status (payload: bytes)
 - 0x05: error (payload: bytes)
+- 0x06: script error (payload: bytes)
+- 0x07: boolean (payload: 1 byte, 0 or 1)
+- 0x08: double (payload: float64 little-endian)
+- 0x09: map (payload: repeated key Reply, value Reply pairs)
+- 0x0a: set (payload: repeated Reply entries)
+- 0x0b: big number (payload: bytes)
+- 0x0c: verbatim string (payload: format length u32, format bytes, string bytes)
 
 Encoding details:
-- `count_or_len` is byte length for bulk/status/error, and array element count for arrays.
+- `count_or_len` is byte length for string-like payloads, array/set element
+  count for arrays/sets, and pair count for maps.
 - Integers are little-endian int64.
-- Arrays are encoded as concatenated Reply entries.
+- Doubles are little-endian float64.
+- Arrays, sets, and maps are encoded as concatenated Reply entries.
 - All string-like payloads are raw bytes and may include null bytes.
 
 ## Host Imports

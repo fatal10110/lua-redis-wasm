@@ -18,12 +18,18 @@
  * - `null` - Lua nil / Redis null bulk reply
  * - `number` - Integer within JavaScript safe integer range
  * - `bigint` - Integer outside safe range (uses BigInt)
+ * - `boolean` - RESP3 boolean reply
  * - `Buffer` - Bulk string (binary-safe bytes)
  * - `{ ok: Buffer }` - Status reply (Redis +OK style)
  * - `{ err: Buffer; code?: Buffer }` - Error reply (Redis -ERR style). `err` is
  *   the message; `code` is the optional leading error code (e.g. `WRONGTYPE`).
  *   On decode the code is split out of the wire payload; on encode it is
  *   prepended back. When `code` is omitted the message is used verbatim.
+ * - `{ double: number }` - RESP3 double reply
+ * - `{ big_number: Buffer }` - RESP3 big number reply
+ * - `{ verbatim_string: { format: Buffer; string: Buffer } }` - RESP3 verbatim string
+ * - `{ map: [ReplyValue, ReplyValue][] }` - RESP3 map reply
+ * - `{ set: ReplyValue[] }` - RESP3 set reply
  * - `ReplyValue[]` - Array of nested values
  *
  * @example
@@ -76,9 +82,15 @@ export type ReplyValue =
   | null
   | number
   | bigint
+  | boolean
   | Buffer
   | { ok: Buffer }
   | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta }
+  | { double: number }
+  | { big_number: Buffer }
+  | { verbatim_string: { format: Buffer; string: Buffer } }
+  | { map: [ReplyValue, ReplyValue][] }
+  | { set: ReplyValue[] }
   | ReplyValue[];
 
 /**

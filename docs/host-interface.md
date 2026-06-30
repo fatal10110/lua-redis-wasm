@@ -20,8 +20,8 @@ export type RedisHost = {
 };
 ```
 
-The host reply ABI is RESP2-only. RESP3 shapes such as maps, sets, doubles,
-booleans, big numbers, verbatim strings, and push replies are not representable.
+The host reply ABI supports RESP2 replies plus RESP3 booleans, doubles, maps,
+sets, big numbers, and verbatim strings. Push replies are not representable.
 
 ### redisCall
 - Invoked for `redis.call(...)`.
@@ -45,9 +45,15 @@ export type ReplyValue =
   | null
   | number
   | bigint
+  | boolean
   | Buffer
   | { ok: Buffer }
   | { err: Buffer }
+  | { double: number }
+  | { big_number: Buffer }
+  | { verbatim_string: { format: Buffer; string: Buffer } }
+  | { map: [ReplyValue, ReplyValue][] }
+  | { set: ReplyValue[] }
   | ReplyValue[];
 ```
 

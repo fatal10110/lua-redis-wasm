@@ -41,6 +41,10 @@ static void write_i64_le(uint8_t *dst, int64_t value) {
   dst[7] = (uint8_t)((uvalue >> 56) & 0xFF);
 }
 
+static void write_f64_le(uint8_t *dst, double value) {
+  memcpy(dst, &value, sizeof(value)); /* wasm is little-endian */
+}
+
 static void rb_init(ReplyBuffer *rb) {
   rb->data = NULL;
   rb->len = 0;
@@ -157,7 +161,128 @@ static PtrLen reply_status(const char *msg, size_t len) {
 
 static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb);
 
+static size_t table_pair_count(lua_State *L, int idx) {
+  size_t count = 0;
+  lua_pushnil(L);
+  while (lua_next(L, idx) != 0) {
+    count++;
+    lua_pop(L, 1);
+  }
+  return count;
+}
+
+static int encode_map(lua_State *L, int idx, ReplyBuffer *rb) {
+  size_t count = table_pair_count(L, idx);
+  if (rb_write_header(rb, REPLY_MAP, (uint32_t)count) != 0) {
+    return -1;
+  }
+  lua_pushnil(L);
+  while (lua_next(L, idx) != 0) {
+    if (encode_lua_value(L, -2, rb) != 0 || encode_lua_value(L, -1, rb) != 0) {
+      lua_pop(L, 1);
+      return -1;
+    }
+    lua_pop(L, 1);
+  }
+  return 0;
+}
+
+static int encode_set(lua_State *L, int idx, ReplyBuffer *rb) {
+  size_t count = table_pair_count(L, idx);
+  if (rb_write_header(rb, REPLY_SET, (uint32_t)count) != 0) {
+    return -1;
+  }
+  lua_pushnil(L);
+  while (lua_next(L, idx) != 0) {
+    if (encode_lua_value(L, -2, rb) != 0) {
+      lua_pop(L, 1);
+      return -1;
+    }
+    lua_pop(L, 1);
+  }
+  return 0;
+}
+
+static int encode_resp3_marker(lua_State *L, int idx, ReplyBuffer *rb) {
+  lua_getfield(L, idx, "double");
+  if (lua_isnumber(L, -1)) {
+    double value = (double)lua_tonumber(L, -1);
+    uint8_t payload[8];
+    write_f64_le(payload, value);
+    lua_pop(L, 1);
+    if (rb_write_header(rb, REPLY_DOUBLE, sizeof(payload)) != 0) {
+      return -1;
+    }
+    return rb_append(rb, payload, sizeof(payload));
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, idx, "big_number");
+  if (lua_isstring(L, -1)) {
+    size_t len = 0;
+    const char *str = lua_tolstring(L, -1, &len);
+    lua_pop(L, 1);
+    if (rb_write_header(rb, REPLY_BIG_NUMBER, (uint32_t)len) != 0) {
+      return -1;
+    }
+    return rb_append(rb, str, len);
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, idx, "verbatim_string");
+  if (lua_istable(L, -1)) {
+    lua_getfield(L, -1, "format");
+    lua_getfield(L, -2, "string");
+    if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
+      size_t format_len = 0;
+      size_t string_len = 0;
+      const char *format = lua_tolstring(L, -2, &format_len);
+      const char *string = lua_tolstring(L, -1, &string_len);
+      uint8_t format_header[4];
+      write_u32_le(format_header, (uint32_t)format_len);
+      int rc = rb_write_header(rb, REPLY_VERBATIM,
+                               (uint32_t)(sizeof(format_header) + format_len + string_len));
+      if (rc == 0) {
+        rc = rb_append(rb, format_header, sizeof(format_header));
+      }
+      if (rc == 0) {
+        rc = rb_append(rb, format, format_len);
+      }
+      if (rc == 0) {
+        rc = rb_append(rb, string, string_len);
+      }
+      lua_pop(L, 3);
+      return rc;
+    }
+    lua_pop(L, 2);
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, idx, "map");
+  if (lua_istable(L, -1)) {
+    int abs = lua_gettop(L);
+    int rc = encode_map(L, abs, rb);
+    lua_pop(L, 1);
+    return rc;
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, idx, "set");
+  if (lua_istable(L, -1)) {
+    int abs = lua_gettop(L);
+    int rc = encode_set(L, abs, rb);
+    lua_pop(L, 1);
+    return rc;
+  }
+  lua_pop(L, 1);
+
+  return 1;
+}
+
 static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
+  if (idx < 0) {
+    idx = lua_gettop(L) + idx + 1;
+  }
   size_t len = 0;
   const char *msg = NULL;
 
@@ -185,6 +310,13 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
     return rc;
   }
   lua_pop(L, 1);
+
+  if (redis_resp_version() == 3) {
+    int marker = encode_resp3_marker(L, idx, rb);
+    if (marker != 1) {
+      return marker;
+    }
+  }
 
   // Array reply: iterate from index 1 and stop at the first nil, like Redis.
   size_t count = 0;
@@ -228,6 +360,13 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
       return rb_append(rb, payload, sizeof(payload));
     }
     case LUA_TBOOLEAN:
+      if (redis_resp_version() == 3) {
+        uint8_t payload = lua_toboolean(L, idx) ? 1 : 0;
+        if (rb_write_header(rb, REPLY_BOOL, sizeof(payload)) != 0) {
+          return -1;
+        }
+        return rb_append(rb, &payload, sizeof(payload));
+      }
       if (lua_toboolean(L, idx)) {
         if (rb_write_header(rb, REPLY_INT, 8) != 0) {
           return -1;
@@ -580,6 +719,7 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
+  redis_reset_resp_version();
   set_empty_keys_argv(g_state);
   const char *script = (const char *)(uintptr_t)ptr;
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
@@ -628,6 +768,7 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
+  redis_reset_resp_version();
   if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
     return reply_error("ERR KEYS/ARGV exceeds configured limit", 40);
   }
