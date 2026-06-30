@@ -452,6 +452,7 @@ type MutableHandlers = {
   call: (...args: number[]) => bigint | void;
   pcall: (...args: number[]) => bigint | void;
   props: (...args: number[]) => bigint | void;
+  setresp: (version: number) => void;
 };
 
 /**
@@ -607,6 +608,10 @@ export class LuaWasmModule {
       host.log(level, msg);
     };
 
+    this.handlers.setresp = (version: number): void => {
+      host.onSetResp?.call(host, version as 2 | 3);
+    };
+
     this.handlers.sha1hex = (...args: number[]): bigint | void => {
       const abiArgs = parseAbiArgs(args);
       const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
@@ -698,6 +703,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
     call: () => BigInt(0),
     pcall: () => BigInt(0),
     props: () => BigInt(0),
+    setresp: () => {},
   };
 
   // Create wrapper imports that delegate to mutable handlers
@@ -709,6 +715,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
     host_redis_call: (...args: number[]) => handlers.call(...args),
     host_redis_pcall: (...args: number[]) => handlers.pcall(...args),
     host_redis_props: (...args: number[]) => handlers.props(...args),
+    host_redis_setresp: (version: number) => handlers.setresp(version),
   };
 
   const { exports } = await loadModule(options, hostImports);

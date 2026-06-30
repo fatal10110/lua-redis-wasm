@@ -460,6 +460,27 @@ test("redis.setresp: rejects unsupported protocol versions", async () => {
   assert.equal(result.meta?.line, 1);
 });
 
+test("redis.setresp: notifies the host of the new protocol version", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const seen: number[] = [];
+  const engine = module.create(createTestHost({
+    onSetResp: (version) => seen.push(version),
+  }));
+
+  engine.eval("redis.setresp(3); redis.setresp(2)");
+  assert.deepEqual(seen, [3, 2]);
+});
+
+test("redis.setresp: missing onSetResp host hook is a no-op", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  // No onSetResp provided; eval must not throw.
+  assert.equal(engine.eval("redis.setresp(3); return true"), true);
+});
+
 test("redis.setresp: decodes RESP3 host replies for redis.call", async () => {
   await resolveWasmPath();
   const module = await load();
