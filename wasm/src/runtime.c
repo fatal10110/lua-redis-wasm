@@ -327,14 +327,6 @@ static void disable_non_determinism(lua_State *L) {
   remove_package_entry(L, "io");
   remove_package_entry(L, "debug");
   remove_package_entry(L, "package");
-  lua_getglobal(L, "math");
-  if (lua_istable(L, -1)) {
-    lua_pushnil(L);
-    lua_setfield(L, -2, "random");
-    lua_pushnil(L);
-    lua_setfield(L, -2, "randomseed");
-  }
-  lua_pop(L, 1);
 }
 
 // Globals protection: mirror real Redis exactly.
@@ -551,6 +543,7 @@ int32_t init(void) {
   if (!g_state) {
     return -1;
   }
+  srand(0);
   open_allowed_libs(g_state);
   register_redis_api(g_state);
   {
@@ -583,6 +576,7 @@ int32_t reset(void) {
   if (!g_state) {
     return -1;
   }
+  srand(0);
   open_allowed_libs(g_state);
   register_redis_api(g_state);
   {
