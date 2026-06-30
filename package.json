@@ -48,6 +48,7 @@
   ],
   "scripts": {
     "build:wasm": "./wasm/build/docker-build.sh",
+    "smoke": "./wasm/build/docker-test.sh",
     "build:ts": "rm -rf dist && rollup -c",
     "build": "npm run build:wasm && npm run build:ts && node ./scripts/copy-wasm.mjs",
     "test": "npm run build:wasm && node --test --import tsx test/**/*.test.ts",

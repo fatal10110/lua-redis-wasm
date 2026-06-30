@@ -18,6 +18,9 @@ jobs:
       - name: Build WASM (Docker)
         run: ./wasm/build/docker-build.sh
 
+      - name: Smoke tests (native C, Docker)
+        run: ./wasm/build/docker-test.sh
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
