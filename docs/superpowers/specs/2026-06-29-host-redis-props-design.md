@@ -140,9 +140,11 @@ Lua 5.1 numbers are doubles; `f64` covers all `number` values including
     Field: push value, settable. Stub with value: push value as upvalue,
     `lua_pushcclosure(L, l_const_return, 1)`, settable. Stub noop (vtype 0):
     `lua_pushcclosure(L, l_noop, 0)`, settable.
-  - Malformed blob (truncated, bad vtype) is a hard error: the decoder aborts
-    via `luaL_error`, surfacing as an init failure rather than silently
-    skipping. (Blob is package-generated, so this only fires on a bug.)
+  - `apply_redis_props` returns `int` (0 ok, -1 malformed). It bounds-checks
+    every read; a truncated blob or bad `vtype` returns -1 (no `luaL_error`,
+    since init runs unprotected and a longjmp would panic). `init`/`reset`
+    propagate -1 as an init failure. (Blob is package-generated, so -1 only
+    fires on a bug.)
 - `wasm/src/runtime.c`: in both `init()` and `reset()`, after
   `register_redis_api(g_state)` and before `enable_globals_protection(g_state)`:
   1. `PtrLen p = host_redis_props();`
