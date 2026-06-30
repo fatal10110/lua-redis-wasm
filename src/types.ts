@@ -253,6 +253,9 @@ export type EngineOptions = {
 
   /** Optional resource limits. */
   limits?: EngineLimits;
+
+  /** Optional host-injected `redis.*` props (constants and simple stubs). */
+  redisProps?: RedisProps;
 };
 
 /**
@@ -283,6 +286,9 @@ export type StandaloneOptions = {
 
   /** Optional resource limits. */
   limits?: EngineLimits;
+
+  /** Optional host-injected `redis.*` props (constants and simple stubs). */
+  redisProps?: RedisProps;
 };
 
 /**
