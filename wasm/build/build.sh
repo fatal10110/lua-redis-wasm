@@ -44,7 +44,7 @@ emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sEXPORTED_RUNTIME_METHODS="['HEAPU8']" \
   -sINCOMING_MODULE_JS_API="['locateFile','instantiateWasm']" \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 \
-  -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits']" \
+  -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
   "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
   -o "$OUT_DIR/redis_lua.mjs"

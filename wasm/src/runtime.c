@@ -444,19 +444,34 @@ static void remove_package_entry(lua_State *L, const char *name) {
   lua_pop(L, 2);
 }
 
+// Compatibility profile flags (set via set_compat() before init/reset). Each
+// flag toggles one of the three behaviors that actually differ across Redis
+// 6.2-8.x and Valkey; everything else is constant. Default reproduces the
+// historical behavior (os loaded, `server` alias present, print stripped),
+// which matches Valkey 8.0/8.1.
+#define COMPAT_PRINT 0x1u        // keep Lua `print` (Redis 6.2 only)
+#define COMPAT_OS 0x2u           // expose `os` lib (Redis 7.4+, Valkey 8.0+)
+#define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
+static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS;
+
+void set_compat(uint32_t flags) { g_compat_flags = flags; }
+
 // Mirror Redis's allow/deny arrays (src/script_lua.c) rather than a hand-rolled
 // deny set. Redis exposes loadstring/load/collectgarbage/gcinfo (lua_builtins_
 // allow_list) and a sandboxed os (libraries_allow_list); we keep those. We only
 // strip what Redis strips: its deny_list (dofile/loadfile/print), the libs it
-// never loads (io/debug/package/require), and lua_builtins_deprecated.
-static void disable_non_determinism(lua_State *L) {
+// never loads (io/debug/package/require), and lua_builtins_deprecated. `print`
+// is stripped unless COMPAT_PRINT is set (Redis 6.2 kept it).
+static void disable_non_determinism(lua_State *L, uint32_t flags) {
   remove_global(L, "io");
   remove_global(L, "debug");
   remove_global(L, "package");
   remove_global(L, "require");
   remove_global(L, "dofile");
   remove_global(L, "loadfile");
-  remove_global(L, "print");
+  if (!(flags & COMPAT_PRINT)) {
+    remove_global(L, "print");
+  }
   remove_global(L, "newproxy");
   // Sandbox-escape vectors: setfenv swaps the running function's environment
   // for a writable table and getfenv(0) reaches the real global table,
@@ -591,7 +606,7 @@ static void load_redis_modules(lua_State *L) {
   luaLoadLib(L, "bit", luaopen_bit);
 }
 
-static void open_allowed_libs(lua_State *L) {
+static void open_allowed_libs(lua_State *L, uint32_t flags) {
   // luaopen_base pushes TWO tables (the globals table and the coroutine table);
   // the rest push one. Clear the stack afterwards so no library table is left
   // behind to masquerade as a script return value.
@@ -600,10 +615,14 @@ static void open_allowed_libs(lua_State *L) {
   luaopen_string(L);
   luaopen_math(L);
   // Redis exposes os via libraries_allow_list; the vendored loslib.c sandboxes
-  // it to only os.clock (sandbox_syslib), so opening it here is safe.
-  luaopen_os(L);
+  // it to only os.clock (sandbox_syslib), so opening it here is safe. Skipped
+  // unless COMPAT_OS is set (Redis < 7.4 / Valkey 7.2 had no os); when skipped,
+  // reading `os` hits the globals-protection __index handler and raises.
+  if (flags & COMPAT_OS) {
+    luaopen_os(L);
+  }
   lua_settop(L, 0);
-  disable_non_determinism(L);
+  disable_non_determinism(L, flags);
   load_redis_modules(L);
 }
 
@@ -673,17 +692,15 @@ static void set_empty_keys_argv(lua_State *L) {
   raw_setglobal(L, "ARGV");
 }
 
-int32_t init(void) {
-  if (g_state) {
-    lua_close(g_state);
-    g_state = NULL;
-  }
+// Build a fresh Lua state in g_state honoring g_compat_flags. Shared by init()
+// and reset(); the caller is responsible for closing any prior state.
+static int32_t setup_state(void) {
   g_state = luaL_newstate();
   if (!g_state) {
     return -1;
   }
   srand(0);
-  open_allowed_libs(g_state);
+  open_allowed_libs(g_state, g_compat_flags);
   register_redis_api(g_state);
   {
     PtrLen props = host_redis_props();
@@ -696,14 +713,25 @@ int32_t init(void) {
       }
     }
   }
-  /* Redis 7.4+ exposes `server` as an alias of `redis`; same table reference so
-   * both share the host-injected props. Must run before protection locks them. */
-  lua_getglobal(g_state, "redis");
-  lua_setglobal(g_state, "server");
+  /* Valkey 8.0+ exposes `server` as an alias of `redis` (same table reference so
+   * both share the host-injected props). Must run before protection locks them.
+   * Redis keeps `redis` only -- gated on COMPAT_SERVER_ALIAS. */
+  if (g_compat_flags & COMPAT_SERVER_ALIAS) {
+    lua_getglobal(g_state, "redis");
+    lua_setglobal(g_state, "server");
+  }
   enable_globals_protection(g_state);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
+}
+
+int32_t init(void) {
+  if (g_state) {
+    lua_close(g_state);
+    g_state = NULL;
+  }
+  return setup_state();
 }
 
 int32_t reset(void) {
@@ -711,32 +739,8 @@ int32_t reset(void) {
     return -1;
   }
   lua_close(g_state);
-  g_state = luaL_newstate();
-  if (!g_state) {
-    return -1;
-  }
-  srand(0);
-  open_allowed_libs(g_state);
-  register_redis_api(g_state);
-  {
-    PtrLen props = host_redis_props();
-    if (props.ptr && props.len) {
-      int rc = apply_redis_props(g_state, (const uint8_t *)(uintptr_t)props.ptr,
-                                 (size_t)props.len);
-      free_mem(props.ptr);
-      if (rc != 0) {
-        return -1;
-      }
-    }
-  }
-  /* Redis 7.4+ exposes `server` as an alias of `redis`; same table reference so
-   * both share the host-injected props. Must run before protection locks them. */
-  lua_getglobal(g_state, "redis");
-  lua_setglobal(g_state, "server");
-  enable_globals_protection(g_state);
-  lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
-  reset_fuel();
-  return 0;
+  g_state = NULL;
+  return setup_state();
 }
 
 PtrLen eval(uint32_t ptr, uint32_t len) {

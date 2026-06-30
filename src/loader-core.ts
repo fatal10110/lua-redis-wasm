@@ -72,6 +72,13 @@ export type WasmExports = {
   _set_limits?: (maxFuel: number, maxReplyBytes: number, maxArgBytes: number) => void;
 
   /**
+   * Select the compatibility profile (which Redis/Valkey version's Lua sandbox
+   * behavior to emulate). Bitmask: 0x1 keep `print`, 0x2 expose `os`, 0x4
+   * `server` alias. Call before _init/_reset.
+   */
+  _set_compat?: (flags: number) => void;
+
+  /**
    * Allocate memory in WASM linear memory.
    * @param size - Number of bytes to allocate
    * @returns Pointer to allocated memory

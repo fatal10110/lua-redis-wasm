@@ -10,7 +10,9 @@ export type {
   RedisLogHandler,
   StandaloneOptions,
   RedisProp,
-  RedisProps
+  RedisProps,
+  CompatProfile,
+  CompatOverrides
 } from "./types.js";
 import { encodeReplyValue, decodeReply, encodeArgArray } from "./codec.js";
 import type { ReplyValue as ReplyValueType } from "./types.js";
