@@ -332,6 +332,12 @@ test("decodeReply: throws on truncated buffer", () => {
   assert.throws(() => decodeReply(buf), { message: "ERR reply decoding failed" });
 });
 
+test("decodeReply: throws on truncated big number payload", () => {
+  // REPLY_BIG_NUMBER (0x0b) claims 4 bytes but only 2 follow.
+  const buf = Buffer.from([0x0b, 4, 0, 0, 0, 0x31, 0x32]);
+  assert.throws(() => decodeReply(buf), { message: "ERR reply decoding failed" });
+});
+
 test("decodeReply: throws on unknown type", () => {
   const buf = Buffer.from([0xff, 0, 0, 0, 0]);
   assert.throws(() => decodeReply(buf), { message: "ERR unknown reply type" });

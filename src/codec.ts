@@ -396,6 +396,9 @@ export function decodeReply(
   }
 
   if (type === REPLY_BIG_NUMBER) {
+    if (cursor + countOrLen > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
     const payload = buffer.subarray(cursor, cursor + countOrLen);
     cursor += countOrLen;
     return { value: { big_number: Buffer.from(payload) }, offset: cursor };
