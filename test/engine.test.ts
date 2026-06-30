@@ -501,7 +501,42 @@ test("redis.call: non-string/number argument is classified as command-arg-type",
   assert.ok(!result.err.toString("utf8").includes("__RLUA_E__"), `marker leaked: ${result.err}`);
   assert.equal(result.meta?.kind, "command-arg-type");
   assert.equal(result.meta?.name, undefined);
-  assert.equal(result.meta?.line, 1); // raised without a user_script: prefix, like Redis
+  assert.equal(result.meta?.line, 1); // call site is line 1
+});
+
+test("redis.call: command error reports the call-site line (issue #13)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // The command error string carries no `user_script:N:` prefix (raised via
+  // lua_error from C). Redis's error handler walks past the C frame and reports
+  // the script line that called redis.call; the engine must match.
+  const script = `
+local a = 1
+local b = 2
+return redis.call('BOGUS')  -- line 4
+`;
+  const result = engine.eval(script) as { err: Buffer; meta?: { line: number } };
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal(result.meta?.line, 4);
+});
+
+test("redis.call: coded command error keeps its code and call-site line", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(
+    createTestHost({ redisCall: () => ({ err: Buffer.from("WRONGTYPE Operation against a key") }) }),
+  );
+  const result = engine.eval("local a = 1\nreturn redis.call('GET','x')  -- line 2") as {
+    err: Buffer;
+    code?: Buffer;
+    meta?: { line: number };
+  };
+  // The line travels out-of-band, so splitting the error code from the message is
+  // unaffected: code stays WRONGTYPE and the line is the call site (2), not 1.
+  assert.equal(result.code?.toString("utf8"), "WRONGTYPE");
+  assert.equal(result.err.toString("utf8"), "Operation against a key");
+  assert.equal(result.meta?.line, 2);
 });
 
 // =============================================================================

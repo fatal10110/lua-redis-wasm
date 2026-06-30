@@ -21,6 +21,8 @@ static int64_t g_fuel_remaining = DEFAULT_FUEL_LIMIT;
 static int64_t g_fuel_limit = DEFAULT_FUEL_LIMIT;
 static uint32_t g_max_reply_bytes = 0;
 static uint32_t g_max_arg_bytes = 0;
+/* Script line captured by script_error_handler at the last error point. */
+static uint32_t g_error_line = 0;
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
@@ -117,11 +119,23 @@ static PtrLen reply_error(const char *msg, size_t len) {
 
 /* Like reply_error, but tags the reply as a script-aborting error so the host
  * decorates it with the script sha / source context. Used for load and runtime
- * (lua_pcall) failures, including errors that propagated out of redis.call. */
-static PtrLen reply_script_error(const char *msg, size_t len) {
+ * (lua_pcall) failures, including errors that propagated out of redis.call.
+ *
+ * The payload is prefixed with a u32le `line` (the script line at the error
+ * point, or 0 if unknown). Command errors propagated out of redis.call carry no
+ * `user_script:N:` text prefix, so the line cannot be recovered from the message
+ * alone; the host reads it from this field. 0 means "parse from the message
+ * prefix" (load/syntax errors, which never run the error handler). */
+static PtrLen reply_script_error(const char *msg, size_t len, uint32_t line) {
   ReplyBuffer rb;
   rb_init(&rb);
-  if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)len) != 0) {
+  if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)(len + 4)) != 0) {
+    return (PtrLen){0, 0};
+  }
+  uint8_t line_buf[4];
+  write_u32_le(line_buf, line);
+  if (rb_append(&rb, line_buf, 4) != 0) {
+    free(rb.data);
     return (PtrLen){0, 0};
   }
   if (rb_append(&rb, msg, len) != 0) {
@@ -131,6 +145,23 @@ static PtrLen reply_script_error(const char *msg, size_t len) {
   PtrLen out = rb_finalize(&rb);
   free(rb.data);
   return out;
+}
+
+/* lua_pcall message handler, run at the error point before the stack unwinds.
+ * Mirrors Redis's `__redis__err__handler` (src/eval.c): it records the script
+ * line where the error occurred, skipping C frames (e.g. the redis.call binding)
+ * so the reported line is the script's call site, not the C boundary. The error
+ * object itself is returned unchanged. */
+static int script_error_handler(lua_State *L) {
+  lua_Debug ar;
+  g_error_line = 0;
+  for (int level = 1; lua_getstack(L, level, &ar); level++) {
+    if (lua_getinfo(L, "Sl", &ar) && ar.currentline > 0) {
+      g_error_line = (uint32_t)ar.currentline;
+      break;
+    }
+  }
+  return 1;
 }
 
 static PtrLen reply_null(void) {
@@ -722,20 +753,25 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   redis_reset_resp_version();
   set_empty_keys_argv(g_state);
   const char *script = (const char *)(uintptr_t)ptr;
+  lua_pushcfunction(g_state, script_error_handler);
+  int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23, 0);
     lua_settop(g_state, 0);
     return out;
   }
-  if (lua_pcall(g_state, 0, LUA_MULTRET, 0) != 0) {
+  g_error_line = 0;
+  if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28);
+    PtrLen out =
+        reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28, g_error_line);
     lua_settop(g_state, 0);
     return out;
   }
+  lua_remove(g_state, errfunc);
   int top = lua_gettop(g_state);
   if (top == 0) {
     // A script with no return value replies with nil, matching real Redis.
@@ -778,20 +814,25 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR invalid KEYS/ARGV encoding", 31);
   }
   const char *script = (const char *)(uintptr_t)script_ptr;
+  lua_pushcfunction(g_state, script_error_handler);
+  int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23, 0);
     lua_settop(g_state, 0);
     return out;
   }
-  if (lua_pcall(g_state, 0, LUA_MULTRET, 0) != 0) {
+  g_error_line = 0;
+  if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28);
+    PtrLen out =
+        reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28, g_error_line);
     lua_settop(g_state, 0);
     return out;
   }
+  lua_remove(g_state, errfunc);
   int top = lua_gettop(g_state);
   if (top == 0) {
     // A script with no return value replies with nil, matching real Redis.
