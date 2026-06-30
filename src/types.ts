@@ -243,18 +243,17 @@ export type EngineLimits = {
 /**
  * Named Redis/Valkey compatibility profile. Selects which of the three Lua
  * sandbox behaviors that differ across versions are emulated. Aliases collapse
- * to identical behavior (redis7.0 == redis7.2; redis7.4 == redis8.0;
- * valkey8.0 == valkey8.1). Use {@link CompatOverrides} to tweak a single flag.
+ * to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
+ * valkey-8.0 == valkey-9.0). Use {@link CompatOverrides} to tweak a single flag.
  */
 export type CompatProfile =
-  | "redis6.2"
-  | "redis7.0"
-  | "redis7.2"
-  | "redis7.4"
-  | "redis8.0"
-  | "valkey7.2"
-  | "valkey8.0"
-  | "valkey8.1";
+  | "redis-6.2"
+  | "redis-7.0"
+  | "redis-7.2"
+  | "redis-7.4"
+  | "redis-8.0"
+  | "valkey-8.0"
+  | "valkey-9.0";
 
 /**
  * Fine-grained overrides for the compatibility profile, merged over the
@@ -306,7 +305,7 @@ export type EngineOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey8.0. */
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */
@@ -345,7 +344,7 @@ export type StandaloneOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey8.0. */
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */
@@ -383,7 +382,7 @@ export type LoadOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey8.0. */
+  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */

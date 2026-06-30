@@ -485,18 +485,17 @@ const COMPAT_SERVER_ALIAS = 0x4;
  * Redis/Valkey version matrix (see redis-version-lua-behavior-matrix).
  */
 const COMPAT_PROFILES: Record<CompatProfile, Required<CompatOverrides>> = {
-  "redis6.2": { print: true, os: false, serverAlias: false },
-  "redis7.0": { print: false, os: false, serverAlias: false },
-  "redis7.2": { print: false, os: false, serverAlias: false },
-  "redis7.4": { print: false, os: true, serverAlias: false },
-  "redis8.0": { print: false, os: true, serverAlias: false },
-  "valkey7.2": { print: false, os: false, serverAlias: false },
-  "valkey8.0": { print: false, os: true, serverAlias: true },
-  "valkey8.1": { print: false, os: true, serverAlias: true },
+  "redis-6.2": { print: true, os: false, serverAlias: false },
+  "redis-7.0": { print: false, os: false, serverAlias: false },
+  "redis-7.2": { print: false, os: false, serverAlias: false },
+  "redis-7.4": { print: false, os: true, serverAlias: false },
+  "redis-8.0": { print: false, os: true, serverAlias: false },
+  "valkey-8.0": { print: false, os: true, serverAlias: true },
+  "valkey-9.0": { print: false, os: true, serverAlias: true },
 };
 
-// Default when no profile is given: preserve the historical behavior (≈ valkey8.0).
-const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey8.0"];
+// Default when no profile is given: preserve the historical behavior (≈ valkey-8.0).
+const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
 
 /** Resolve a profile + per-flag overrides to the u8 bitmask the WASM expects. */
 function resolveCompatFlags(

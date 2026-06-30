@@ -1357,7 +1357,7 @@ function assertGlobalAbsent(engine: LuaEngine, name: string): void {
 }
 
 test("compat redis6.2: print kept, os absent, server absent", async () => {
-  const module = await load({ profile: "redis6.2" });
+  const module = await load({ profile: "redis-6.2" });
   const engine = module.create(createTestHost());
   assert.equal(engine.eval("return type(print)").toString(), "function");
   assert.equal(engine.eval("print('x') return 1"), 1); // print runs, returns nil
@@ -1366,7 +1366,7 @@ test("compat redis6.2: print kept, os absent, server absent", async () => {
 });
 
 test("compat redis7.2: print absent, os absent, server absent", async () => {
-  const module = await load({ profile: "redis7.2" });
+  const module = await load({ profile: "redis-7.2" });
   const engine = module.create(createTestHost());
   assertGlobalAbsent(engine, "print");
   assertGlobalAbsent(engine, "os");
@@ -1374,7 +1374,7 @@ test("compat redis7.2: print absent, os absent, server absent", async () => {
 });
 
 test("compat redis8.0: os present, server absent (redis has no server alias)", async () => {
-  const module = await load({ profile: "redis8.0" });
+  const module = await load({ profile: "redis-8.0" });
   const engine = module.create(createTestHost());
   assert.equal(engine.eval("return type(os)").toString(), "table");
   assertGlobalAbsent(engine, "print");
@@ -1382,7 +1382,7 @@ test("compat redis8.0: os present, server absent (redis has no server alias)", a
 });
 
 test("compat valkey8.0: os present, server aliases redis", async () => {
-  const module = await load({ profile: "valkey8.0" });
+  const module = await load({ profile: "valkey-8.0" });
   const engine = module.create(createTestHost());
   assert.equal(engine.eval("return type(os)").toString(), "table");
   assert.equal(engine.eval("return server == redis"), 1);
@@ -1390,7 +1390,7 @@ test("compat valkey8.0: os present, server aliases redis", async () => {
 });
 
 test("compat: per-flag override is merged over the profile", async () => {
-  const module = await load({ profile: "redis7.2", compat: { os: true } });
+  const module = await load({ profile: "redis-7.2", compat: { os: true } });
   const engine = module.create(createTestHost());
   assert.equal(engine.eval("return type(os)").toString(), "table");
   assertGlobalAbsent(engine, "server"); // unchanged by the override
