@@ -33,7 +33,7 @@
  * @module codec
  */
 
-import type { ReplyValue } from "./types.js";
+import type { ReplyValue, RedisProps } from "./types.js";
 
 /** Reply type tag: null/nil value. Wire format: [0x00][0x00000000] */
 const REPLY_NULL = 0x00;
@@ -62,6 +62,16 @@ const REPLY_ERROR = 0x05;
  * Wire format: [0x06][length: u32le][bytes...]
  */
 export const REPLY_SCRIPT_ERROR = 0x06;
+
+/** redisProps wire kinds. */
+const PROP_KIND_FIELD = 0;
+const PROP_KIND_STUB = 1;
+
+/** redisProps wire value types. */
+const PROP_VTYPE_NONE = 0;
+const PROP_VTYPE_BOOL = 1;
+const PROP_VTYPE_NUMBER = 2;
+const PROP_VTYPE_STRING = 3;
 
 /**
  * Splits a raw error payload (`CODE message`) into a structured error reply.
@@ -348,6 +358,82 @@ export function encodeArgArray(
   }
 
   return Buffer.concat(parts);
+}
+
+/**
+ * Encodes host-injected `redis.*` props into the typed blob consumed by the WASM
+ * `host_redis_props` import.
+ *
+ * Wire format (little-endian):
+ * ```
+ * [count: u32]
+ * per entry:
+ *   [name_len: u32][name bytes]
+ *   [kind: u8]    // 0 = field, 1 = stub function
+ *   [vtype: u8]   // 0 = none(nil), 1 = bool, 2 = number(f64), 3 = string
+ *   [payload]     // bool: u8 | number: f64le | string: u32 len + bytes | none: (empty)
+ * ```
+ *
+ * @throws TypeError if an entry does not have exactly one of `value` / `returns`.
+ */
+export function encodeRedisProps(props: RedisProps | undefined): Buffer {
+  const names = props ? Object.keys(props) : [];
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(names.length, 0);
+  const parts: Buffer[] = [header];
+
+  for (const name of names) {
+    const prop = props![name] as Record<string, unknown>;
+    const hasValue = Object.prototype.hasOwnProperty.call(prop, "value");
+    const hasReturns = Object.prototype.hasOwnProperty.call(prop, "returns");
+    if (hasValue === hasReturns) {
+      throw new TypeError(
+        `redisProps["${name}"] must have exactly one of "value" or "returns"`,
+      );
+    }
+
+    const nameBuf = Buffer.from(name, "utf8");
+    const nameHeader = Buffer.alloc(4);
+    nameHeader.writeUInt32LE(nameBuf.length, 0);
+    parts.push(nameHeader, nameBuf);
+
+    const kind = hasValue ? PROP_KIND_FIELD : PROP_KIND_STUB;
+    const raw = hasValue ? prop.value : prop.returns;
+    parts.push(Buffer.from([kind]));
+    parts.push(encodePropValue(raw, name, hasValue));
+  }
+
+  return Buffer.concat(parts);
+}
+
+/** Encodes the [vtype][payload] portion of one prop value. */
+function encodePropValue(raw: unknown, name: string, isField: boolean): Buffer {
+  if (raw === null || raw === undefined) {
+    if (isField) {
+      throw new TypeError(`redisProps["${name}"].value must not be null`);
+    }
+    return Buffer.from([PROP_VTYPE_NONE]);
+  }
+  if (typeof raw === "boolean") {
+    return Buffer.from([PROP_VTYPE_BOOL, raw ? 1 : 0]);
+  }
+  if (typeof raw === "number") {
+    const buf = Buffer.alloc(1 + 8);
+    buf[0] = PROP_VTYPE_NUMBER;
+    buf.writeDoubleLE(raw, 1);
+    return buf;
+  }
+  if (typeof raw === "string") {
+    const strBuf = Buffer.from(raw, "utf8");
+    const buf = Buffer.alloc(1 + 4 + strBuf.length);
+    buf[0] = PROP_VTYPE_STRING;
+    buf.writeUInt32LE(strBuf.length, 1);
+    strBuf.copy(buf, 5);
+    return buf;
+  }
+  throw new TypeError(
+    `redisProps["${name}"] value must be a string, number, boolean${isField ? "" : ", or null"}`,
+  );
 }
 
 /**

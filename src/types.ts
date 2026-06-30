@@ -173,6 +173,25 @@ export type RedisHost = {
 };
 
 /**
+ * A single host-injected `redis.*` property.
+ *
+ * - `{ value }`  -> `redis[name] = value` (a plain field).
+ * - `{ returns }` -> `redis[name] = function(...) return <returns> end`. The stub
+ *   ignores all arguments. `returns: null` makes it return nothing (a noop, e.g.
+ *   `set_repl`).
+ */
+export type RedisProp =
+  | { value: string | number | boolean }
+  | { returns: string | number | boolean | null };
+
+/**
+ * Map of `redis.*` member name -> prop. Injected onto the `redis` table at engine
+ * init, before globals protection locks it. The package ships none of these by
+ * default (blank slate); the host supplies what it needs.
+ */
+export type RedisProps = Record<string, RedisProp>;
+
+/**
  * Resource limits for the Lua engine.
  *
  * These limits protect against runaway scripts and resource exhaustion.
@@ -293,4 +312,7 @@ export type LoadOptions = {
 
   /** Optional resource limits applied to all engines created from this module. */
   limits?: EngineLimits;
+
+  /** Optional host-injected `redis.*` props (constants and simple stubs). */
+  redisProps?: RedisProps;
 };
