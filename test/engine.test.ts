@@ -393,6 +393,38 @@ test("redis.error_reply: prepends ERR to lowercase multi-word messages", async (
   assert.equal(coded.code?.toString("utf8"), "WRONGTYPE");
 });
 
+test("redis.setresp: RESP2 returns the previous protocol version", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  assert.equal(engine.eval("return redis.setresp(2)"), 2);
+  assert.equal(engine.eval("return redis.setresp(2)"), 2);
+});
+
+test("redis.setresp: rejects RESP3 and other unsupported protocol versions", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  for (const version of [3, 4]) {
+    const result = engine.eval(`return redis.setresp(${version})`) as {
+      err: Buffer;
+      code?: Buffer;
+      meta?: { line: number };
+    };
+
+    assert.ok(result && typeof result === "object" && "err" in result);
+    assert.equal(result.code?.toString("utf8"), "ERR");
+    assert.equal(
+      result.err.toString("utf8"),
+      "user_script:1: ERR RESP versions other than RESP2 are not supported by lua-redis-wasm",
+    );
+    assert.equal(result.meta?.line, 1);
+    assert.equal(engine.eval("return redis.setresp(2)"), 2);
+  }
+});
+
 test("eval: coroutine library remains available", async () => {
   await resolveWasmPath();
   const module = await load();

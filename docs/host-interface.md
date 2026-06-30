@@ -20,6 +20,9 @@ export type RedisHost = {
 };
 ```
 
+The host reply ABI is RESP2-only. RESP3 shapes such as maps, sets, doubles,
+booleans, big numbers, verbatim strings, and push replies are not representable.
+
 ### redisCall
 - Invoked for `redis.call(...)`.
 - Receives the command name and arguments as `Buffer[]`.
@@ -52,4 +55,3 @@ export type ReplyValue =
 - No string coercion is applied to arguments.
 - If you need strings, decode them from `Buffer` with an explicit encoding.
 - To return binary data, return a `Buffer` or `{ ok: Buffer }`.
-

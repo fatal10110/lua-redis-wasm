@@ -216,6 +216,10 @@ type ReplyValue =
   | ReplyValue[]; // Array
 ```
 
+The ABI supports RESP2 reply shapes only. `redis.setresp(2)` is accepted;
+`redis.setresp(3)` returns an `ERR` because RESP3-specific conversions and host
+reply tags are not implemented.
+
 On decode, an error payload of the form `CODE message` is split into `err` (the
 message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
 `code` is prepended back, so the wire form is always Redis's `CODE message`.

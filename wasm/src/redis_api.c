@@ -315,7 +315,12 @@ static int l_redis_status_reply(lua_State *L) {
 
 static int l_redis_setresp(lua_State *L) {
   uint32_t prev = g_resp_version;
-  g_resp_version = (uint32_t)luaL_checkinteger(L, 1);
+  uint32_t next = (uint32_t)luaL_checkinteger(L, 1);
+  // ponytail: RESP2 is the only ABI; accept RESP3 after adding wire tags/conversions.
+  if (next != 2) {
+    return luaL_error(L, "ERR RESP versions other than RESP2 are not supported by lua-redis-wasm");
+  }
+  g_resp_version = next;
   lua_pushnumber(L, (lua_Number)prev);
   return 1;
 }
