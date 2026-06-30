@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { load, LuaWasmModule } from "../src/index.js";
-import { makePropsHandler } from "../src/engine.js";
+import { LuaWasmEngine, makePropsHandler } from "../src/engine.js";
 import { encodeRedisProps } from "../src/codec.js";
 import type { ReplyValue, RedisHost } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
@@ -1100,4 +1100,67 @@ test("redisProps handler: returns a zero PtrLen when there are no props", () => 
   // count==0 blob is treated as "no props": ptr 0, len 0.
   const packed = handler() as bigint;
   assert.equal(packed, 0n);
+});
+
+// =============================================================================
+// redisProps integration (Task 3: C decode + apply onto the `redis` table)
+// =============================================================================
+
+const noopHost: RedisHost = {
+  redisCall: () => null,
+  redisPcall: () => null,
+  log: () => {},
+};
+
+test("redisProps integration: injects constant fields readable from Lua", async () => {
+  const engine = await LuaWasmEngine.create({
+    host: noopHost,
+    redisProps: {
+      REDIS_VERSION: { value: "7.4.0" },
+      REPL_ALL: { value: 3 },
+      FLAG: { value: true },
+    },
+  });
+  assert.deepEqual(engine.eval("return redis.REDIS_VERSION"), Buffer.from("7.4.0"));
+  assert.equal(engine.eval("return redis.REPL_ALL"), 3);
+  assert.equal(engine.eval("return redis.FLAG"), 1); // true -> 1
+});
+
+test("redisProps integration: injects a stub returning a constant", async () => {
+  const engine = await LuaWasmEngine.create({
+    host: noopHost,
+    redisProps: { replicate_commands: { returns: true } },
+  });
+  assert.equal(engine.eval("return redis.replicate_commands()"), 1);
+});
+
+test("redisProps integration: injects a noop stub that returns nothing", async () => {
+  const engine = await LuaWasmEngine.create({
+    host: noopHost,
+    redisProps: { set_repl: { returns: null } },
+  });
+  assert.equal(engine.eval("return select('#', redis.set_repl(1))"), 0);
+});
+
+test("redisProps integration: exposes server as an alias of redis with the same props", async () => {
+  const engine = await LuaWasmEngine.create({
+    host: noopHost,
+    redisProps: { REDIS_VERSION: { value: "7.4.0" } },
+  });
+  assert.equal(engine.eval("return server == redis"), 1);
+  assert.deepEqual(engine.eval("return server.REDIS_VERSION"), Buffer.from("7.4.0"));
+});
+
+test("redisProps integration: aliases server even with no props", async () => {
+  const engine = await LuaWasmEngine.create({ host: noopHost });
+  assert.equal(engine.eval("return server == redis"), 1);
+});
+
+test("redisProps integration: makes injected props readonly under globals protection", async () => {
+  const engine = await LuaWasmEngine.create({
+    host: noopHost,
+    redisProps: { REDIS_VERSION: { value: "7.4.0" } },
+  });
+  const r = engine.eval("redis.REDIS_VERSION = 'x' return 1") as { err: Buffer };
+  assert.ok(r && typeof r === "object" && "err" in r);
 });
