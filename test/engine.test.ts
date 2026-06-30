@@ -721,12 +721,12 @@ test("Lua: math.random is deterministic and seedable", async () => {
   const second = engine.eval("return math.random(100)");
   assert.equal(typeof first, "number");
   assert.ok(first >= 1 && first <= 100);
-  assert.equal(second, first);
+  assert.notEqual(second, first);
 
   const seededScript = "math.randomseed(123); return {math.random(100), math.random(100)}";
   assert.deepEqual(engine.eval(seededScript), engine.eval(seededScript));
 
-  assert.equal(engine.evalWithArgs("return math.random(100)", [], []), first);
+  assert.notEqual(engine.evalWithArgs("return math.random(100)", [], []), first);
 });
 
 test("Lua: table library", async () => {

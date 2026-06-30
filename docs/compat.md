@@ -48,8 +48,9 @@ through `redisProps`.
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.
 - No clock or time APIs available in Lua.
-- `math.random` and `math.randomseed` are available; the random sequence resets
-  for each script run.
+- `math.random` and `math.randomseed` are available. The random sequence is
+  deterministic for a VM lifecycle and advances across script runs; explicit
+  `math.randomseed(...)` resets it.
 - No other randomness unless explicitly injected by the host.
 - No native extensions beyond the supported Redis modules.
 

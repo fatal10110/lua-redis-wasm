@@ -512,6 +512,7 @@ int32_t init(void) {
   if (!g_state) {
     return -1;
   }
+  srand(0);
   open_allowed_libs(g_state);
   register_redis_api(g_state);
   {
@@ -544,6 +545,7 @@ int32_t reset(void) {
   if (!g_state) {
     return -1;
   }
+  srand(0);
   open_allowed_libs(g_state);
   register_redis_api(g_state);
   {
@@ -572,7 +574,6 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
-  srand(0);
   set_empty_keys_argv(g_state);
   const char *script = (const char *)(uintptr_t)ptr;
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
@@ -621,7 +622,6 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
     return reply_error("ERR Lua VM not initialized", 26);
   }
   reset_fuel();
-  srand(0);
   if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
     return reply_error("ERR KEYS/ARGV exceeds configured limit", 40);
   }
