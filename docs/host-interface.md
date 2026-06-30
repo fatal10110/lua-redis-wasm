@@ -17,6 +17,7 @@ export type RedisHost = {
   redisCall: RedisCallHandler;
   redisPcall: RedisCallHandler;
   log: RedisLogHandler;
+  onSetResp?: (version: 2 | 3) => void;
 };
 ```
 
@@ -37,6 +38,14 @@ sets, big numbers, and verbatim strings. Push replies are not representable.
 - Invoked for `redis.log(level, message)`.
 - `level` is the numeric Redis log level.
 - `message` is a binary-safe `Buffer`.
+
+### onSetResp
+- Optional. Invoked when the script calls `redis.setresp(n)` with the new
+  version (`2` or `3`).
+- The WASM encoder flips its own RESP mode regardless; this hook only lets the
+  host mirror the protocol when choosing reply shapes for
+  `redisCall`/`redisPcall`.
+- Fires after validation, so it only ever receives `2` or `3`.
 
 ## ReplyValue
 

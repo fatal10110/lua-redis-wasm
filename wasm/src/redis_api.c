@@ -401,6 +401,7 @@ static int l_redis_setresp(lua_State *L) {
     return luaL_error(L, "ERR RESP version must be 2 or 3.");
   }
   g_resp_version = next;
+  host_redis_setresp(next); /* notify host so it can match reply shapes */
   return 0;
 }
 

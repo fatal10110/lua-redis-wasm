@@ -182,6 +182,13 @@ export type RedisHost = {
 
   /** Handler for redis.log() messages. */
   log: RedisLogHandler;
+
+  /**
+   * Optional: notified when the script calls `redis.setresp(n)`. The WASM
+   * encoder still flips its own RESP mode; this hook lets the host match the
+   * reply shapes it returns from `redisCall`/`redisPcall` to the new protocol.
+   */
+  onSetResp?: (version: 2 | 3) => void;
 };
 
 /**
