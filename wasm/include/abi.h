@@ -55,6 +55,13 @@ void host_redis_log(uint32_t level, uint32_t ptr, uint32_t len);
 void host_redis_setresp(uint32_t version);
 PtrLen host_sha1hex(uint32_t ptr, uint32_t len);
 PtrLen host_redis_props(void);
+/* Debug build only (REDIS_LUA_DEBUG): the one Asyncify import. Sends a
+ * length-`len` payload at `ptr` to the JS debug controller and returns a
+ * pointer to a reply buffer laid out as [u32le len][bytes], allocated by JS
+ * via _alloc and freed by C with free_mem. Returns 0 when no debug session
+ * is attached. Deliberately a scalar return (not PtrLen) so the Asyncify
+ * JS-library wrapper needs no sret handling. */
+uint32_t host_debug_request(uint32_t ptr, uint32_t len);
 
 /* WASM exports */
 int32_t init(void);
@@ -66,6 +73,15 @@ void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_by
 void set_compat(uint32_t flags);
 uint32_t alloc(uint32_t size);
 void free_mem(uint32_t ptr);
+/* Debug build only (REDIS_LUA_DEBUG). Same as eval_with_args plus: installs
+ * the Lua debug agent and a combined fuel+line hook for the duration of the
+ * eval, loads the user chunk under `name` (e.g. the script SHA) so debugger
+ * source identity matches, and writes the PtrLen reply to `ret_ptr`
+ * ([u32le ptr][u32le len]) instead of returning it — the export is called
+ * through Asyncify (async ccall), which handles scalar/void returns only. */
+void eval_debug(uint32_t ret_ptr, uint32_t script_ptr, uint32_t script_len,
+                uint32_t args_ptr, uint32_t args_len, uint32_t keys_count,
+                uint32_t name_ptr, uint32_t name_len);
 
 #ifdef __cplusplus
 }
