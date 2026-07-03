@@ -189,7 +189,27 @@ export type RedisHost = {
    * reply shapes it returns from `redisCall`/`redisPcall` to the new protocol.
    */
   onSetResp?: (version: 2 | 3) => void;
+
+  /**
+   * Optional, debug flavor only: handles one message from the in-VM Lua debug
+   * agent (JSON payload) and resolves with the reply (JSON). Called every time
+   * the paused script crosses to the host — ready handshake, stop
+   * notifications, inspect results. May be async: the script stays suspended
+   * (via Asyncify) until the returned promise settles. Required for
+   * `engine.evalDebug()`; without it debug evals fail with
+   * "ERR no debug session attached".
+   */
+  onDebugRequest?: DebugRequestHandler;
 };
+
+/**
+ * Handler for one agent -> host debug crossing. `payload` is the agent's JSON
+ * message; the resolved Buffer is the host's JSON reply (see debug_agent.lua
+ * for the protocol).
+ */
+export type DebugRequestHandler = (
+  payload: Buffer,
+) => Promise<Buffer | Uint8Array | string> | Buffer | Uint8Array | string;
 
 /**
  * A single host-injected `redis.*` property.
@@ -375,6 +395,16 @@ export type LoadOptions = {
 
   /** Optional path to the Emscripten JS module. */
   modulePath?: string;
+
+  /**
+   * Load the debug flavor (`redis_lua.debug.{mjs,wasm}`): the same engine
+   * plus the Lua debugger (Asyncify + `debug` library + agent). Required for
+   * `engine.evalDebug()`. The debug flavor deliberately trades the sandbox /
+   * determinism parity of the default binary — use it only for local
+   * debugging. Explicit `wasmPath`/`modulePath`/`wasmBytes` win over this
+   * flag's default file selection.
+   */
+  debug?: boolean;
 
   /** Optional resource limits applied to all engines created from this module. */
   limits?: EngineLimits;

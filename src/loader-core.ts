@@ -90,6 +90,44 @@ export type WasmExports = {
    * @param ptr - Pointer to memory to free
    */
   _free_mem: (ptr: number) => void;
+
+  /**
+   * Debug flavor only: evaluate a script under the Lua debugger. Writes a
+   * PtrLen ([u32le ptr][u32le len]) to retPtr. Must be invoked via
+   * `ccall(..., { async: true })` — it suspends through Asyncify whenever the
+   * agent crosses to the host.
+   */
+  _eval_debug?: (
+    retPtr: number,
+    scriptPtr: number,
+    scriptLen: number,
+    argsPtr: number,
+    argsLen: number,
+    keysCount: number,
+    namePtr: number,
+    nameLen: number
+  ) => void;
+
+  /**
+   * Emscripten ccall, exported in the debug flavor for async (Asyncify)
+   * export invocation.
+   */
+  ccall?: (
+    ident: string,
+    returnType: string | null,
+    argTypes: string[],
+    args: unknown[],
+    opts?: { async?: boolean }
+  ) => unknown;
+
+  /**
+   * Debug flavor only: host handler for the `host_debug_request` Asyncify
+   * import, looked up on the Module object at call time by the JS library
+   * (see wasm/src/debug_library.js). Set by the engine after instantiation.
+   * Resolves to a pointer to a `[u32le len][bytes]` reply buffer allocated
+   * with `_alloc`, or 0 when no debug session is attached.
+   */
+  onDebugRequest?: (ptr: number, len: number) => Promise<number> | number;
 };
 
 /**
@@ -125,6 +163,22 @@ export function defaultWasmPath(): string {
  */
 export function defaultModulePath(): string {
   return new URL("./redis_lua.mjs", import.meta.url).href;
+}
+
+/**
+ * Default location of the debug-flavor WASM binary (Asyncify + Lua debugger)
+ * as a URL href co-located with the bundle.
+ */
+export function defaultDebugWasmPath(): string {
+  return new URL("./redis_lua.debug.wasm", import.meta.url).href;
+}
+
+/**
+ * Default location of the debug-flavor Emscripten JS glue module as a URL
+ * href co-located with the bundle.
+ */
+export function defaultDebugModulePath(): string {
+  return new URL("./redis_lua.debug.mjs", import.meta.url).href;
 }
 
 /**

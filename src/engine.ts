@@ -55,6 +55,7 @@ import type {
   RedisHost,
   RedisCallHandler,
   RedisLogHandler,
+  DebugRequestHandler,
   EngineOptions,
   StandaloneOptions,
   RedisProp,
@@ -76,6 +77,8 @@ import {
   type WasmExports,
   defaultModulePath,
   defaultWasmPath,
+  defaultDebugModulePath,
+  defaultDebugWasmPath,
 } from "./loader.js";
 import {
   readBytes,
@@ -211,6 +214,71 @@ export class LuaEngine {
   }
 
   /**
+   * Evaluates a Lua script under the in-VM debugger (debug WASM flavor only,
+   * `load({ debug: true })`). Same semantics as {@link evalWithArgs} plus:
+   *
+   * - The user chunk is loaded under `options.sourceName` (default: the
+   *   script's SHA1), so the debug agent and DAP source identity line up.
+   * - The host's `onDebugRequest` handler (see {@link RedisHost}) is invoked
+   *   for every agent -> host crossing; execution suspends via Asyncify while
+   *   the handler's promise is pending, keeping the paused Lua frames live.
+   *
+   * Async because the export is invoked through `ccall(..., {async: true})`;
+   * `eval`/`evalWithArgs` stay synchronous.
+   */
+  async evalDebug(
+    script: Buffer | Uint8Array | string,
+    keys: Array<Buffer | Uint8Array | string> = [],
+    args: Array<Buffer | Uint8Array | string> = [],
+    options: { sourceName?: string } = {},
+  ): Promise<ReplyValue> {
+    if (!this.exports._eval_debug || !this.exports.ccall) {
+      throw new Error(
+        "evalDebug requires the debug WASM flavor; load it with load({ debug: true })",
+      );
+    }
+    const scriptBuf = ensureBuffer(script, "script");
+    const sha = computeSha1Hex(scriptBuf).toString("utf8");
+    const nameBuf = Buffer.from(options.sourceName ?? sha, "utf8");
+    const argBuf = encodeArgArray([...keys, ...args]);
+
+    if (this.limits?.maxArgBytes && argBuf.length > this.limits.maxArgBytes) {
+      return {
+        err: Buffer.from("ERR KEYS/ARGV exceeds configured limit", "utf8"),
+      };
+    }
+
+    const retPtr = this.exports._alloc(8);
+    const scriptPtr = allocAndWrite(this.exports, scriptBuf);
+    const argsPtr = allocAndWrite(this.exports, argBuf);
+    const namePtr = allocAndWrite(this.exports, nameBuf);
+    try {
+      await this.exports.ccall(
+        "eval_debug",
+        null,
+        Array(8).fill("number"),
+        [
+          retPtr,
+          scriptPtr,
+          scriptBuf.length,
+          argsPtr,
+          argBuf.length,
+          keys.length,
+          namePtr,
+          nameBuf.length,
+        ],
+        { async: true },
+      );
+      return this.decodeResult(this.readPtrLen(retPtr), sha);
+    } finally {
+      this.exports._free_mem(scriptPtr);
+      this.exports._free_mem(argsPtr);
+      this.exports._free_mem(namePtr);
+      this.exports._free_mem(retPtr);
+    }
+  }
+
+  /**
    * Calls the WASM _eval function, handling different ABI conventions.
    * @private
    */
@@ -218,7 +286,10 @@ export class LuaEngine {
     ptr: number,
     len: number,
   ): bigint | number[] | { ptr: number; len: number } | number {
-    if (this.exports._eval.length >= 3) {
+    // Asyncify (debug flavor) wraps exports, hiding their arity (.length ===
+    // 0); those builds use the sret ABI like the default build, so treat a
+    // wrapped export as sret.
+    if (this.exports._eval.length >= 3 || this.exports._eval.length === 0) {
       const retPtr = this.exports._alloc(8);
       this.exports._eval(retPtr, ptr, len);
       const ptrLen = this.readPtrLen(retPtr);
@@ -243,7 +314,11 @@ export class LuaEngine {
     argsLen: number,
     keysCount: number,
   ): bigint | number[] | { ptr: number; len: number } | number {
-    if (this.exports._eval_with_args.length >= 6) {
+    // See callEval: Asyncify-wrapped exports (.length === 0) are sret too.
+    if (
+      this.exports._eval_with_args.length >= 6 ||
+      this.exports._eval_with_args.length === 0
+    ) {
       const retPtr = this.exports._alloc(8);
       this.exports._eval_with_args(
         retPtr,
@@ -455,6 +530,7 @@ type MutableHandlers = {
   pcall: (...args: number[]) => bigint | void;
   props: (...args: number[]) => bigint | void;
   setresp: (version: number) => void;
+  debugRequest: DebugRequestHandler | null;
 };
 
 /**
@@ -606,6 +682,21 @@ export class LuaWasmModule {
     return defaultModulePath();
   }
 
+  /**
+   * Returns the default path to the bundled debug-flavor WASM binary
+   * (Asyncify + Lua debugger; see `load({ debug: true })`).
+   */
+  static defaultDebugWasmPath(): string {
+    return defaultDebugWasmPath();
+  }
+
+  /**
+   * Returns the default path to the bundled debug-flavor Emscripten JS module.
+   */
+  static defaultDebugModulePath(): string {
+    return defaultDebugModulePath();
+  }
+
   private ensureNotConsumed(): void {
     if (this.consumed) {
       throw new Error(
@@ -657,6 +748,10 @@ export class LuaWasmModule {
     this.handlers.setresp = (version: number): void => {
       host.onSetResp?.call(host, version as 2 | 3);
     };
+
+    this.handlers.debugRequest = host.onDebugRequest
+      ? host.onDebugRequest.bind(host)
+      : null;
 
     this.handlers.sha1hex = (...args: number[]): bigint | void => {
       const abiArgs = parseAbiArgs(args);
@@ -750,6 +845,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
     pcall: () => BigInt(0),
     props: () => BigInt(0),
     setresp: () => {},
+    debugRequest: null,
   };
 
   // Create wrapper imports that delegate to mutable handlers
@@ -768,6 +864,33 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
 
   // Wire the props handler now that we have real exports + the encoded blob.
   handlers.props = makePropsHandler(exports, encodeRedisProps(options.redisProps));
+
+  // Debug flavor: the host_debug_request JS-library import (the one Asyncify
+  // import, see wasm/src/debug_library.js) looks up Module['onDebugRequest']
+  // at call time. Wire it to the swappable handler. The reply crosses back as
+  // a [u32le len][bytes] buffer allocated in linear memory; C frees it. A
+  // throwing handler is converted into an agent-level cancel so the paused
+  // script aborts cleanly instead of deadlocking or corrupting the VM.
+  exports.onDebugRequest = async (ptr: number, len: number): Promise<number> => {
+    const handler = handlers.debugRequest;
+    if (!handler) {
+      return 0; // C raises "ERR no debug session attached"
+    }
+    let reply: Buffer;
+    try {
+      reply = Buffer.from(await handler(readBytes(exports.HEAPU8, ptr, len)));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      reply = Buffer.from(
+        JSON.stringify({ action: "cancel", reason }),
+        "utf8",
+      );
+    }
+    const framed = Buffer.alloc(reply.length + 4);
+    framed.writeUInt32LE(reply.length, 0);
+    reply.copy(framed, 4);
+    return allocAndWrite(exports, framed);
+  };
 
   return new LuaWasmModule(exports, handlers, options);
 }
@@ -823,6 +946,15 @@ export class LuaWasmEngine {
     return this.engine.evalWithArgs(script, keys, args);
   }
 
+  evalDebug(
+    script: Buffer | Uint8Array | string,
+    keys: Array<Buffer | Uint8Array | string> = [],
+    args: Array<Buffer | Uint8Array | string> = [],
+    options: { sourceName?: string } = {},
+  ): Promise<ReplyValue> {
+    return this.engine.evalDebug(script, keys, args, options);
+  }
+
   getLimits(): EngineLimits | undefined {
     return this.engine.getLimits();
   }
@@ -834,6 +966,7 @@ export type {
   RedisCallHandler,
   RedisHost,
   RedisLogHandler,
+  DebugRequestHandler,
   StandaloneOptions,
   LoadOptions,
   RedisProp,

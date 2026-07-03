@@ -14,3 +14,6 @@ dist/redis_lua.mjs
 
 # macOS
 .DS_Store
+wasm/build/generated/
+wasm/build/redis_lua.debug.wasm
+wasm/build/redis_lua.debug.mjs

@@ -8,6 +8,7 @@ export type {
   RedisCallHandler,
   RedisHost,
   RedisLogHandler,
+  DebugRequestHandler,
   StandaloneOptions,
   RedisProp,
   RedisProps,

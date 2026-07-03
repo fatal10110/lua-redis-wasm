@@ -15,12 +15,19 @@ import {
   instantiate,
   defaultModulePath,
   defaultWasmPath,
+  defaultDebugModulePath,
+  defaultDebugWasmPath,
   type EmscriptenModuleFactory,
   type HostImport,
   type WasmExports
 } from "./loader-core.js";
 
-export { defaultModulePath, defaultWasmPath };
+export {
+  defaultModulePath,
+  defaultWasmPath,
+  defaultDebugModulePath,
+  defaultDebugWasmPath
+};
 export type { HostImport, WasmExports };
 
 /**
@@ -49,7 +56,8 @@ async function loadGlueFactory(
   options: LoadOptions
 ): Promise<EmscriptenModuleFactory> {
   const { pathToFileURL } = await import("node:url");
-  const modulePath = options.modulePath ?? (await nodeAssetPath("redis_lua.mjs"));
+  const defaultFile = options.debug ? "redis_lua.debug.mjs" : "redis_lua.mjs";
+  const modulePath = options.modulePath ?? (await nodeAssetPath(defaultFile));
   const moduleUrl = /^[a-z]+:\/\//i.test(modulePath)
     ? modulePath
     : pathToFileURL(modulePath).href;
@@ -63,7 +71,8 @@ async function loadWasmBinary(options: LoadOptions): Promise<Uint8Array> {
     return options.wasmBytes;
   }
   const { readFile } = await import("node:fs/promises");
-  const wasmPath = options.wasmPath ?? (await nodeAssetPath("redis_lua.wasm"));
+  const defaultFile = options.debug ? "redis_lua.debug.wasm" : "redis_lua.wasm";
+  const wasmPath = options.wasmPath ?? (await nodeAssetPath(defaultFile));
   return new Uint8Array(await readFile(wasmPath));
 }
 

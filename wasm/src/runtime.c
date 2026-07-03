@@ -464,7 +464,18 @@ void set_compat(uint32_t flags) { g_compat_flags = flags; }
 // is stripped unless COMPAT_PRINT is set (Redis 6.2 kept it).
 static void disable_non_determinism(lua_State *L, uint32_t flags) {
   remove_global(L, "io");
+#ifndef REDIS_LUA_DEBUG
+  /* Sandbox-escape vectors: debug reaches VM internals; setfenv swaps the
+   * running function's environment for a writable table and getfenv(0) reaches
+   * the real global table, bypassing globals protection. Redis removes these
+   * too (lua_builtins_deprecated). The debug flavor keeps all three — `debug`
+   * is the agent's introspection surface and setfenv/getfenv power its
+   * paused-frame `evaluate` — deliberately trading the sandbox/determinism
+   * guarantees. That flavor is opt-in and never the published default binary. */
   remove_global(L, "debug");
+  remove_global(L, "setfenv");
+  remove_global(L, "getfenv");
+#endif
   remove_global(L, "package");
   remove_global(L, "require");
   remove_global(L, "dofile");
@@ -473,11 +484,6 @@ static void disable_non_determinism(lua_State *L, uint32_t flags) {
     remove_global(L, "print");
   }
   remove_global(L, "newproxy");
-  // Sandbox-escape vectors: setfenv swaps the running function's environment
-  // for a writable table and getfenv(0) reaches the real global table,
-  // bypassing globals protection. Redis removes these too (lua_builtins_deprecated).
-  remove_global(L, "setfenv");
-  remove_global(L, "getfenv");
   remove_package_entry(L, "io");
   remove_package_entry(L, "debug");
   remove_package_entry(L, "package");
@@ -621,6 +627,11 @@ static void open_allowed_libs(lua_State *L, uint32_t flags) {
   if (flags & COMPAT_OS) {
     luaopen_os(L);
   }
+#ifdef REDIS_LUA_DEBUG
+  /* The default binary never even compiles ldblib.c; the debug flavor opens it
+   * so the debug agent can use debug.getinfo/getlocal/getupvalue. */
+  luaopen_debug(L);
+#endif
   lua_settop(L, 0);
   disable_non_determinism(L, flags);
   load_redis_modules(L);
@@ -796,8 +807,12 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   return out;
 }
 
-PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
-                      uint32_t args_len, uint32_t keys_count) {
+/* Shared body of eval_with_args and (debug build) eval_debug. `chunkname` is
+ * the Lua chunk name the script is loaded under; the default flavor always
+ * passes "@user_script", the debug flavor passes the script SHA so debugger
+ * source identity matches. */
+static PtrLen do_eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
+                                uint32_t args_len, uint32_t keys_count, const char *chunkname) {
   if (!g_state) {
     return reply_error("ERR Lua VM not initialized", 26);
   }
@@ -814,7 +829,7 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   const char *script = (const char *)(uintptr_t)script_ptr;
   lua_pushcfunction(g_state, script_error_handler);
   int errfunc = lua_gettop(g_state);
-  if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
+  if (luaL_loadbuffer(g_state, script, (size_t)script_len, chunkname) != 0) {
     size_t err_len = 0;
     const char *err = lua_tolstring(g_state, -1, &err_len);
     PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23, 0);
@@ -856,6 +871,177 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   }
   return out;
 }
+
+PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
+                      uint32_t args_len, uint32_t keys_count) {
+  return do_eval_with_args(script_ptr, script_len, args_ptr, args_len, keys_count,
+                           "@user_script");
+}
+
+#ifdef REDIS_LUA_DEBUG
+
+/* ---- Debug flavor ---------------------------------------------------------
+ * Everything below exists only in the -DREDIS_LUA_DEBUG build. The debugger
+ * "brain" is the Lua agent (debug_agent.lua, embedded via the generated
+ * header); C owns just the combined fuel+line hook, the agent's lifecycle,
+ * and the single host crossing (__redis_debug_request -> host_debug_request,
+ * the one Asyncify import). */
+
+#include "debug_agent.h" /* generated: DEBUG_AGENT_LUA[] */
+
+static int g_agent_online_ref = LUA_NOREF;
+static int g_debug_active = 0;
+
+/* Lua binding handed to the agent chunk as its only door to JS. Payload bytes
+ * go out; the JS reply buffer comes back as [u32le len][bytes] (allocated by
+ * JS via _alloc, freed here). The host import may suspend via Asyncify; the
+ * whole WASM stack (Lua VM included) unwinds and resumes transparently, which
+ * is what keeps the paused user frames live for inspection. */
+static int l_debug_request(lua_State *L) {
+  size_t len = 0;
+  const char *payload = luaL_checklstring(L, 1, &len);
+  uint32_t reply = host_debug_request((uint32_t)(uintptr_t)payload, (uint32_t)len);
+  if (reply == 0) {
+    return luaL_error(L, "ERR no debug session attached");
+  }
+  const uint8_t *buf = (const uint8_t *)(uintptr_t)reply;
+  uint32_t reply_len = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                       ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+  lua_pushlstring(L, (const char *)(buf + 4), reply_len);
+  free_mem(reply);
+  return 1;
+}
+
+/* Combined hook for debug evals. Lua has one hook slot per state, so this
+ * hook must preserve fuel semantics itself (count events) and delegate line
+ * events to the agent. Lua disables hooks while a hook runs, so agent code
+ * never re-enters here and consumes no fuel. Errors raised by the agent
+ * (including debugger cancellation) propagate and abort the script. */
+static void debug_fuel_hook(lua_State *L, lua_Debug *ar) {
+  if (ar->event == LUA_HOOKCOUNT) {
+    g_fuel_remaining -= FUEL_HOOK_STEP;
+    if (g_fuel_remaining <= 0) {
+      luaL_error(L, "Script killed by fuel limit");
+    }
+    return;
+  }
+  if (ar->event != LUA_HOOKLINE || !g_debug_active) {
+    return;
+  }
+  /* Count events alone cannot enforce fuel here: the agent runs inside this
+   * hook with hooks disabled, yet the VM's instruction countdown keeps
+   * ticking, so most zero-crossings land in agent code and are silently
+   * swallowed (the counter resets without the hook firing). Burn one fuel per
+   * user line event as well — every loop iteration crosses a line boundary,
+   * so runaway scripts still terminate deterministically. */
+  g_fuel_remaining -= 1;
+  if (g_fuel_remaining <= 0) {
+    luaL_error(L, "Script killed by fuel limit");
+  }
+  lua_rawgeti(L, LUA_REGISTRYINDEX, g_agent_online_ref);
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    return;
+  }
+  lua_pushinteger(L, ar->currentline);
+  int depth = 0;
+  lua_Debug frame;
+  while (lua_getstack(L, depth, &frame)) {
+    depth++;
+  }
+  lua_pushinteger(L, depth);
+  if (lua_pcall(L, 2, 0, 0) != 0) {
+    lua_error(L); /* re-raise the agent's error into the running script */
+  }
+}
+
+static void teardown_debug(void) {
+  luaL_unref(g_state, LUA_REGISTRYINDEX, g_agent_online_ref);
+  g_agent_online_ref = LUA_NOREF;
+  g_debug_active = 0;
+  /* Restore the fuel-only hook so a later non-debug eval on this state is not
+   * left in debug mode. */
+  lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
+}
+
+/* Loads the agent chunk, runs the ready handshake, installs the combined
+ * hook, and leaves g_agent_online_ref set. Returns 0 on success; on failure
+ * pushes nothing and writes the error reply to *out. */
+static int setup_debug(const char *chunkname, PtrLen *out) {
+  lua_State *L = g_state;
+  if (luaL_loadbuffer(L, DEBUG_AGENT_LUA, sizeof(DEBUG_AGENT_LUA) - 1,
+                      "@__debug_agent__") != 0) {
+    size_t err_len = 0;
+    const char *err = lua_tolstring(L, -1, &err_len);
+    *out = reply_error(err ? err : "ERR debug agent load failed", err ? err_len : 27);
+    lua_settop(L, 0);
+    return -1;
+  }
+  lua_pushcfunction(L, l_debug_request);
+  lua_pushstring(L, chunkname);
+  if (lua_pcall(L, 2, 1, 0) != 0 || !lua_istable(L, -1)) {
+    size_t err_len = 0;
+    const char *err = lua_tolstring(L, -1, &err_len);
+    *out = reply_error(err ? err : "ERR debug agent init failed", err ? err_len : 27);
+    lua_settop(L, 0);
+    return -1;
+  }
+  lua_getfield(L, -1, "online");
+  g_agent_online_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  lua_getfield(L, -1, "onready");
+  lua_remove(L, -2); /* drop the agent table, keep onready */
+  /* Ready handshake (initial breakpoints + stopOnEntry) before the user chunk
+   * runs. Suspends via Asyncify while the host decides. */
+  if (lua_pcall(L, 0, 0, 0) != 0) {
+    size_t err_len = 0;
+    const char *err = lua_tolstring(L, -1, &err_len);
+    *out = reply_script_error(err ? err : "ERR debug ready failed", err ? err_len : 22, 0);
+    lua_settop(L, 0);
+    teardown_debug();
+    return -1;
+  }
+  g_debug_active = 1;
+  lua_sethook(L, debug_fuel_hook, LUA_MASKCOUNT | LUA_MASKLINE, FUEL_HOOK_STEP);
+  return 0;
+}
+
+void eval_debug(uint32_t ret_ptr, uint32_t script_ptr, uint32_t script_len,
+                uint32_t args_ptr, uint32_t args_len, uint32_t keys_count,
+                uint32_t name_ptr, uint32_t name_len) {
+  PtrLen out = {0, 0};
+  uint8_t *ret = (uint8_t *)(uintptr_t)ret_ptr;
+
+  if (!g_state) {
+    out = reply_error("ERR Lua VM not initialized", 26);
+    write_u32_le(ret, out.ptr);
+    write_u32_le(ret + 4, out.len);
+    return;
+  }
+
+  /* Chunk name: "@" + caller-provided name (the script SHA), so the agent and
+   * DAP source identity line up. Falls back to the default name. */
+  char *chunkname = NULL;
+  if (name_ptr != 0 && name_len > 0) {
+    chunkname = (char *)malloc((size_t)name_len + 2);
+    if (chunkname) {
+      chunkname[0] = '@';
+      memcpy(chunkname + 1, (const void *)(uintptr_t)name_ptr, name_len);
+      chunkname[name_len + 1] = '\0';
+    }
+  }
+  const char *name = chunkname ? chunkname : "@user_script";
+
+  if (setup_debug(name, &out) == 0) {
+    out = do_eval_with_args(script_ptr, script_len, args_ptr, args_len, keys_count, name);
+    teardown_debug();
+  }
+
+  free(chunkname);
+  write_u32_le(ret, out.ptr);
+  write_u32_le(ret + 4, out.len);
+}
+
+#endif /* REDIS_LUA_DEBUG */
 
 uint32_t alloc(uint32_t size) {
   void *mem = malloc(size);

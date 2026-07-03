@@ -16,12 +16,19 @@ import {
   instantiate,
   defaultModulePath,
   defaultWasmPath,
+  defaultDebugModulePath,
+  defaultDebugWasmPath,
   type EmscriptenModuleFactory,
   type HostImport,
   type WasmExports
 } from "./loader-core.js";
 
-export { defaultModulePath, defaultWasmPath };
+export {
+  defaultModulePath,
+  defaultWasmPath,
+  defaultDebugModulePath,
+  defaultDebugWasmPath
+};
 export type { HostImport, WasmExports };
 
 /** Load the Emscripten glue factory as a co-located (or explicit URL) asset. */
@@ -32,6 +39,13 @@ async function loadGlueFactory(
     // Explicit URL (e.g. a jsdelivr CDN URL). Fully dynamic so the bundler
     // doesn't try to resolve/emit it; @vite-ignore silences the warning.
     const imported = await import(/* @vite-ignore */ options.modulePath);
+    return (imported.default ?? imported) as EmscriptenModuleFactory;
+  }
+  if (options.debug) {
+    // Debug flavor: resolved as a co-located URL rather than a literal
+    // specifier, so bundlers that don't ship the debug pair aren't forced to.
+    const debugUrl = new URL("./redis_lua.debug.mjs", import.meta.url).href;
+    const imported = await import(/* @vite-ignore */ debugUrl);
     return (imported.default ?? imported) as EmscriptenModuleFactory;
   }
   // Bundled default: literal specifier so the bundler emits + resolves the glue
@@ -47,7 +61,8 @@ async function loadWasmBinary(options: LoadOptions): Promise<Uint8Array> {
     return options.wasmBytes;
   }
   // Explicit URL (e.g. jsdelivr) wins; otherwise the co-located bundled asset.
-  const wasmUrl = options.wasmPath ?? new URL("./redis_lua.wasm", import.meta.url);
+  const defaultFile = options.debug ? "./redis_lua.debug.wasm" : "./redis_lua.wasm";
+  const wasmUrl = options.wasmPath ?? new URL(defaultFile, import.meta.url);
   const response = await fetch(wasmUrl);
   if (!response.ok) {
     throw new Error(
