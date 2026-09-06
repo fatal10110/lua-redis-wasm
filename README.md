@@ -5,11 +5,13 @@
 [![Node.js Version](https://img.shields.io/node/v/lua-redis-wasm.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A WebAssembly-based Redis Lua 5.1 script engine for Node.js. Execute Redis-compatible Lua scripts in JavaScript/TypeScript environments without a live Redis server.
+**Run Redis Lua `EVAL`/`EVALSHA` in Node without a Redis process.**
+
+WebAssembly Redis Lua 5.1 engine for Node.js: binary-safe `KEYS`/`ARGV`, host hooks for `redis.call` / `redis.pcall` / `redis.log`, and fuel-based instruction limits — no live Redis server required.
 
 > **Primary purpose:** this engine powers the Lua scripting (`EVAL`/`EVALSHA`)
 > support in [js-redis-server](https://github.com/fatal10110/js-redis-server), an
-> in-memory Redis-compatible server. It is published as a standalone package so
+> in-memory Redis-compatible server ([browser demo](https://fatal10110.github.io/js-redis-server/)). It is published as a standalone package so
 > it can be reused, but its API and error semantics are driven by what
 > js-redis-server needs to match real Redis. If you embed it directly, expect it
 > to behave the way Redis behaves inside that server.
