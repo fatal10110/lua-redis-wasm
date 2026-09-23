@@ -156,6 +156,41 @@ test("redis.call: null reply becomes nil after redis.setresp(3)", async () => {
   assert.deepEqual(engine.eval("redis.setresp(3); return redis.call('HMGET','h','f','nope','f')"), [
     Buffer.from("v"),
   ]);
+  // Length and unpack see the nil hole the way real Redis does.
+  assert.equal(engine.eval("redis.setresp(3); return #redis.call('HMGET','h','f','nope','f')"), 1);
+  assert.equal(engine.eval("redis.setresp(3); return select('#', unpack(redis.call('HMGET','h','f','nope','f')))"), 1);
+});
+
+test("redis.pcall: null reply becomes nil after redis.setresp(3)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost({ redisPcall: () => null }));
+  assert.equal((engine.eval("return type(redis.pcall('GET','missing'))") as Buffer).toString(), "boolean");
+  assert.equal((engine.eval("redis.setresp(3); return type(redis.pcall('GET','missing'))") as Buffer).toString(), "nil");
+});
+
+test("redis.call: RESP3 null set member / map key raises a script error", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost({
+    redisCall: (args) => args[0].toString() === "SET3"
+      ? { set: [null] }
+      : { map: [[null, Buffer.from("v")]] },
+  }));
+  for (const cmd of ["SET3", "MAP3"]) {
+    const result = engine.eval(`redis.setresp(3); local ok, err = pcall(redis.call, '${cmd}'); return {tostring(ok), tostring(err)}`) as Buffer[];
+    assert.equal(result[0].toString(), "false");
+    assert.match(result[1].toString(), /table index is nil/);
+  }
+});
+
+test("redis.call: raised errors free the host reply buffer", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const big = Buffer.alloc(1024 * 1024, "e");
+  const engine = module.create(createTestHost({ redisCall: () => ({ err: big }) }));
+  // 128 x 1MB would exhaust the 64MB WASM heap if each reply leaked.
+  assert.equal(engine.eval("for i = 1, 128 do pcall(redis.call, 'X') end; return 1"), 1);
 });
 
 test("eval: returns empty table as empty array", async () => {
