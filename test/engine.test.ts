@@ -501,6 +501,33 @@ test("redis.setresp: enables RESP3 return conversions for the current script", a
   assert.equal(engine.eval("return true"), 1);
 });
 
+test("typed reply tables convert without redis.setresp(3)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  const result = engine.eval(`
+    return {
+      {double=2.5},
+      {big_number='12345678901234567890'},
+      {verbatim_string={format='txt', string='hello'}},
+      {map={a=1}},
+      {set={a=true}},
+      true
+    }
+  `) as ReplyValue[];
+
+  assert.deepEqual(result[0], { double: 2.5 });
+  assert.deepEqual(result[1], { big_number: Buffer.from("12345678901234567890") });
+  assert.deepEqual(result[2], {
+    verbatim_string: { format: Buffer.from("txt"), string: Buffer.from("hello") },
+  });
+  assert.deepEqual(result[3], { map: [[Buffer.from("a"), 1]] });
+  assert.deepEqual(result[4], { set: [Buffer.from("a")] });
+  // Booleans still depend on setresp(3).
+  assert.equal(result[5], 1);
+});
+
 test("redis.setresp: rejects unsupported protocol versions", async () => {
   await resolveWasmPath();
   const module = await load();

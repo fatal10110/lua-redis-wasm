@@ -342,7 +342,10 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  if (redis_resp_version() == 3) {
+  // Typed tables ({double=}, {big_number=}, {map=}, {set=}, {verbatim_string=})
+  // convert at any script protocol level, like real Redis. Only booleans
+  // depend on redis.setresp(3).
+  {
     int marker = encode_resp3_marker(L, idx, rb);
     if (marker != 1) {
       return marker;

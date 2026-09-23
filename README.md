@@ -223,8 +223,10 @@ type ReplyValue =
 ```
 
 The ABI supports RESP2 replies and RESP3 booleans, doubles, maps, sets, big
-numbers, and verbatim strings. `redis.setresp(3)` enables RESP3 Lua conversions
-for the current script.
+numbers, and verbatim strings. Typed tables (`{double=}`, `{big_number=}`,
+`{map=}`, `{set=}`, `{verbatim_string=}`) in a script's return value convert at
+any protocol level, like real Redis. `redis.setresp(3)` only changes how
+booleans and `redis.call` replies are converted for the current script.
 
 On decode, an error payload of the form `CODE message` is split into `err` (the
 message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
