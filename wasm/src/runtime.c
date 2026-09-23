@@ -102,6 +102,38 @@ static PtrLen rb_finalize(ReplyBuffer *rb) {
   return out;
 }
 
+// Appends a reply string, mapping "\r\n" to spaces like Redis so the value can
+// never break RESP framing.
+static int rb_append_single_line(ReplyBuffer *rb, const char *str, size_t len) {
+  size_t start = rb->len;
+  if (rb_append(rb, str, len) != 0) {
+    return -1;
+  }
+  for (size_t i = start; i < rb->len; i++) {
+    if (rb->data[i] == '\r' || rb->data[i] == '\n') {
+      rb->data[i] = ' ';
+    }
+  }
+  return 0;
+}
+
+static int rb_write_single_line(ReplyBuffer *rb, uint8_t type, const char *str, size_t len) {
+  if (rb_write_header(rb, type, (uint32_t)len) != 0) {
+    return -1;
+  }
+  return rb_append_single_line(rb, str, len);
+}
+
+// Length of an error message as Redis sends it: read as a C string (cut at the
+// first NUL), trailing "\r\n" trimmed (addReplyErrorFormatEx's sdstrim).
+static size_t error_len(const char *msg) {
+  size_t len = strlen(msg);
+  while (len > 0 && (msg[len - 1] == '\r' || msg[len - 1] == '\n')) {
+    len--;
+  }
+  return len;
+}
+
 static PtrLen reply_error(const char *msg, size_t len) {
   ReplyBuffer rb;
   rb_init(&rb);
@@ -126,7 +158,9 @@ static PtrLen reply_error(const char *msg, size_t len) {
  * `user_script:N:` text prefix, so the line cannot be recovered from the message
  * alone; the host reads it from this field. 0 means "parse from the message
  * prefix" (load/syntax errors, which never run the error handler). */
-static PtrLen reply_script_error(const char *msg, size_t len, uint32_t line) {
+static PtrLen reply_script_error(const char *msg, uint32_t line) {
+  // Sanitized like a returned {err=} so a host can put it straight into RESP.
+  size_t len = error_len(msg);
   ReplyBuffer rb;
   rb_init(&rb);
   if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)(len + 4)) != 0) {
@@ -138,7 +172,7 @@ static PtrLen reply_script_error(const char *msg, size_t len, uint32_t line) {
     free(rb.data);
     return (PtrLen){0, 0};
   }
-  if (rb_append(&rb, msg, len) != 0) {
+  if (rb_append_single_line(&rb, msg, len) != 0) {
     free(rb.data);
     return (PtrLen){0, 0};
   }
@@ -246,24 +280,6 @@ static int rawget_field(lua_State *L, int idx, const char *key) {
   return lua_type(L, -1);
 }
 
-// Writes a single-line reply, mapping "\r\n" to spaces like Redis so the value
-// can never break RESP framing.
-static int rb_write_single_line(ReplyBuffer *rb, uint8_t type, const char *str, size_t len) {
-  if (rb_write_header(rb, type, (uint32_t)len) != 0) {
-    return -1;
-  }
-  size_t start = rb->len;
-  if (rb_append(rb, str, len) != 0) {
-    return -1;
-  }
-  for (size_t i = start; i < rb->len; i++) {
-    if (rb->data[i] == '\r' || rb->data[i] == '\n') {
-      rb->data[i] = ' ';
-    }
-  }
-  return 0;
-}
-
 static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
   if (rawget_field(L, idx, "double") == LUA_TNUMBER) {
     double value = (double)lua_tonumber(L, -1);
@@ -344,10 +360,11 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
     idx = lua_gettop(L) + idx + 1;
   }
   // Redis checks `err` before `ok`: a table carrying both fields is an error.
-  // Both are read as C strings (cut at the first NUL) and CRLF-mapped.
+  // Both are read as C strings (cut at the first NUL) and CRLF-mapped; Redis
+  // also trims trailing CRLF from errors, but not from status replies.
   if (rawget_field(L, idx, "err") == LUA_TSTRING) {
     const char *msg = lua_tostring(L, -1);
-    int rc = rb_write_single_line(rb, REPLY_ERROR, msg, strlen(msg));
+    int rc = rb_write_single_line(rb, REPLY_ERROR, msg, error_len(msg));
     lua_pop(L, 1);
     return rc;
   }
@@ -773,18 +790,15 @@ PtrLen eval(uint32_t ptr, uint32_t len) {
   lua_pushcfunction(g_state, script_error_handler);
   int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
-    size_t err_len = 0;
-    const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23, 0);
+    const char *err = lua_tostring(g_state, -1);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0);
     lua_settop(g_state, 0);
     return out;
   }
   g_error_line = 0;
   if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
-    size_t err_len = 0;
-    const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out =
-        reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28, g_error_line);
+    const char *err = lua_tostring(g_state, -1);
+    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);
     return out;
   }
@@ -834,18 +848,15 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   lua_pushcfunction(g_state, script_error_handler);
   int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
-    size_t err_len = 0;
-    const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", err ? err_len : 23, 0);
+    const char *err = lua_tostring(g_state, -1);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0);
     lua_settop(g_state, 0);
     return out;
   }
   g_error_line = 0;
   if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
-    size_t err_len = 0;
-    const char *err = lua_tolstring(g_state, -1, &err_len);
-    PtrLen out =
-        reply_script_error(err ? err : "ERR script execution failed", err ? err_len : 28, g_error_line);
+    const char *err = lua_tostring(g_state, -1);
+    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);
     return out;
   }
