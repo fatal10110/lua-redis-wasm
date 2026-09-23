@@ -246,6 +246,24 @@ static int rawget_field(lua_State *L, int idx, const char *key) {
   return lua_type(L, -1);
 }
 
+// Writes a single-line reply, mapping "\r\n" to spaces like Redis so the value
+// can never break RESP framing.
+static int rb_write_single_line(ReplyBuffer *rb, uint8_t type, const char *str, size_t len) {
+  if (rb_write_header(rb, type, (uint32_t)len) != 0) {
+    return -1;
+  }
+  size_t start = rb->len;
+  if (rb_append(rb, str, len) != 0) {
+    return -1;
+  }
+  for (size_t i = start; i < rb->len; i++) {
+    if (rb->data[i] == '\r' || rb->data[i] == '\n') {
+      rb->data[i] = ' ';
+    }
+  }
+  return 0;
+}
+
 static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
   if (rawget_field(L, idx, "double") == LUA_TNUMBER) {
     double value = (double)lua_tonumber(L, -1);
@@ -263,20 +281,7 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
     size_t len = 0;
     const char *str = lua_tolstring(L, -1, &len);
     lua_pop(L, 1);
-    if (rb_write_header(rb, REPLY_BIG_NUMBER, (uint32_t)len) != 0) {
-      return -1;
-    }
-    // Redis maps "\r\n" to spaces so the value can never break RESP framing.
-    size_t start = rb->len;
-    if (rb_append(rb, str, len) != 0) {
-      return -1;
-    }
-    for (size_t i = start; i < rb->len; i++) {
-      if (rb->data[i] == '\r' || rb->data[i] == '\n') {
-        rb->data[i] = ' ';
-      }
-    }
-    return 0;
+    return rb_write_single_line(rb, REPLY_BIG_NUMBER, str, len);
   }
   lua_pop(L, 1);
 
@@ -338,27 +343,19 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   if (idx < 0) {
     idx = lua_gettop(L) + idx + 1;
   }
-  size_t len = 0;
-  const char *msg = NULL;
-
   // Redis checks `err` before `ok`: a table carrying both fields is an error.
+  // Both are read as C strings (cut at the first NUL) and CRLF-mapped.
   if (rawget_field(L, idx, "err") == LUA_TSTRING) {
-    msg = lua_tolstring(L, -1, &len);
-    int rc = rb_write_header(rb, REPLY_ERROR, (uint32_t)len);
-    if (rc == 0) {
-      rc = rb_append(rb, msg, len);
-    }
+    const char *msg = lua_tostring(L, -1);
+    int rc = rb_write_single_line(rb, REPLY_ERROR, msg, strlen(msg));
     lua_pop(L, 1);
     return rc;
   }
   lua_pop(L, 1);
 
   if (rawget_field(L, idx, "ok") == LUA_TSTRING) {
-    msg = lua_tolstring(L, -1, &len);
-    int rc = rb_write_header(rb, REPLY_STATUS, (uint32_t)len);
-    if (rc == 0) {
-      rc = rb_append(rb, msg, len);
-    }
+    const char *msg = lua_tostring(L, -1);
+    int rc = rb_write_single_line(rb, REPLY_STATUS, msg, strlen(msg));
     lua_pop(L, 1);
     return rc;
   }

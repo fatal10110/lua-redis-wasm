@@ -559,6 +559,18 @@ test("typed reply tables: exact types, raw lookups, big_number CRLF mapping", as
   });
 });
 
+test("typed reply tables: ok/err cut at NUL and map CRLF to spaces", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  assert.deepEqual(engine.eval("return {ok='A\\r\\nB'}"), { ok: Buffer.from("A  B") });
+  assert.deepEqual(engine.eval("return {ok='a\\0b'}"), { ok: Buffer.from("a") });
+  const err = engine.eval("return {err='ERR x\\r\\ny\\0z'}") as { err: Buffer; code?: Buffer };
+  assert.equal(err.err.toString(), "x  y");
+  assert.equal(err.code?.toString(), "ERR");
+});
+
 test("redis.setresp: rejects unsupported protocol versions", async () => {
   await resolveWasmPath();
   const module = await load();
