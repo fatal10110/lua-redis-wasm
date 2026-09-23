@@ -166,10 +166,13 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
   *offset += 5;
   switch (type) {
     case REPLY_NULL:
-      /* RESP null (bulk/multibulk) maps to Lua false, matching real Redis
-       * (redisProtocolToLuaType). This is the call path only; the return
-       * path still maps nil/false -> null. */
-      lua_pushboolean(L, 0);
+      /* RESP null maps to Lua false at RESP2 and to nil after
+       * redis.setresp(3), matching real Redis (redisProtocolToLuaType). */
+      if (redis_resp_version() == 3) {
+        lua_pushnil(L);
+      } else {
+        lua_pushboolean(L, 0);
+      }
       return 1;
     case REPLY_INT: {
       if (*offset + 8 > len) {
@@ -210,7 +213,14 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       return result;
     }
     case REPLY_ARRAY: {
-      lua_createtable(L, (int)count_or_len, 0);
+      /* At RESP3, lua_newtable like real Redis: with a nil hole, later
+       * elements land in the hash part so # and unpack stop at the hole.
+       * RESP2 has no nil holes, so preallocate to avoid rehashing. */
+      if (redis_resp_version() == 3) {
+        lua_newtable(L);
+      } else {
+        lua_createtable(L, (int)count_or_len, 0);
+      }
       for (uint32_t i = 1; i <= count_or_len; i++) {
         if (decode_reply(L, buf, len, offset, raise_on_error) != 1) {
           return luaL_error(L, "ERR reply decoding failed");
@@ -298,6 +308,18 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
   }
 }
 
+typedef struct {
+  const uint8_t *buf;
+  size_t len;
+  int raise_on_error;
+} DecodeCtx;
+
+static int decode_reply_protected(lua_State *L) {
+  DecodeCtx *ctx = (DecodeCtx *)lua_touserdata(L, 1);
+  size_t offset = 0;
+  return decode_reply(L, ctx->buf, ctx->len, &offset, ctx->raise_on_error);
+}
+
 static int redis_call_common(lua_State *L, int raise_on_error) {
   int argc = lua_gettop(L);
   /* A zero-arg redis.call()/redis.pcall() is dispatched to the host with an
@@ -318,11 +340,17 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   if (reply.ptr == 0 || reply.len == 0) {
     return luaL_error(L, "ERR empty reply from host");
   }
-  const uint8_t *buf = (const uint8_t *)(uintptr_t)reply.ptr;
-  size_t offset = 0;
-  int result = decode_reply(L, buf, reply.len, &offset, raise_on_error);
+  /* Decode in protected mode so the host reply is freed before any error
+   * (command error, nil table key, decode failure) propagates to the script. */
+  DecodeCtx ctx = {(const uint8_t *)(uintptr_t)reply.ptr, reply.len, raise_on_error};
+  lua_pushvalue(L, lua_upvalueindex(1)); /* decode_reply_protected, created once */
+  lua_pushlightuserdata(L, &ctx);
+  int status = lua_pcall(L, 1, 1, 0);
   free_mem(reply.ptr);
-  return result;
+  if (status != 0) {
+    return lua_error(L);
+  }
+  return 1;
 }
 
 static int l_redis_call(lua_State *L) {
@@ -525,10 +553,11 @@ int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
 void register_redis_api(lua_State *L) {
   lua_newtable(L);
 
-  lua_pushcfunction(L, l_redis_call);
-  lua_setfield(L, -2, "call");
-
-  lua_pushcfunction(L, l_redis_pcall);
+  lua_pushcfunction(L, decode_reply_protected);
+  lua_pushvalue(L, -1);
+  lua_pushcclosure(L, l_redis_call, 1);
+  lua_setfield(L, -3, "call");
+  lua_pushcclosure(L, l_redis_pcall, 1);
   lua_setfield(L, -2, "pcall");
 
   lua_pushcfunction(L, l_redis_log);
