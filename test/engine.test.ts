@@ -135,6 +135,29 @@ test("redis.call: null nested in array reply becomes false", async () => {
   assert.equal(engine.eval("local r = redis.call('MGET','a','b'); return type(r[2])").toString(), "boolean");
 });
 
+test("redis.call: null reply becomes nil after redis.setresp(3)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost({
+    redisCall: (args) => args[0].toString() === "HMGET"
+      ? [Buffer.from("v"), null, Buffer.from("v")]
+      : null,
+  }));
+
+  // RESP2: null -> false, returned as null; false inside an array -> null.
+  assert.equal(engine.eval("return redis.call('GET','missing')"), null);
+  assert.deepEqual(engine.eval("return redis.call('HMGET','h','f','nope','f')"), [
+    Buffer.from("v"), null, Buffer.from("v"),
+  ]);
+
+  // RESP3: null -> nil, so the array reply truncates at the first nil like real Redis.
+  assert.equal((engine.eval("redis.setresp(3); return type(redis.call('GET','missing'))") as Buffer).toString(), "nil");
+  assert.equal(engine.eval("redis.setresp(3); return redis.call('GET','missing')"), null);
+  assert.deepEqual(engine.eval("redis.setresp(3); return redis.call('HMGET','h','f','nope','f')"), [
+    Buffer.from("v"),
+  ]);
+});
+
 test("eval: returns empty table as empty array", async () => {
   await resolveWasmPath();
   const module = await load();

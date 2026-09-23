@@ -166,10 +166,14 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
   *offset += 5;
   switch (type) {
     case REPLY_NULL:
-      /* RESP null (bulk/multibulk) maps to Lua false, matching real Redis
-       * (redisProtocolToLuaType). This is the call path only; the return
-       * path still maps nil/false -> null. */
-      lua_pushboolean(L, 0);
+      /* RESP null maps to Lua false at RESP2 and to nil after
+       * redis.setresp(3), matching real Redis (redisProtocolToLuaType). This
+       * is the call path only; the return path still maps nil/false -> null. */
+      if (redis_resp_version() == 3) {
+        lua_pushnil(L);
+      } else {
+        lua_pushboolean(L, 0);
+      }
       return 1;
     case REPLY_INT: {
       if (*offset + 8 > len) {
