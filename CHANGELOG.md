@@ -27,6 +27,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
   is unchanged; only internal file names moved.
 
+### Fixed
+
+- Typed reply tables (`{double=}`, `{big_number=}`, `{map=}`, `{set=}`,
+  `{verbatim_string=}`) in a script's return value now convert at any protocol
+  level, matching real Redis 7.x/8.x. Previously they encoded as an empty array
+  unless the script called `redis.setresp(3)`. Hosts serving RESP2 clients must
+  convert these typed replies themselves (see README). Typed-table lookups now
+  use raw access and exact type checks like Redis (`{double='1.5'}`, `{err=42}`
+  and `{ok=1}` are no longer converted, `__index` metamethods are ignored),
+  `\r`/`\n` in `big_number` are replaced with spaces, and `verbatim_string`
+  formats are truncated or space-padded to exactly 3 bytes.
+
 ## [1.3.0] - 2026-06-08
 
 ### Added

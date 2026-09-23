@@ -501,6 +501,64 @@ test("redis.setresp: enables RESP3 return conversions for the current script", a
   assert.equal(engine.eval("return true"), 1);
 });
 
+test("typed reply tables convert without redis.setresp(3)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  const result = engine.eval(`
+    return {
+      {double=2.5},
+      {big_number='12345678901234567890'},
+      {verbatim_string={format='txt', string='hello'}},
+      {map={a=1}},
+      {set={a=true}},
+      true
+    }
+  `) as ReplyValue[];
+
+  assert.deepEqual(result[0], { double: 2.5 });
+  assert.deepEqual(result[1], { big_number: Buffer.from("12345678901234567890") });
+  assert.deepEqual(result[2], {
+    verbatim_string: { format: Buffer.from("txt"), string: Buffer.from("hello") },
+  });
+  assert.deepEqual(result[3], { map: [[Buffer.from("a"), 1]] });
+  assert.deepEqual(result[4], { set: [Buffer.from("a")] });
+  // Booleans still depend on setresp(3).
+  assert.equal(result[5], 1);
+});
+
+test("typed reply tables: exact types, raw lookups, big_number CRLF mapping", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  // Redis uses lua_type == LUA_TNUMBER / LUA_TSTRING: no coercion.
+  assert.deepEqual(engine.eval("return {double='1.5'}"), []);
+  assert.deepEqual(engine.eval("return {big_number=1}"), []);
+  // Redis uses lua_rawget: __index is not consulted.
+  assert.deepEqual(
+    engine.eval("return setmetatable({1,2}, {__index=function() return 7 end})"),
+    [1, 2],
+  );
+  // Redis maps \r\n to spaces so the value cannot break RESP framing.
+  assert.deepEqual(engine.eval("return {big_number='12\\r\\n34'}"), {
+    big_number: Buffer.from("12  34"),
+  });
+  // err/ok use the same exact-type rule.
+  assert.deepEqual(engine.eval("return {err=42}"), []);
+  assert.deepEqual(engine.eval("return {ok=1}"), []);
+  // verbatim_string with a non-string format falls back to an array.
+  assert.deepEqual(engine.eval("return {verbatim_string={format=1, string='x'}}"), []);
+  // Redis writes exactly 3 format bytes: truncated or space-padded.
+  assert.deepEqual(engine.eval("return {verbatim_string={format='markdown', string='x'}}"), {
+    verbatim_string: { format: Buffer.from("mar"), string: Buffer.from("x") },
+  });
+  assert.deepEqual(engine.eval("return {verbatim_string={format='t', string='x'}}"), {
+    verbatim_string: { format: Buffer.from("t  "), string: Buffer.from("x") },
+  });
+});
+
 test("redis.setresp: rejects unsupported protocol versions", async () => {
   await resolveWasmPath();
   const module = await load();
