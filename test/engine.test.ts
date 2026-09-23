@@ -528,6 +528,25 @@ test("typed reply tables convert without redis.setresp(3)", async () => {
   assert.equal(result[5], 1);
 });
 
+test("typed reply tables: exact types, raw lookups, big_number CRLF mapping", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  // Redis uses lua_type == LUA_TNUMBER / LUA_TSTRING: no coercion.
+  assert.deepEqual(engine.eval("return {double='1.5'}"), []);
+  assert.deepEqual(engine.eval("return {big_number=1}"), []);
+  // Redis uses lua_rawget: __index is not consulted.
+  assert.deepEqual(
+    engine.eval("return setmetatable({1,2}, {__index=function() return 7 end})"),
+    [1, 2],
+  );
+  // Redis maps \r\n to spaces so the value cannot break RESP framing.
+  assert.deepEqual(engine.eval("return {big_number='12\\r\\n34'}"), {
+    big_number: Buffer.from("12  34"),
+  });
+});
+
 test("redis.setresp: rejects unsupported protocol versions", async () => {
   await resolveWasmPath();
   const module = await load();

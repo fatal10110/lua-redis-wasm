@@ -234,9 +234,17 @@ static int encode_set(lua_State *L, int idx, ReplyBuffer *rb) {
   return 0;
 }
 
-static int encode_resp3_marker(lua_State *L, int idx, ReplyBuffer *rb) {
-  lua_getfield(L, idx, "double");
-  if (lua_isnumber(L, -1)) {
+// Typed reply tables: {double=}, {big_number=}, {verbatim_string=}, {map=},
+// {set=}. Mirrors luaReplyToRedisReply in Redis: raw lookups (no __index) and
+// exact type checks (no string<->number coercion).
+static int rawget_field(lua_State *L, int idx, const char *key) {
+  lua_pushstring(L, key);
+  lua_rawget(L, idx);
+  return lua_type(L, -1);
+}
+
+static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
+  if (rawget_field(L, idx, "double") == LUA_TNUMBER) {
     double value = (double)lua_tonumber(L, -1);
     uint8_t payload[8];
     write_f64_le(payload, value);
@@ -248,23 +256,28 @@ static int encode_resp3_marker(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "big_number");
-  if (lua_isstring(L, -1)) {
+  if (rawget_field(L, idx, "big_number") == LUA_TSTRING) {
     size_t len = 0;
     const char *str = lua_tolstring(L, -1, &len);
     lua_pop(L, 1);
     if (rb_write_header(rb, REPLY_BIG_NUMBER, (uint32_t)len) != 0) {
       return -1;
     }
-    return rb_append(rb, str, len);
+    // Redis maps "\r\n" to spaces so the value can never break RESP framing.
+    for (size_t i = 0; i < len; i++) {
+      char c = (str[i] == '\r' || str[i] == '\n') ? ' ' : str[i];
+      if (rb_append(rb, &c, 1) != 0) {
+        return -1;
+      }
+    }
+    return 0;
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "verbatim_string");
-  if (lua_istable(L, -1)) {
-    lua_getfield(L, -1, "format");
-    lua_getfield(L, -2, "string");
-    if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
+  if (rawget_field(L, idx, "verbatim_string") == LUA_TTABLE) {
+    int vt = lua_gettop(L);
+    if (rawget_field(L, vt, "format") == LUA_TSTRING &&
+        rawget_field(L, vt, "string") == LUA_TSTRING) {
       size_t format_len = 0;
       size_t string_len = 0;
       const char *format = lua_tolstring(L, -2, &format_len);
@@ -282,15 +295,15 @@ static int encode_resp3_marker(lua_State *L, int idx, ReplyBuffer *rb) {
       if (rc == 0) {
         rc = rb_append(rb, string, string_len);
       }
-      lua_pop(L, 3);
+      lua_settop(L, vt - 1);
       return rc;
     }
-    lua_pop(L, 2);
+    lua_settop(L, vt - 1);
+  } else {
+    lua_pop(L, 1);
   }
-  lua_pop(L, 1);
 
-  lua_getfield(L, idx, "map");
-  if (lua_istable(L, -1)) {
+  if (rawget_field(L, idx, "map") == LUA_TTABLE) {
     int abs = lua_gettop(L);
     int rc = encode_map(L, abs, rb);
     lua_pop(L, 1);
@@ -298,8 +311,7 @@ static int encode_resp3_marker(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "set");
-  if (lua_istable(L, -1)) {
+  if (rawget_field(L, idx, "set") == LUA_TTABLE) {
     int abs = lua_gettop(L);
     int rc = encode_set(L, abs, rb);
     lua_pop(L, 1);
@@ -318,7 +330,7 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   const char *msg = NULL;
 
   // Redis checks `err` before `ok`: a table carrying both fields is an error.
-  lua_getfield(L, idx, "err");
+  rawget_field(L, idx, "err");
   if (lua_isstring(L, -1)) {
     msg = lua_tolstring(L, -1, &len);
     int rc = rb_write_header(rb, REPLY_ERROR, (uint32_t)len);
@@ -330,7 +342,7 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, idx, "ok");
+  rawget_field(L, idx, "ok");
   if (lua_isstring(L, -1)) {
     msg = lua_tolstring(L, -1, &len);
     int rc = rb_write_header(rb, REPLY_STATUS, (uint32_t)len);
@@ -342,14 +354,11 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  // Typed tables ({double=}, {big_number=}, {map=}, {set=}, {verbatim_string=})
-  // convert at any script protocol level, like real Redis. Only booleans
-  // depend on redis.setresp(3).
-  {
-    int marker = encode_resp3_marker(L, idx, rb);
-    if (marker != 1) {
-      return marker;
-    }
+  // Typed tables convert at any script protocol level, like real Redis. Only
+  // booleans depend on redis.setresp(3).
+  int typed = encode_typed_table(L, idx, rb);
+  if (typed != 1) {
+    return typed;
   }
 
   // Array reply: iterate from index 1 and stop at the first nil, like Redis.
