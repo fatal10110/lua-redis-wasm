@@ -238,6 +238,9 @@ static int encode_set(lua_State *L, int idx, ReplyBuffer *rb) {
 // {set=}. Mirrors luaReplyToRedisReply in Redis: raw lookups (no __index) and
 // exact type checks (no string<->number coercion).
 static int rawget_field(lua_State *L, int idx, const char *key) {
+  if (idx < 0) {
+    idx = lua_gettop(L) + idx + 1;
+  }
   lua_pushstring(L, key);
   lua_rawget(L, idx);
   return lua_type(L, -1);
@@ -264,10 +267,13 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
       return -1;
     }
     // Redis maps "\r\n" to spaces so the value can never break RESP framing.
-    for (size_t i = 0; i < len; i++) {
-      char c = (str[i] == '\r' || str[i] == '\n') ? ' ' : str[i];
-      if (rb_append(rb, &c, 1) != 0) {
-        return -1;
+    size_t start = rb->len;
+    if (rb_append(rb, str, len) != 0) {
+      return -1;
+    }
+    for (size_t i = start; i < rb->len; i++) {
+      if (rb->data[i] == '\r' || rb->data[i] == '\n') {
+        rb->data[i] = ' ';
       }
     }
     return 0;
@@ -278,9 +284,15 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
     int vt = lua_gettop(L);
     if (rawget_field(L, vt, "format") == LUA_TSTRING &&
         rawget_field(L, vt, "string") == LUA_TSTRING) {
-      size_t format_len = 0;
+      // Redis addReplyVerbatim writes exactly 3 format bytes: the format is read
+      // as a C string, truncated to 3 and padded with spaces.
+      const char *ext = lua_tostring(L, -2);
+      char format[3];
+      for (int i = 0; i < 3; i++) {
+        format[i] = *ext ? *ext++ : ' ';
+      }
+      size_t format_len = sizeof(format);
       size_t string_len = 0;
-      const char *format = lua_tolstring(L, -2, &format_len);
       const char *string = lua_tolstring(L, -1, &string_len);
       uint8_t format_header[4];
       write_u32_le(format_header, (uint32_t)format_len);
@@ -330,8 +342,7 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   const char *msg = NULL;
 
   // Redis checks `err` before `ok`: a table carrying both fields is an error.
-  rawget_field(L, idx, "err");
-  if (lua_isstring(L, -1)) {
+  if (rawget_field(L, idx, "err") == LUA_TSTRING) {
     msg = lua_tolstring(L, -1, &len);
     int rc = rb_write_header(rb, REPLY_ERROR, (uint32_t)len);
     if (rc == 0) {
@@ -342,8 +353,7 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   lua_pop(L, 1);
 
-  rawget_field(L, idx, "ok");
-  if (lua_isstring(L, -1)) {
+  if (rawget_field(L, idx, "ok") == LUA_TSTRING) {
     msg = lua_tolstring(L, -1, &len);
     int rc = rb_write_header(rb, REPLY_STATUS, (uint32_t)len);
     if (rc == 0) {

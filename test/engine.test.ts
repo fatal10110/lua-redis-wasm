@@ -545,6 +545,18 @@ test("typed reply tables: exact types, raw lookups, big_number CRLF mapping", as
   assert.deepEqual(engine.eval("return {big_number='12\\r\\n34'}"), {
     big_number: Buffer.from("12  34"),
   });
+  // err/ok use the same exact-type rule.
+  assert.deepEqual(engine.eval("return {err=42}"), []);
+  assert.deepEqual(engine.eval("return {ok=1}"), []);
+  // verbatim_string with a non-string format falls back to an array.
+  assert.deepEqual(engine.eval("return {verbatim_string={format=1, string='x'}}"), []);
+  // Redis writes exactly 3 format bytes: truncated or space-padded.
+  assert.deepEqual(engine.eval("return {verbatim_string={format='markdown', string='x'}}"), {
+    verbatim_string: { format: Buffer.from("mar"), string: Buffer.from("x") },
+  });
+  assert.deepEqual(engine.eval("return {verbatim_string={format='t', string='x'}}"), {
+    verbatim_string: { format: Buffer.from("t  "), string: Buffer.from("x") },
+  });
 });
 
 test("redis.setresp: rejects unsupported protocol versions", async () => {
