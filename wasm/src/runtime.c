@@ -159,8 +159,12 @@ static PtrLen reply_error(const char *msg, size_t len) {
  * alone; the host reads it from this field. 0 means "parse from the message
  * prefix" (load/syntax errors, which never run the error handler). */
 static PtrLen reply_script_error(const char *msg, uint32_t line) {
-  // Sanitized like a returned {err=} so a host can put it straight into RESP.
-  size_t len = error_len(msg);
+  // Goes beyond Redis, which sends these raw (addReplyErrorSdsEx): sanitized
+  // like a returned {err=} so a host can put it straight into RESP. Engine
+  // markers are left intact: their name is structured data, and the host
+  // replaces the message text anyway.
+  int marker = strstr(msg, "__RLUA_E__:") != NULL;
+  size_t len = marker ? strlen(msg) : error_len(msg);
   ReplyBuffer rb;
   rb_init(&rb);
   if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)(len + 4)) != 0) {
@@ -172,7 +176,8 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
     free(rb.data);
     return (PtrLen){0, 0};
   }
-  if (rb_append_single_line(&rb, msg, len) != 0) {
+  int rc = marker ? rb_append(&rb, msg, len) : rb_append_single_line(&rb, msg, len);
+  if (rc != 0) {
     free(rb.data);
     return (PtrLen){0, 0};
   }

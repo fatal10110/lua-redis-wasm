@@ -595,6 +595,10 @@ test("script-aborting errors: cut at NUL, trailing CRLF trimmed, CRLF mapped", a
   assert.equal(errOf("error('x\\r\\ny\\r\\n')"), "user_script:1: x  y");
   assert.equal(errOf("error('a\\0b')"), "user_script:1: a");
   assert.equal(errOf("return redis.call('get','k')"), "bad  thing");
+  // Engine markers keep their structured name; the message is replaced by the kind.
+  const marker = engine.eval("return _G['a\\r\\nb']") as { err: Buffer; meta?: { name?: string } };
+  assert.equal(marker.meta?.name, "a\r\nb");
+  assert.equal(marker.err.toString(), "global-read");
 });
 
 test("redis.setresp: rejects unsupported protocol versions", async () => {
