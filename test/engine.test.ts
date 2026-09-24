@@ -559,6 +559,48 @@ test("typed reply tables: exact types, raw lookups, big_number CRLF mapping", as
   });
 });
 
+test("typed reply tables: ok/err cut at NUL and map CRLF to spaces", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+
+  assert.deepEqual(engine.eval("return {ok='A\\r\\nB'}"), { ok: Buffer.from("A  B") });
+  assert.deepEqual(engine.eval("return {ok='a\\0b'}"), { ok: Buffer.from("a") });
+  const err = engine.eval("return {err='ERR x\\r\\ny\\0z'}") as { err: Buffer; code?: Buffer };
+  assert.equal(err.err.toString(), "x  y");
+  assert.equal(err.code?.toString(), "ERR");
+  // Redis trims trailing CRLF from errors (sdstrim), not from status replies.
+  assert.equal((engine.eval("return {err='ERR x\\r\\n'}") as { err: Buffer }).err.toString(), "x");
+  assert.deepEqual(engine.eval("return {ok='a\\r\\n'}"), { ok: Buffer.from("a  ") });
+  assert.deepEqual(engine.eval("return {err='\\0x'}"), { err: Buffer.alloc(0) });
+  // Nested replies take the same path.
+  assert.deepEqual(engine.eval("return {{ok='a\\r\\nb'}, {err='ERR c\\nd'}}"), [
+    { ok: Buffer.from("a  b") },
+    { err: Buffer.from("c d"), code: Buffer.from("ERR") },
+  ]);
+});
+
+test("script-aborting errors: cut at NUL, trailing CRLF trimmed, CRLF mapped", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(
+    createTestHost({
+      redisCall() {
+        throw new Error("ERR bad\r\nthing");
+      },
+    }),
+  );
+
+  const errOf = (script: string) => (engine.eval(script) as { err: Buffer }).err.toString();
+  assert.equal(errOf("error('x\\r\\ny\\r\\n')"), "user_script:1: x  y");
+  assert.equal(errOf("error('a\\0b')"), "user_script:1: a");
+  assert.equal(errOf("return redis.call('get','k')"), "bad  thing");
+  // Engine markers keep their structured name; the message is replaced by the kind.
+  const marker = engine.eval("return _G['a\\r\\nb']") as { err: Buffer; meta?: { name?: string } };
+  assert.equal(marker.meta?.name, "a\r\nb");
+  assert.equal(marker.err.toString(), "global-read");
+});
+
 test("redis.setresp: rejects unsupported protocol versions", async () => {
   await resolveWasmPath();
   const module = await load();
