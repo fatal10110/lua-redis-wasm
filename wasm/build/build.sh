@@ -20,7 +20,7 @@ REDIS_SRC="$ROOT_DIR/vendor/redis/src"
 LUA_SRC_DIR="$REDIS_LUA_DEPS"
 LUA_CORE="lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c"
 LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c loslib.c"
-REDIS_LUA_MODULES="lua_cjson.c lua_cmsgpack.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
+REDIS_LUA_MODULES="lua_cjson.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
 
 CORE_FILES=""
 for file in $LUA_CORE; do
@@ -46,7 +46,7 @@ emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 -sABORTING_MALLOC=0 \
   -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat','_current_call_source','_current_call_line']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
-  "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
+  "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" "$SRC_DIR/lua_cmsgpack_checked.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
   -o "$OUT_DIR/redis_lua.mjs"
 
 echo "Built $OUT_DIR/redis_lua.mjs"
