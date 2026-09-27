@@ -11,7 +11,16 @@
  *   Redis 7 error model, so they follow `compat.tableErrors`);
  * - "Invalid debug level." up to Redis 7.2, "Invalid log level." from Redis
  *   7.4 and Valkey 8.0;
- * - Valkey 8.0+ names "server.log()" in the arity error.
+ * - Valkey 8.0+ names "server.log()" in the arity error;
+ * - redis.status_reply shares error_reply's argument check in every version
+ *   (luaRedisReturnSingleFieldTable): a bad call returns the same error table
+ *   (#82);
+ * - redis.pcall with an argument that is not a string or number returns the
+ *   error table instead of raising (luaRedisGenericCommand): "Lua redis()
+ *   command arguments must be strings or integers" positioned and code-less in
+ *   Redis 6.2, "ERR Lua redis lib command arguments ..." in Redis 7.0-8.0 and
+ *   "ERR Command arguments ..." in Valkey 8.0. redis.call still raises the
+ *   command-arg-type engine error (#84).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -134,11 +143,111 @@ function assertErrorReply(engine: LuaEngine, w: Wording): void {
   assertErr(engine.eval("return redis.error_reply('MY custom')"), "custom", "MY");
 }
 
+const BAD_REPLY_CALLS = ["", "5", "nil", "{}", "true", "'a', 'b'", "'a', nil"];
+
+function assertStatusReply(engine: LuaEngine, w: Wording): void {
+  assert.equal(text(engine.eval("return redis.status_reply('PONG').ok")), "PONG");
+  assert.deepEqual(engine.eval("return redis.status_reply('a\\0b').ok"), Buffer.from("a\0b"));
+  assert.deepEqual(engine.eval("return redis.status_reply('PONG')"), { ok: Buffer.from("PONG") });
+  // A bad call returns (does not raise) the error table error_reply gives for
+  // one, with no ok field: a number is not converted, extra arguments count.
+  const bad = w.table ? "ERR wrong number or type of arguments" : "@user_script: 1: wrong number or type of arguments";
+  for (const args of BAD_REPLY_CALLS) {
+    const call = `redis.status_reply(${args})`;
+    assert.deepEqual(
+      strings(engine.eval(`local r = ${call} return {type(r), tostring(r.ok), r.err}`)),
+      ["table", "nil", bad],
+      call,
+    );
+  }
+  if (w.table) {
+    assert.equal(text(engine.eval("\n\nreturn redis.status_reply(5).err")), bad);
+    assert.equal(text(engine.eval("return select(2, pcall(redis.status_reply)).err")), bad);
+    // Returned, it is an error reply with the ERR code.
+    assertErr(engine.eval("return redis.status_reply(5)"), "wrong number or type of arguments", "ERR");
+  } else {
+    assert.equal(
+      text(engine.eval("\n\nreturn redis.status_reply(5).err")),
+      "@user_script: 3: wrong number or type of arguments",
+    );
+    assert.equal(
+      text(engine.eval("return select(2, pcall(redis.status_reply)).err")),
+      "=[C]: -1: wrong number or type of arguments",
+    );
+    assertErr(engine.eval("return redis.status_reply(5)"), bad, undefined);
+  }
+  // error_reply agrees on the bad calls in both models.
+  for (const args of BAD_REPLY_CALLS) {
+    assert.equal(text(engine.eval(`return redis.error_reply(${args}).err`)), bad, `redis.error_reply(${args})`);
+  }
+}
+
+function argTypeMessage(w: Wording): string {
+  if (!w.table) {
+    return "Lua redis() command arguments must be strings or integers";
+  }
+  return w.serverLog
+    ? "Command arguments must be strings or integers"
+    : "Lua redis lib command arguments must be strings or integers";
+}
+
+// redis.pcall returns the error table for a bad argument; redis.call raises
+// the command-arg-type engine error the host words.
+function assertPcallArgType(engine: LuaEngine, w: Wording): void {
+  const msg = argTypeMessage(w);
+  const at = (where: string) => (w.table ? `ERR ${msg}` : `${where}: ${msg}`);
+  for (const args of ["{}", "'set', 'k', {}", "'set', 'k', true", "'set', nil, 'v'", "'set', 'k', function() end"]) {
+    const call = `redis.pcall(${args})`;
+    assert.deepEqual(
+      strings(engine.eval(`local e = ${call} return {type(e), e.err, tostring(e.ignore_error_stats_update)}`)),
+      ["table", at("@user_script: 1"), "nil"],
+      call,
+    );
+  }
+  assert.equal(text(engine.eval("\n\nreturn redis.pcall('set', 'k', {}).err")), at("@user_script: 3"));
+  assert.equal(text(engine.eval("return select(2, pcall(redis.pcall, 'set', 'k', {})).err")), at("=[C]: -1"));
+  // The script goes on after it.
+  assert.deepEqual(engine.eval("local e = redis.pcall('set', 'k', {})\nreturn redis.call('set', 'k', 'v')"), {
+    ok: Buffer.from("OK"),
+  });
+  // Returned or rethrown, it is an ordinary error: no engine kind.
+  const returned = engine.eval("return redis.pcall('set', 'k', {})") as ErrReply & { meta?: { kind?: string } };
+  if (w.table) {
+    assertErr(returned, msg, "ERR");
+  } else {
+    assertErr(returned, at("@user_script: 1"), undefined);
+  }
+  assert.equal(returned.meta?.kind, undefined);
+  const rethrown = engine.eval("local e = redis.pcall('set', 'k', {})\nerror(e)") as ErrReply & {
+    meta?: { kind?: string };
+  };
+  assertErr(rethrown, w.table ? msg : at("@user_script: 1"), "ERR", 2);
+  assert.equal(rethrown.meta?.kind, undefined);
+  // redis.call keeps raising the engine error.
+  const raised = engine.eval("\nredis.call('set', 'k', {})") as ErrReply & { meta?: { kind?: string } };
+  assertErr(raised, "command-arg-type", "ERR", 2);
+  assert.equal(raised.meta?.kind, "command-arg-type");
+  assert.equal(engine.eval("return 1 + 1"), 2);
+}
+
+function strings(value: ReplyValue): string[] {
+  assert.ok(Array.isArray(value), `expected an array, got ${String(value)}`);
+  return value.map((item) => (Buffer.isBuffer(item) ? item.toString("utf8") : String(item)));
+}
+
 for (const [profile, w] of PROFILES) {
   const name = profile ?? "default";
 
   test(`profile wording (${name}): redis.error_reply`, async () => {
     assertErrorReply(await engineFor(profile), w);
+  });
+
+  test(`profile wording (${name}): redis.status_reply argument checks (#82)`, async () => {
+    assertStatusReply(await engineFor(profile), w);
+  });
+
+  test(`profile wording (${name}): redis.pcall returns the bad-argument error (#84)`, async () => {
+    assertPcallArgType(await engineFor(profile), w);
   });
 
   test(`profile wording (${name}): redis.log argument errors`, async () => {
@@ -177,10 +286,20 @@ test("profile wording: tableErrors decides the error_reply rule and the ERR code
   const on = await engineFor("redis-6.2", { tableErrors: true });
   assertErrorReply(on, { table: true, debugLevel: true, serverLog: false });
   assertLogErrors(on, { table: true, debugLevel: true, serverLog: false });
+  assertStatusReply(on, { table: true, debugLevel: true, serverLog: false });
+  assertPcallArgType(on, { table: true, debugLevel: true, serverLog: false });
 
   const off = await engineFor("redis-8.0", { tableErrors: false });
   assertErrorReply(off, { table: false, debugLevel: false, serverLog: false });
   assertLogErrors(off, { table: false, debugLevel: false, serverLog: false });
+  assertStatusReply(off, { table: false, debugLevel: false, serverLog: false });
+  assertPcallArgType(off, { table: false, debugLevel: false, serverLog: false });
+  // Without table errors the Redis 6.2 form and wording apply, Valkey too.
+  assertPcallArgType(await engineFor("valkey-8.0", { tableErrors: false }), {
+    table: false,
+    debugLevel: false,
+    serverLog: true,
+  });
 
   // serverAlias does not change the wording: it follows the profile only.
   const noAlias = await engineFor("valkey-8.0", { serverAlias: false });

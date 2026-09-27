@@ -157,6 +157,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `redis.status_reply` checks its arguments like Redis: anything but exactly one
+  string argument returns (no longer raises `bad argument #1`) the error table
+  `redis.error_reply` returns for a bad call, `{err='ERR wrong number or type of
+  arguments'}`, or `{err='@user_script: <line>: wrong number or type of
+  arguments'}` without table errors (`redis-6.2`). A number is no longer
+  converted (`redis.status_reply(5)` was `{ok='5'}`) and extra arguments are no
+  longer ignored (#82).
+- `redis.pcall` with an argument that is not a string or number
+  (`redis.pcall('set', 'k', {})`) returns the error table instead of aborting
+  the script, as in Redis: `ERR Lua redis lib command arguments must be strings
+  or integers` (Redis 7.x/8.0 profiles and no profile), `ERR Command arguments
+  must be strings or integers` (Valkey profiles), or `@user_script: <line>: Lua
+  redis() command arguments must be strings or integers` without table errors
+  (`redis-6.2`). The engine words it, so it carries no `meta.kind` when returned
+  or rethrown. `redis.call` still raises the `command-arg-type` engine error
+  (#84).
 - Engine errors (globals protection, a bad `redis.call` argument) are no longer
   recognized by the `__RLUA_E__:` text in the message. A script
   (`error('__RLUA_E__:x\r\n+OK')`) or a host command error echoing a key could

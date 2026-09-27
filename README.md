@@ -314,7 +314,9 @@ lets the host render. When a script aborts, the reply carries:
   See [Reply Types](#reply-types).
 - `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
   classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
-  `redis.call` argument). `kind` is an opaque machine tag the host maps to wording;
+  `redis.call` argument; a bad `redis.pcall` argument is not raised but returned as
+  an error table, see [Error objects inside the script](#error-objects-inside-the-script)).
+  `kind` is an opaque machine tag the host maps to wording;
   `name` is the variable involved, raw (it may contain CR/LF). The engine flags
   these errors itself; error text a script or a host command error produces never
   gets a `kind`, whatever it contains. Writing a global has no `kind`: it is blocked by
@@ -358,6 +360,15 @@ as-is, and has CR/LF around the message after the code trimmed (`"\r\nboom"` →
 message, less one leading `ERR ` (`WRONGTYPE ...` → code `ERR`, `err`
 `WRONGTYPE ...`; `RESP version must be 2 or 3.` → code `ERR`; `"\r\nboom"` →
 `"  boom"`), as Redis 6.2 replies `-ERR Error running script ...`.
+
+A `redis.pcall` argument that is not a string or number (`redis.pcall('set', 'k', {})`)
+is returned as an error table, as in Redis, and the script goes on. Its wording is the
+engine's, by profile: `{err='ERR Lua redis lib command arguments must be strings or
+integers'}` (Redis 7.x/8.0 profiles and no profile), `{err='ERR Command arguments must
+be strings or integers'}` (Valkey profiles), and, without table errors,
+`{err='@user_script: <line>: Lua redis() command arguments must be strings or integers'}`
+(Redis 6.2). Returned or rethrown, it is an ordinary error with no `meta.kind`.
+`redis.call` still raises the `command-arg-type` engine error, which the host words.
 
 ### log
 
@@ -433,6 +444,11 @@ With `profile: "redis-6.2"` (or `compat.tableErrors: false`) it follows Redis 6.
 instead: the string is returned unchanged (`'foo'` → `{err='foo'}`, `'-ERR x'` →
 `{err='-ERR x'}`), and a bad call returns
 `{err='@user_script: <line>: wrong number or type of arguments'}` with no code.
+
+`redis.status_reply(msg)` returns `{ok=msg}` for one string argument. Like
+`redis.error_reply`, any other call (no argument, a number, extra arguments)
+returns, without raising, `{err='ERR wrong number or type of arguments'}`, or
+the Redis 6.2 form above with `profile: "redis-6.2"` / `compat.tableErrors: false`.
 
 ### Determining the Response Type
 
