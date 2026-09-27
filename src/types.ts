@@ -72,9 +72,11 @@
  *   the bare `kind`. Known kinds:
  *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
  *     "Script attempted to access nonexistent global variable '<name>'".
- *   - `command-arg-type`: a redis.call/pcall argument was not a string or number
- *     (no `name`). Redis: "Lua redis lib command arguments must be strings or
- *     integers".
+ *   - `command-arg-type`: a redis.call argument was not a string or number
+ *     (no `name`). Redis 7.0+: "Lua redis lib command arguments must be strings
+ *     or integers" (Redis 6.2: "Lua redis() command arguments ...", Valkey
+ *     8.0+: "Command arguments ..."). redis.pcall does not raise it: like
+ *     Redis, it returns the error table, worded by the engine.
  *
  * Note: writing a global has no kind. It is blocked by Lua's native readonly
  * flag (as in real Redis), so the VM itself raises "Attempt to modify a readonly
@@ -386,7 +388,8 @@ export type EngineOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`.
+   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
+   * argument says "Lua redis lib command arguments ..." (Redis wording).
    */
   profile?: CompatProfile;
 
@@ -437,7 +440,8 @@ export type StandaloneOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`.
+   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
+   * argument says "Lua redis lib command arguments ..." (Redis wording).
    */
   profile?: CompatProfile;
 
@@ -487,7 +491,8 @@ export type LoadOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`.
+   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
+   * argument says "Lua redis lib command arguments ..." (Redis wording).
    */
   profile?: CompatProfile;
 

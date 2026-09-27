@@ -80,7 +80,8 @@ export type WasmExports = {
    * behavior to emulate). Bitmask: 0x1 keep `print`, 0x2 expose `os`, 0x4
    * `server` alias, 0x8 reseed `math.random` per script (reseedRandom), 0x10
    * Redis 7 error model (tableErrors), 0x20 "Invalid debug level." wording
-   * (Redis <= 7.2), 0x40 "server.log()" arity wording (Valkey). 0x20/0x40 are
+   * (Redis <= 7.2), 0x40 Valkey wording ("server.log()" arity error,
+   * redis.pcall "Command arguments must be ..."). 0x20/0x40 are
    * set by the profile only. Call before _init/_reset.
    */
   _set_compat?: (flags: number) => void;

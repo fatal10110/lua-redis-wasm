@@ -632,8 +632,9 @@ static void remove_package_entry(lua_State *L, const char *name) {
 // flag toggles one of the behaviors that actually differ across Redis
 // 6.2-8.x and Valkey; everything else is constant. Default reproduces the
 // historical behavior (os loaded, `server` alias present, print stripped),
-// which matches Valkey 8.0/8.1 except for the redis.log arity error, which
-// keeps the Redis wording ("redis.log() requires ...", no COMPAT_SERVER_LOG_NAME).
+// which matches Valkey 8.0/8.1 except for the redis.log arity error and the
+// redis.pcall bad-argument error, which keep the Redis wording ("redis.log()
+// requires ...", "Lua redis lib command arguments ...", no COMPAT_SERVER_LOG_NAME).
 #define COMPAT_PRINT 0x1u        // keep Lua `print` (Redis 6.2 only)
 #define COMPAT_OS 0x2u           // expose `os` lib (Redis 7.4+, Valkey 8.0+)
 #define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
@@ -644,7 +645,9 @@ static void remove_package_entry(lua_State *L, const char *name) {
 #define COMPAT_TABLE_ERRORS 0x10u
 // Error wording only, set from the profile (no CompatOverrides field):
 #define COMPAT_LOG_DEBUG_LEVEL 0x20u // redis.log: "Invalid debug level." (Redis 6.2-7.2)
-#define COMPAT_SERVER_LOG_NAME 0x40u // redis.log: "server.log() requires ..." (Valkey 8.0+)
+// Valkey 8.0+ wording: redis.log's "server.log() requires ..." and, with table
+// errors, redis.pcall's "Command arguments must be strings or integers".
+#define COMPAT_SERVER_LOG_NAME 0x40u
 static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS | COMPAT_TABLE_ERRORS;
 
 void set_compat(uint32_t flags) { g_compat_flags = flags; }

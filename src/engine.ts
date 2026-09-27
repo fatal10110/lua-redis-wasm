@@ -816,7 +816,8 @@ const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
 /**
  * Error wording that differs by version but is no behavior of its own, so it
  * follows the profile only (no override): `redis.log` says "Invalid debug
- * level." up to Redis 7.2, and Valkey names `server.log()` in its arity error.
+ * level." up to Redis 7.2, and Valkey names `server.log()` in its arity error
+ * and says "Command arguments must be ..." for a bad `redis.pcall` argument.
  * No profile keeps the historical Redis 7.4+ wording.
  */
 const COMPAT_PROFILE_WORDING: Record<CompatProfile, number> = {

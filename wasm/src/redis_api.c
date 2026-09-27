@@ -3,7 +3,7 @@
  * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
  * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and double2ll
  * from src/util.c, and from Redis 6.2's src/scripting.c (BSD-3-Clause) for the
- * redis-6.2 profile's error_reply / log / setresp errors. */
+ * redis-6.2 profile's error_reply / status_reply / log / setresp / pcall errors. */
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
@@ -28,7 +28,8 @@ static int g_table_errors = 0;
 /* redis.log error wording of the profile (compat flags, snapshot by
  * register_redis_api): "Invalid debug level." (Redis 6.2-7.2) instead of
  * "Invalid log level.", and "server.log()" (Valkey 8.0+) instead of
- * "redis.log()" in the arity error. */
+ * "redis.log()" in the arity error. The Valkey flag also selects Valkey's
+ * "Command arguments must be strings or integers" for redis.pcall. */
 static int g_log_debug_level = 0;
 static int g_server_log_name = 0;
 /* Caller of the redis.call/redis.pcall currently dispatched to the host: the
@@ -293,6 +294,33 @@ static int push_error_reply(lua_State *L, const char *err, size_t len) {
   return push_error_table(L, (const uint8_t *)out, (uint32_t)out_len);
 }
 
+/* Pushes (does not raise) the error table for a bad call to a redis.*
+ * function, as each version's luaPushError does for a code-less message:
+ * - with table errors (Redis 7.0+ / Valkey) the generic code is added,
+ *   {err="ERR <msg>"} (luaPushErrorBuff on a message with no leading '-');
+ * - otherwise (Redis 6.2) there is no code, and the message is positioned at
+ *   stack level 1 as-is, {err="<source>: <line>: <msg>"}: the script line, or
+ *   "=[C]: -1: " for a C caller such as pcall.
+ * `msg` is a constant without CR/LF (luaPushErrorBuff would trim those).
+ * Derived from luaPushError / luaPushErrorBuff in Valkey 8.0's src/script_lua.c
+ * (same in Redis 7.2.4) and luaPushError in Redis 6.2's src/scripting.c,
+ * BSD-3-Clause. */
+static int push_bad_call_error(lua_State *L, const char *msg) {
+  lua_createtable(L, 0, 1);
+  if (g_table_errors) {
+    lua_pushfstring(L, "ERR %s", msg);
+  } else {
+    lua_Debug ar;
+    if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+      lua_pushfstring(L, "%s: %d: %s", ar.source, ar.currentline, msg);
+    } else {
+      lua_pushstring(L, msg);
+    }
+  }
+  lua_setfield(L, -2, "err");
+  return 1;
+}
+
 /* A command error reply from the host. Table-error mode builds it like Redis
  * 7's redisProtocolToLuaType_Error: luaPushErrorBuff's form plus
  * ignore_error_stats_update=true, the same table whether redis.call raises it
@@ -490,9 +518,26 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
-    // Coded kind, no name (Redis's wording for this takes no variable). Raised
-    // without a "user_script:N:" position prefix, matching real Redis; the host
-    // renders "Lua redis lib command arguments must be strings or integers".
+    if (!raise_on_error) {
+      /* redis.pcall returns this error like any other failure instead of
+       * raising it (`return raise_error ? luaError(lua) : 1;`), so the engine
+       * words it: Redis 7.0-8.0 "Lua redis lib command arguments ...", Valkey
+       * 8.0+ "Command arguments ...", and Redis 6.2 "Lua redis() command
+       * arguments ..." in its positioned, code-less form. It never reaches the
+       * host as an engine error.
+       * Derived from luaRedisGenericCommand / luaArgsToRedisArgv in Valkey
+       * 8.0's src/script_lua.c (same in Redis 7.2.4 but for the wording) and
+       * luaRedisGenericCommand in Redis 6.2's src/scripting.c, BSD-3-Clause. */
+      if (!g_table_errors) {
+        return push_bad_call_error(L, "Lua redis() command arguments must be strings or integers");
+      }
+      return push_bad_call_error(L, g_server_log_name
+                                        ? "Command arguments must be strings or integers"
+                                        : "Lua redis lib command arguments must be strings or integers");
+    }
+    // redis.call raises it as an engine error: coded kind, no name (Redis's
+    // wording for this takes no variable). Raised without a "user_script:N:"
+    // position prefix, matching real Redis; the host renders the wording.
     return redis_raise_engine_error(L, "__RLUA_E__:command-arg-type");
   }
   /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
@@ -650,30 +695,27 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
-/* redis.error_reply(msg) without table errors, like Redis 6.2's
- * luaRedisErrorReplyCommand (luaRedisReturnSingleFieldTable + luaPushError in
- * src/scripting.c, BSD-3-Clause):
- * - one string argument is returned unchanged as {err=msg} (binary-safe, no
- *   code added, no '-' dropped);
- * - anything else returns {err="<source>: <line>: wrong number or type of
- *   arguments"}, positioned at stack level 1 as-is (the script, or "=[C]" and
- *   -1 for a C caller such as pcall), without a code. */
-static int l_redis_error_reply_legacy(lua_State *L) {
-  if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
-    static const char bad_args[] = "wrong number or type of arguments";
-    lua_Debug ar;
-    lua_createtable(L, 0, 1);
-    if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
-      lua_pushfstring(L, "%s: %d: %s", ar.source, ar.currentline, bad_args);
-    } else {
-      lua_pushstring(L, bad_args);
-    }
-    lua_setfield(L, -2, "err");
-    return 1;
+static const char BAD_REPLY_ARGS[] = "wrong number or type of arguments";
+
+/* Anything but exactly one argument whose lua_type is a string (so a number is
+ * refused) is a bad redis.error_reply / redis.status_reply call. */
+static int is_bad_reply_call(lua_State *L) {
+  return lua_gettop(L) != 1 || lua_type(L, 1) != LUA_TSTRING;
+}
+
+/* {field=arg} for one string argument, returned unchanged (binary-safe). A bad
+ * call returns (does not raise) the "wrong number or type of arguments" error
+ * table of push_bad_call_error: {err="ERR ..."} with table errors,
+ * {err="<source>: <line>: ..."} without.
+ * Derived from luaRedisReturnSingleFieldTable in Valkey 8.0's src/script_lua.c
+ * (same in Redis 7.2.4) and in Redis 6.2's src/scripting.c, BSD-3-Clause. */
+static int return_single_field_table(lua_State *L, const char *field) {
+  if (is_bad_reply_call(L)) {
+    return push_bad_call_error(L, BAD_REPLY_ARGS);
   }
   lua_createtable(L, 0, 1);
   lua_pushvalue(L, 1);
-  lua_setfield(L, -2, "err");
+  lua_setfield(L, -2, field);
   return 1;
 }
 
@@ -686,14 +728,15 @@ static int l_redis_error_reply_legacy(lua_State *L) {
  * - the message is read as a C string (cut at the first NUL) and one leading
  *   '-' is dropped;
  * - the rest is split into code and message by push_error_reply.
- * Without table errors it behaves like Redis 6.2 (l_redis_error_reply_legacy). */
+ * Without table errors it behaves like Redis 6.2's luaRedisErrorReplyCommand
+ * (luaRedisReturnSingleFieldTable(lua, "err") in src/scripting.c): the string
+ * is returned unchanged as {err=msg}, no code added, no '-' dropped. */
 static int l_redis_error_reply(lua_State *L) {
   if (!g_table_errors) {
-    return l_redis_error_reply_legacy(L);
+    return return_single_field_table(L, "err");
   }
-  if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
-    static const char bad_args[] = "ERR wrong number or type of arguments";
-    return push_error_table(L, (const uint8_t *)bad_args, (uint32_t)(sizeof(bad_args) - 1));
+  if (is_bad_reply_call(L)) {
+    return push_bad_call_error(L, BAD_REPLY_ARGS);
   }
   const char *err = lua_tostring(L, 1);
   size_t len = strlen(err);
@@ -704,10 +747,13 @@ static int l_redis_error_reply(lua_State *L) {
   return push_error_reply(L, err, len);
 }
 
+/* redis.status_reply(msg): {ok=msg} for one string argument; any other call
+ * returns the error table (see return_single_field_table), in both error
+ * models. Derived from luaRedisStatusReplyCommand in Valkey 8.0's
+ * src/script_lua.c (same in Redis 7.2.4 and Redis 6.2's src/scripting.c),
+ * BSD-3-Clause. */
 static int l_redis_status_reply(lua_State *L) {
-  size_t len = 0;
-  const char *msg = luaL_checklstring(L, 1, &len);
-  return push_status_table(L, (const uint8_t *)msg, (uint32_t)len);
+  return return_single_field_table(L, "ok");
 }
 
 /* redis.setresp(2|3). An unsupported version raises "RESP version must be 2
