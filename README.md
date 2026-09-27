@@ -5,127 +5,117 @@
 [![Node.js Version](https://img.shields.io/node/v/lua-redis-wasm.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A WebAssembly-based Redis Lua 5.1 script engine for Node.js. Execute Redis-compatible Lua scripts in JavaScript/TypeScript environments without a live Redis server.
+**Run Redis Lua scripts (`EVAL` / `EVALSHA`) in Node.js or the browser, without a Redis server.**
+
+lua-redis-wasm is the Lua 5.1 scripting engine of Redis, compiled to
+WebAssembly. You give it a script plus `KEYS` and `ARGV`; whenever the script
+calls `redis.call(...)`, the engine calls a JavaScript function you provide, so
+the script can work on your own data. Replies, errors and Lua libraries behave
+the way they do in a real Redis or Valkey server.
 
 > **Primary purpose:** this engine powers the Lua scripting (`EVAL`/`EVALSHA`)
 > support in [js-redis-server](https://github.com/fatal10110/js-redis-server), an
-> in-memory Redis-compatible server. It is published as a standalone package so
-> it can be reused, but its API and error semantics are driven by what
-> js-redis-server needs to match real Redis. If you embed it directly, expect it
-> to behave the way Redis behaves inside that server.
+> in-memory Redis-compatible server ([browser demo](https://fatal10110.github.io/js-redis-server/)).
+> It is published as a standalone package so it can be reused, but its API and
+> error semantics are driven by what js-redis-server needs to match real Redis.
+> If you embed it directly, expect it to behave the way Redis behaves inside
+> that server.
 
 ## Features
 
-- **Redis-compatible Lua 5.1** - Uses the exact Lua version embedded in Redis
-- **Binary-safe** - Full support for null bytes in scripts, arguments, and return values
-- **Host integration** - Implement `redis.call`, `redis.pcall`, and `redis.log` in JavaScript
-- **Resource limits** - Fuel-based instruction limiting, reply size caps, and memory coordination
-- **Redis standard libraries** - Includes `cjson`, `cmsgpack`, `struct`, and `bit` modules
-- **TypeScript support** - Full type definitions included
+- **Redis-compatible Lua 5.1**: the Lua that Redis and Valkey embed, with their
+  sandbox, globals protection and value conversions.
+- **Your data, your commands**: `redis.call`, `redis.pcall` and `redis.log` call
+  JavaScript functions you write.
+- **Binary-safe**: scripts, `KEYS`, `ARGV` and replies are bytes (`Buffer`), null
+  bytes included.
+- **Resource limits**: a deterministic instruction budget, reply and argument
+  size caps, and a fixed-size memory heap per engine, so a runaway script
+  cannot hang your process.
+- **Redis standard libraries**: `cjson`, `cmsgpack`, `struct` and `bit`.
+- **Version profiles**: emulate Redis 6.2 to 8.0 or Valkey 8.0 to 9.0.
+- **Node.js and browsers**, with TypeScript types included.
 
-## Installation
+## Install
 
 ```bash
 npm install lua-redis-wasm
 ```
 
-**Requirements:** Node.js >= 22
+Requires Node.js 22 or later. Browsers are supported through bundlers (see
+[Use in the browser](#use-in-the-browser)).
 
-## Quick Start
+## Quick start
 
 ```typescript
 import { LuaEngine } from "lua-redis-wasm";
 
+const data = new Map<string, Buffer>();
+
 const engine = await LuaEngine.create({
   host: {
+    // Called for redis.call(...). args[0] is the command name.
     redisCall(args) {
-      const cmd = args[0].toString();
-      if (cmd === "PING") return { ok: Buffer.from("PONG") };
-      if (cmd === "GET") return Buffer.from("value");
-      return { err: Buffer.from("ERR unknown command") };
+      const [cmd, key, value] = args;
+      switch (cmd.toString().toUpperCase()) {
+        case "GET":
+          return data.get(key.toString()) ?? null;
+        case "SET":
+          data.set(key.toString(), value);
+          return { ok: Buffer.from("OK") };
+        default:
+          throw new Error(`ERR unknown command '${cmd}'`);
+      }
     },
+    // Called for redis.pcall(...): return errors instead of throwing.
     redisPcall(args, ctx) {
-      return this.redisCall(args, ctx);
+      try {
+        return this.redisCall(args, ctx);
+      } catch (err) {
+        return { err: Buffer.from((err as Error).message) };
+      }
     },
+    // Called for redis.log(level, ...).
     log(level, message) {
-      console.log(`[${level}] ${message.toString()}`);
+      console.log(`[redis.log ${level}] ${message.toString()}`);
     },
   },
 });
 
-// Simple evaluation
-const result = engine.eval("return 1 + 1"); // Returns: 2
+engine.eval("return 1 + 1"); // 2
 
-// With KEYS and ARGV
-const data = engine.evalWithArgs(
-  "return {KEYS[1], ARGV[1]}",
-  [Buffer.from("user:1")],
-  [Buffer.from("hello")],
+const reply = engine.evalWithArgs(
+  "redis.call('SET', KEYS[1], ARGV[1]) return redis.call('GET', KEYS[1])",
+  [Buffer.from("greeting")], // KEYS
+  [Buffer.from("hello")], // ARGV
 );
+console.log(reply?.toString()); // "hello"
 
-// Release the engine's WASM instance when done
-engine.dispose();
+engine.dispose(); // free the engine's memory when you are done
 ```
 
-## API
+## Guide
 
-### LuaEngine.create(options)
+### Run a script
 
-Creates a new engine instance with host integration.
+`engine.eval(script)` runs a Lua script and returns its result as a
+[reply value](#reply-values). Lua strings come back as `Buffer`s, numbers as
+integers, tables as arrays:
 
 ```typescript
-const engine = await LuaEngine.create({
-  host: RedisHost,         // Required: host callbacks
-  limits?: EngineLimits,   // Optional: resource limits
-  wasmPath?: string,       // Optional: custom WASM file path (Node: path or file:// URL)
-  wasmBytes?: Uint8Array | ArrayBuffer, // Optional: pre-loaded WASM binary
-  redisProps?: RedisProps, // Optional: host-injected redis.* constants/stubs
-});
+engine.eval("return 'hello'"); // Buffer.from("hello")
+engine.eval("return {1, 2, 3}"); // [1, 2, 3]
+engine.eval("return 3.7"); // 3 (Redis truncates numbers to integers)
+engine.eval("return nil"); // null
 ```
 
-### LuaEngine.createStandalone(options)
+The script can be a `string`, `Buffer` or `Uint8Array`. Evaluation is
+synchronous: the call returns when the script has finished.
 
-Creates an engine without host integration. `redis.call` and `redis.pcall` return errors.
+### Pass KEYS and ARGV
 
-```typescript
-const engine = await LuaEngine.createStandalone({});
-engine.eval("return math.sqrt(16)"); // Works
-engine.eval("return redis.call('PING')"); // Returns error
-```
-
-### Injecting `redis.*` props
-
-The package ships no version-specific `redis.*` helpers by default. Supply them via `redisProps`:
-
-```typescript
-const engine = await LuaEngine.create({
-  host,
-  redisProps: {
-    REDIS_VERSION:      { value: "7.4.0" },
-    REPL_ALL:           { value: 3 },
-    replicate_commands: { returns: true },  // function(...) return true end
-    set_repl:           { returns: null },  // function(...) end (noop)
-  },
-});
-```
-
-`{ value }` sets a constant field; `{ returns }` sets a stub function that ignores
-its arguments and returns the given constant (`null` returns nothing). `server` is
-an internal alias of `redis` — both reference the same table with the same injected
-props, with or without `redisProps` set. Numeric values follow Redis's number semantics — a Lua number returned from a script is truncated to an integer (e.g. a non-integer numeric prop reads back truncated).
-
-### engine.eval(script)
-
-Evaluates a Lua script and returns the result.
-
-```typescript
-engine.eval("return 'hello'"); // Returns: Buffer.from("hello")
-engine.eval("return {1, 2, 3}"); // Returns: [1, 2, 3]
-```
-
-### engine.evalWithArgs(script, keys, args)
-
-Evaluates a script with binary-safe `KEYS` and `ARGV` arrays.
+`engine.evalWithArgs(script, keys, args)` sets the script's `KEYS` and `ARGV`
+tables. Pass them as `Buffer`s; they may contain any bytes:
 
 ```typescript
 engine.evalWithArgs(
@@ -135,540 +125,419 @@ engine.evalWithArgs(
 );
 ```
 
-### engine.reset()
+### Connect `redis.call` to your data
 
-Replaces the Lua VM with a fresh one, as if the engine had just been created:
-whatever earlier scripts left in the VM (e.g. `cjson.encode_max_depth(...)`
-settings) is discarded. Limits, `profile`/`compat`, `redisProps` and the host
-callbacks are kept, and so is the `math.random` generator state (process-wide in
-Redis too, see [docs/compat.md](docs/compat.md)).
+The `host` object you pass to `LuaEngine.create` is how scripts reach your
+data. It has three required callbacks and one optional one:
+
+| Callback | Called for | What to do |
+|---|---|---|
+| `redisCall(args, ctx)` | `redis.call(...)` | Run the command and return a reply. Throw (or return `{ err }`) to fail it. |
+| `redisPcall(args, ctx)` | `redis.pcall(...)` | Same, but return `{ err: Buffer }` instead of throwing, as Redis does. |
+| `log(level, message)` | `redis.log(level, ...)` | Log the message. `level` is 0 (debug) to 3 (warning). |
+| `onSetResp(version)` | `redis.setresp(2 \| 3)` | Optional. Switch the reply shapes you return to RESP2 or RESP3. |
+
+Things to know:
+
+- `args` are `Buffer`s; `args[0]` is the command name. Lua numbers arrive
+  formatted the way Redis 7.4+ formats them (`1e15` → `"1000000000000000"`).
+- Return a [reply value](#reply-values): `null`, a number, a `Buffer`,
+  `{ ok }` for a status reply, `{ err }` for an error, an array, or a RESP3
+  type.
+- A thrown exception becomes an error reply. If its message does not start with
+  an uppercase error code, `ERR` is added (`throw new Error("oops")` →
+  `ERR oops`). To choose the code, throw `new Error("WRONGTYPE ...")` or return
+  `{ err: Buffer.from("WRONGTYPE ...") }`.
+- A callback that throws never breaks the engine. A `log` or `onSetResp` that
+  throws raises a Lua error in the script.
+- `ctx` describes the Lua line that made the call (`ctx.source`, `ctx.line`),
+  for hosts that need Redis 6.2's `@user_script: <line>:` error prefix. Read
+  `ctx.source` inside the callback, and pass `ctx` along when one handler calls
+  another.
+- Don't run another script on the same engine from inside a callback: it is
+  refused with `ERR nested eval is not supported: a script is already running`.
+
+Details: [docs/host-interface.md](docs/host-interface.md).
+
+### Handle errors
+
+A script that fails does not make `eval` throw. `eval` returns an error reply
+instead, the same way Redis sends an error to its client:
 
 ```typescript
-engine.reset();
+engine.eval("return redis.call('NOPE')");
+// {
+//   err: Buffer.from("unknown command 'NOPE'"),
+//   code: Buffer.from("ERR"),
+//   meta: { line: 1, sha: "19965f96bed2e953a3424cfa591695dc2a3e81db" },
+// }
 ```
 
-`reset()` throws when called while a script is running (i.e. from one of the
-engine's host callbacks), after `dispose()`, or on an unusable engine. If the new
-VM cannot be built (out of memory) it throws and every `eval` returns
-`ERR Lua VM not initialized` until a later `reset()` succeeds.
+- `err` is the message and `code` the error code (`ERR`, `WRONGTYPE`, ...).
+  `code` can be missing, as Redis 7 sends some errors without one (for example
+  `error({err='boom'})`). Send `-<code> <err>`, or `-<err>` without a code.
+- `meta` tells you where the script failed: `line` and the script's `sha`.
+  Redis adds them to the message as
+  `<message> script: <sha>, on @user_script:<line>.`
+- `meta.kind` is set for errors the engine raises itself, such as reading an
+  undefined global (`global-read`, with the variable in `meta.name`). For these
+  `err` is just the kind; replace it with Redis's wording (listed in
+  [docs/errors.md](docs/errors.md#meta)).
+- An error the script *returns* (for example `return redis.pcall(...)`) comes
+  back as `{ err, code }` without `meta`, unchanged.
 
-### engine.dispose()
+To render a script error the way Redis does:
 
-Closes the Lua VM and drops the engine's WASM instance (with its 64 MB linear
-memory) and host callbacks so they can be garbage collected. Afterwards `eval`,
-`evalWithArgs` and `reset` throw `LuaEngine has been disposed`; calling `dispose()`
-again does nothing. It throws when called while a script is running (from one of
-the engine's host callbacks) and leaves the engine untouched; dispose it once the
-evaluation has returned.
+```typescript
+const reply = engine.eval("return redis.call('NOPE')");
+if (reply && typeof reply === "object" && "err" in reply && reply.meta) {
+  const message = reply.code ? `${reply.code} ${reply.err}` : `${reply.err}`;
+  console.log(`-${message} script: ${reply.meta.sha}, on @user_script:${reply.meta.line}.`);
+}
+```
+
+`eval` throws only when the engine itself cannot run the script: a script or
+`KEYS`/`ARGV` too large for the engine's memory (`RangeError`; the engine keeps
+working), or a failure inside the WebAssembly module, after which the engine is
+unusable and you should create a new one. It also throws once the engine has
+been disposed. Inside scripts, `redis.call` errors
+are Redis 7 `{err=...}` tables by default; the `redis-6.2`
+[profile](#pick-a-redisvalkey-compatibility-profile) uses plain strings.
+
+Details: [docs/errors.md](docs/errors.md).
+
+### Limit script runtime and size
+
+Scripts run with an instruction budget, so an endless loop cannot hang your
+process. Set `limits` to change it, or to cap reply and argument sizes:
+
+```typescript
+const engine = await LuaEngine.create({
+  host,
+  limits: {
+    maxFuel: 50_000_000, // Lua instructions per script
+    maxReplyBytes: 2 * 1024 * 1024, // largest reply a script may return
+    maxArgBytes: 1024 * 1024, // largest KEYS + ARGV
+  },
+});
+
+engine.eval("while true do end");
+// { err: "Script killed by fuel limit", code: "ERR", meta: { ... } }
+```
+
+| Limit | Default | When exceeded, the script replies |
+|---|---|---|
+| `maxFuel` | 10,000,000 instructions | `ERR Script killed by fuel limit` |
+| `maxReplyBytes` | no limit | `ERR reply exceeds configured limit` |
+| `maxArgBytes` | no limit | `ERR KEYS/ARGV exceeds configured limit` |
+
+- Limits must be non-negative integers; anything else throws a `RangeError`.
+- `0` means "no limit" for the byte limits and "the default" for `maxFuel`:
+  the instruction budget can be raised but not switched off.
+- The budget counts Lua instructions, not time, so results are deterministic.
+  Time spent in your callbacks is not counted, and a script cannot escape the
+  budget with `pcall`.
+- Each engine has a fixed 64 MB memory heap. A script that runs out of memory
+  gets a `not enough memory` error, and the engine keeps working.
+
+Details: [docs/limits.md](docs/limits.md).
+
+### Pick a Redis/Valkey compatibility profile
+
+Redis versions differ slightly in what scripts can see. Set `profile` to match
+the server you are emulating:
+
+```typescript
+const engine = await LuaEngine.create({ host, profile: "redis-7.2" });
+```
+
+| `profile` | `print` | `os` library | `server` alias | Errors inside scripts | `math.random` |
+|---|---|---|---|---|---|
+| `redis-6.2` | yes | no | no | strings | reseeded before every script |
+| `redis-7.0`, `redis-7.2` | no | no | no | `{err=...}` tables | one sequence across scripts |
+| `redis-7.4`, `redis-8.0` | no | yes | no | `{err=...}` tables | one sequence across scripts |
+| `valkey-8.0`, `valkey-9.0` | no | yes | yes | `{err=...}` tables | one sequence across scripts |
+| none (default) | no | yes | yes | `{err=...}` tables | one sequence across scripts |
+
+Profiles also pick each version's wording for a few error messages. To change
+a single behavior, add `compat` on top of the profile:
+
+| `compat` key | Effect |
+|---|---|
+| `print` | Keep Lua's `print` global. |
+| `os` | Expose the sandboxed `os` library (`os.clock` only). |
+| `serverAlias` | Expose `server` as an alias of `redis`. |
+| `reseedRandom` | Reseed `math.random` with 0 before every script. |
+| `tableErrors` | Use Redis 7 error tables (`false` gives Redis 6.2 string errors). |
+
+```typescript
+// Redis 8.0, but with Redis 6.2 string errors
+const engine = await LuaEngine.create({
+  host,
+  profile: "redis-8.0",
+  compat: { tableErrors: false },
+});
+```
+
+Details: [docs/compat.md](docs/compat.md).
+
+### Add `redis.*` constants and stubs
+
+The engine does not define version-specific members such as
+`redis.REDIS_VERSION` or `redis.replicate_commands()`. Add the ones your
+scripts need with `redisProps`:
+
+```typescript
+const engine = await LuaEngine.create({
+  host,
+  redisProps: {
+    REDIS_VERSION: { value: "7.4.0" },
+    REPL_ALL: { value: 3 },
+    replicate_commands: { returns: true }, // function(...) return true end
+    set_repl: { returns: null }, // function(...) end (does nothing)
+  },
+});
+```
+
+`{ value }` sets a constant; `{ returns }` sets a function that ignores its
+arguments and returns the given value (`null` returns nothing). When the
+`server` alias is enabled, it sees the same members.
+
+### Run pure Lua without a host
+
+`LuaEngine.createStandalone()` creates an engine with no host callbacks, for
+scripts that only compute. `redis.call` and `redis.pcall` fail with
+`ERR redis.call is not available in standalone mode`:
+
+```typescript
+const calc = await LuaEngine.createStandalone({ limits: { maxFuel: 1_000_000 } });
+calc.eval("return math.sqrt(16)"); // 4
+calc.eval("return cjson.encode({a = 1})"); // Buffer.from('{"a":1}')
+calc.dispose();
+```
+
+It takes the same options as `LuaEngine.create`, without `host`.
+
+### Clean up an engine
+
+- `engine.reset()` replaces the Lua VM with a fresh one, discarding whatever
+  earlier scripts changed (for example `cjson` settings). Limits, profile,
+  `redisProps` and host callbacks are kept, and so is the `math.random`
+  sequence, as on a real server.
+- `engine.dispose()` releases the engine and its 64 MB of WebAssembly memory.
+  Afterwards `eval`, `evalWithArgs` and `reset` throw. Calling `dispose()` twice
+  is fine.
 
 ```typescript
 const engine = await LuaEngine.createStandalone();
 try {
-  engine.eval(script);
+  engine.eval("return 1");
 } finally {
   engine.dispose();
 }
 ```
 
-### load(options) and LuaWasmModule
+Both throw when called from inside one of the engine's host callbacks; call
+them after `eval` returns.
+
+### Load the WASM module yourself
 
 `LuaEngine.create(options)` is `load(options)` followed by
-`module.create(options.host)` (and `createStandalone` by
-`module.createStandalone()`). Use the two steps to separate the async load from
-the synchronous engine creation:
+`module.create(options.host)`. Split the two steps to load asynchronously once
+and create the engine synchronously later:
 
 ```typescript
 import { load } from "lua-redis-wasm";
 
 const module = await load({ limits: { maxFuel: 10_000_000 } });
-const engine = module.create(myHost); // or module.createStandalone()
+const engine = module.create(host); // or module.createStandalone()
 ```
 
-A `LuaWasmModule` creates exactly one engine. The compiled WASM module is cached
-for the process (keyed by the resolved `wasmPath`/URL, or by the `wasmBytes`
-object), so only the first `load()` reads and compiles the binary; every engine
-still gets its own instance and memory, and engines share no state.
+- A module creates exactly one engine; call `load()` again for another one.
+  Engines never share state.
+- The compiled WebAssembly code is cached for the process, so only the first
+  `load()` reads and compiles the binary.
+- `wasmPath` points at another `redis_lua.wasm` (a file path or `file://` URL
+  in Node, a URL in the browser); `wasmBytes` passes the binary directly
+  (`Uint8Array` or `ArrayBuffer`); `modulePath` points at the matching
+  `redis_lua.mjs` glue. Use binaries built from the same release as the
+  package.
 
-### LuaWasmEngine (deprecated)
+### Use in the browser
 
-`LuaWasmEngine` is a deprecated alias of `LuaEngine`, kept until the next major
-version: `LuaWasmEngine.create(...)` / `LuaWasmEngine.createStandalone(...)` still
-work and return a `LuaEngine`. Replace `LuaWasmEngine` with `LuaEngine`.
+Bundlers such as Vite, webpack and Rollup pick the package's browser build
+automatically (through the `browser` export condition). It has no `node:*`
+imports and fetches `redis_lua.wasm` from next to the module; if your bundler
+does not copy that file, serve it yourself and pass its URL as `wasmPath`, or
+fetch it and pass `wasmBytes`.
 
-## Host Interface
-
-The host must implement three callbacks:
+The API uses `Buffer`, so provide it as a global, for example with the
+[`buffer`](https://www.npmjs.com/package/buffer) package:
 
 ```typescript
-type RedisHost = {
-  redisCall: (args: Buffer[], ctx?: RedisCallContext) => ReplyValue; // For redis.call()
-  redisPcall: (args: Buffer[], ctx?: RedisCallContext) => ReplyValue; // For redis.pcall()
-  log: (level: number, message: Buffer) => void; // For redis.log()
-};
+import { Buffer } from "buffer";
+Object.assign(globalThis, { Buffer });
+
+// Import the engine after Buffer is in place.
+const { LuaEngine } = await import("lua-redis-wasm");
 ```
 
-### redisCall
+A bundler plugin that provides Node's `Buffer` works too.
 
-Called when Lua executes `redis.call(...)`. Arguments arrive as `Buffer[]`. Return a
-`ReplyValue`, or signal an error by returning `{ err, code? }` (or throwing).
+## Reply values
 
-Number arguments are formatted like Redis 7.4+ (`luaArgsToRedisArgv`), not with
-Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as plain integers
-(`1e15` → `1000000000000000`, `-0.0` → `0`), everything else in the shortest
-round-trip form (`0.1+0.2` → `0.30000000000000004`, `1e300` → `1e+300`, `1/0` →
-`inf`, `0/0` → `nan` or `-nan`). This applies whatever the `profile` compat
-option. Older versions differ: Redis 7.2.0–7.2.4 always used the shortest form
-(`1e15` → `1e+15`; 7.2.5+ matches 7.4), and Redis 7.0 and earlier used `%.17g`
-(`3.3` → `3.2999999999999998`).
-
-A zero-argument `redis.call()` / `redis.pcall()` is delegated to the host with an
-empty `args` array — the host decides the error — rather than being short-circuited
-by the engine.
-
-### redisPcall
-
-Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
-instead of throwing to match Redis behavior.
-
-### Host callback failures
-
-A host callback never breaks the engine. A throw from `redisCall`, or a malformed
-`ReplyValue` it returns (e.g. `{ map: "x" }`, a non-Buffer `ok`, or a reply nested
-too deeply to encode), becomes an error reply carrying the exception message,
-with the generic `ERR` code when the message does not start with an uppercase
-code (`throw new Error("oops")` → `ERR oops`, like Redis's `addReplyError`; a
-returned `{ err }` reply is passed on as is): `redis.call` raises it,
-`redis.pcall` returns it as an error table. A throw from
-`log` or `onSetResp` is raised in the script as an ordinary Lua error with the
-exception message (a script can catch it with `pcall`); this differs from Redis,
-where `redis.log` cannot fail. A throwing `onSetResp` also leaves the protocol
-unchanged.
-
-If an exception still escapes the WASM module, the VM can no longer be trusted:
-that call throws, and every later `eval` / `evalWithArgs` throws
-`LuaEngine is unusable: ...` (with the original error as `cause`). Create a new
-engine to continue. This covers a WASM trap or abort (e.g. `cmsgpack.pack`
-running out of heap aborts, as in Redis) and a throwing `_alloc`, which is
-reported as the exported `WasmFault` error class:
-
-```typescript
-import { WasmFault } from "lua-redis-wasm";
-
-try {
-  engine.eval(script);
-} catch (err) {
-  if (err instanceof RangeError) {
-    // The script or KEYS/ARGV did not fit in the WASM heap; the engine is fine.
-  } else if (err instanceof WasmFault) {
-    // _alloc threw inside the module: the engine is now unusable, recreate it.
-  } else {
-    // A WASM trap/abort, or "LuaEngine is unusable" from an earlier fault:
-    // recreate the engine too.
-  }
-}
-```
-
-### Call context
-
-Both handlers receive `ctx: { source, line }`, the caller of `redis.call`/`redis.pcall`
-exactly as Redis 6.2's `luaPushError` sees it (stack level 1): `source` (a `Buffer`,
-read it inside the handler) is
-`"@user_script"` for the script, the chunk for `loadstring` code, or `"=[C]"` (line
-`-1`) for a C caller such as `pcall(redis.pcall, ...)`. `source` is empty when unknown.
-Use it to emit Redis 6.2's pcall error prefix, keeping `source` as bytes (a template
-literal would UTF-8-decode it):
-
-```typescript
-const prefixed = Buffer.concat([ctx.source, Buffer.from(`: ${ctx.line}: `), message]);
-```
-
-Read `ctx.source` inside the handler; a first read after the handler has returned
-throws. When delegating between handlers, pass `ctx` along
-(`this.redisCall(args, ctx)`).
-
-A handler must not evaluate another script on the same engine: while a script is
-running, `eval` / `evalWithArgs` reply
-`ERR nested eval is not supported: a script is already running` (Redis likewise
-refuses `EVAL` from inside a script).
-
-### Error metadata
-
-The engine composes **no** user-facing error wording — it classifies the error and
-lets the host render. When a script aborts, the reply carries:
-
-- `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call` in
-  the Redis 7 error model (with `redis-6.2` string errors it is `ERR`, see
-  [Error objects inside the script](#error-objects-inside-the-script)).
-  An uncaught string error always has code `ERR` and its whole message as `err`,
-  whatever its first word (`error('MY boom', 0)` → code `ERR`, `err` `MY boom`),
-  as Redis sends it as `-ERR <message>`. One leading `ERR ` is dropped, because
-  the engine's own string errors carry it, so `error('ERR x', 0)` reports `x`
-  (Redis: `-ERR ERR x`). In the Redis 7 error model (every profile but `redis-6.2`, see
-  `compat.tableErrors`), an error table's `err` is what Redis sends as-is, so a
-  table error has a `code` only when its `err` starts with one:
-  `error({err='MY boom'})` → code `MY`, `err` `boom`; `error({err='boom'})` → no
-  `code`, `err` `boom` (Redis: `-boom script: ...`). With `redis-6.2` string
-  errors, which Redis 6.2 always sends as `-ERR ...`, every script error takes
-  the string rule: `error({err='MY boom'})` → code `ERR`, `err` `MY boom`. Write
-  `-<code> <err>`, or `-<err>` when `code` is absent.
-  See [Reply Types](#reply-types).
-- `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
-  classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
-  `redis.call` argument; a bad `redis.pcall` argument is not raised but returned as
-  an error table, see [Error objects inside the script](#error-objects-inside-the-script)).
-  `kind` is an opaque machine tag the host maps to wording;
-  `name` is the variable involved, raw (it may contain CR/LF). The engine flags
-  these errors itself; error text a script or a host command error produces never
-  gets a `kind`, whatever it contains, with one exception: a string equal to the exact
-  message of an engine error raised earlier in the same eval, which cannot be told apart
-  from rethrowing that error (see `SCRIPT_ERROR_ENGINE` in [docs/abi.md](docs/abi.md)).
-  A script that catches one of these errors sees
-  Redis's message, never the `kind` (see
-  [Error objects inside the script](#error-objects-inside-the-script)); rethrown
-  unchanged (`error(e, 0)`, or the error table an `xpcall` handler got, `err` untouched), it still
-  reaches the host with its `kind`, while `error(e)` raises a new, position-prefixed
-  error, reported like any other string error (as Redis reports it). Writing a global
-  has no `kind`: it is blocked by Lua's native readonly flag (as in real Redis), which
-  recursively locks the whole globals tree, so the VM itself raises "Attempt to modify
-  a readonly table".
-- `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
-  runtime / `redis.call` errors, the original message, passed through untouched.
-  An error object that is a table (`error({err='MY custom'})`,
-  `error(redis.error_reply('boom'))`, a `redis.call` error) is reported by its `err`
-  field, like Redis 7.0+ (`ERR unknown error` when `err` is not a string); other
-  non-string values as Lua's `tostring` renders them (`error(nil)` → `nil`). This
-  applies to every profile, `redis-6.2` included, although Redis 6.2 itself fails
-  on a table error (its error handler concatenates it as a string).
-
-The host owns wording: map `kind` to the Redis message (version-specific if you care)
-and decorate with `line`/`sha` as needed
-(`<message> script: <sha>, on @user_script:<line>.`). An error **value** the script
-returns (e.g. `return redis.pcall(...)`) is passed through untouched.
-
-Hosts should return plain, undecorated error messages.
-
-### Error objects inside the script
-
-By default, and with every `profile` except `redis-6.2`, scripts see the Redis 7.0+
-error model: `redis.call` (and `redis.log`, `redis.setresp`, ...) raise an `{err=...}`
-table, and the global `pcall` returns the `err` string of a caught error table, so
-`pcall(redis.call, ...)` still yields a string while an `xpcall` handler receives the
-table. A host command error becomes the same table `redis.pcall` returns:
-`{err='CODE message', ignore_error_stats_update=true}`, with the generic `ERR` code
-added to a message that has no space and trailing CR/LF trimmed, as in Redis. With
-`profile: "redis-6.2"` errors are plain strings and a host error reaches the script
-verbatim; the `redis.log` and `redis.setresp` argument errors carry no `ERR` code
-(`RESP version must be 2 or 3.`), and `redis.error_reply` returns its argument
-unchanged, as in Redis 6.2. The `compat.tableErrors` option overrides the
-profile. When the error aborts the script, the host receives what each Redis
-version sends. In the table model a host error reply (or `error({err=...})`
-table) keeps its code (`WRONGTYPE ...` → code `WRONGTYPE`), stays code-less when
-its first word is not an uppercase code (`"oops something"`), as Redis 7 sends it
-as-is, and has CR/LF around the message after the code trimmed (`"\r\nboom"` →
-`boom`). With string errors every script error has code `ERR` and the whole
-message, less one leading `ERR ` (`WRONGTYPE ...` → code `ERR`, `err`
-`WRONGTYPE ...`; `RESP version must be 2 or 3.` → code `ERR`; `"\r\nboom"` →
-`"  boom"`), as Redis 6.2 replies `-ERR Error running script ...`.
-
-A `redis.pcall` argument that is not a string or number (`redis.pcall('set', 'k', {})`)
-is returned as an error table, as in Redis, and the script goes on. Its wording is the
-engine's, by profile: `{err='ERR Lua redis lib command arguments must be strings or
-integers'}` (Redis 7.x/8.0 profiles and no profile), `{err='ERR Command arguments must
-be strings or integers'}` (Valkey profiles), and, without table errors,
-`{err='@user_script: <line>: Lua redis() command arguments must be strings or integers'}`
-(Redis 6.2). Returned or rethrown, it is an ordinary error with no `meta.kind`.
-`redis.call` raises the same error (the table, or the plain string without table
-errors), so a script that catches it sees Redis's message:
-`pcall(redis.call, 'set', 'k', {})` returns `false` and
-`ERR Lua redis lib command arguments must be strings or integers` (Valkey profiles:
-`ERR Command arguments ...`; Redis 6.2: `=[C]: -1: Lua redis() command arguments ...`).
-Likewise a caught read of a nonexistent global gives
-`user_script:<line>: Script attempted to access nonexistent global variable '<name>'`.
-Uncaught, these reach the host as the `command-arg-type` and `global-read` engine
-errors, which the host words (see `meta` above).
-
-### log
-
-Called when Lua executes `redis.log(level, ...)`. Level is a numeric Redis log level
-(`redis.LOG_DEBUG`..`redis.LOG_WARNING`), truncated to an integer, which must be
-0..3. As in Redis, every argument after the level is joined with a space into
-`message`. Arguments `lua_tolstring` cannot convert (nil, booleans, tables) are
-skipped and get no separator of their own. Errors raised (default wording):
-
-- fewer than two arguments: `ERR redis.log() requires two arguments or more.`
-- a level that is not a number: `ERR First argument must be a number (log level).`
-- a level outside 0..3: `ERR Invalid log level.`
-
-The handler receives every message, and filtering by verbosity is up to the host.
-
-The wording follows the `profile` compat option, as in each version's source:
-
-| profile | arity error | level error | `ERR` code |
-|---|---|---|---|
-| `redis-6.2` | `redis.log() requires ...` | `Invalid debug level.` | no |
-| `redis-7.0`, `redis-7.2` | `redis.log() requires ...` | `Invalid debug level.` | yes |
-| `redis-7.4`, `redis-8.0`, no profile | `redis.log() requires ...` | `Invalid log level.` | yes |
-| `valkey-8.0`, `valkey-9.0` | `server.log() requires ...` | `Invalid log level.` | yes |
-
-The `ERR` code came with the Redis 7 error model, so it follows
-`compat.tableErrors` (see [Error objects inside the script](#error-objects-inside-the-script));
-the wording itself follows the profile only.
-
-## Reply Types
-
-Return values are Redis-compatible:
+Script results and host replies use one type, `ReplyValue`:
 
 ```typescript
 type ReplyValue =
-  | null // Lua nil
-  | number // Integer (safe range)
-  | bigint // Integer (64-bit)
+  | null // Lua nil / Redis null
+  | number // integer (safe range)
+  | bigint // integer outside the safe range
   | boolean // RESP3 boolean
-  | Buffer // Bulk string
-  | { ok: Buffer } // Status reply (+OK)
-  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta } // Error reply (-ERR); code e.g. WRONGTYPE, meta for rendering
+  | Buffer // bulk string
+  | { ok: Buffer } // status reply, e.g. +OK
+  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta } // error reply
   | { double: number } // RESP3 double
   | { big_number: Buffer } // RESP3 big number
   | { verbatim_string: { format: Buffer; string: Buffer } } // RESP3 verbatim string
   | { map: [ReplyValue, ReplyValue][] } // RESP3 map
   | { set: ReplyValue[] } // RESP3 set
-  | ReplyValue[]; // Array
+  | ReplyValue[]; // array
 ```
 
-The ABI supports RESP2 replies and RESP3 booleans, doubles, maps, sets, big
-numbers, and verbatim strings. Typed tables (`{double=}`, `{big_number=}`,
-`{map=}`, `{set=}`, `{verbatim_string=}`) in a script's return value convert at
-any protocol level, like real Redis. `redis.setresp(3)` only changes how
-booleans and `redis.call` replies are converted for the current script.
+How Lua values come back, as in Redis:
 
-Hosts serving RESP2 clients must therefore convert typed replies themselves,
-even when `onSetResp(3)` was never called. Real Redis sends a RESP2 client a
-bulk string for `double`, `big_number` and `verbatim_string`, a flat
-key/value array for `map`, and a plain array for `set`.
+| Lua value | Result |
+|---|---|
+| `nil`, or no `return` | `null` |
+| number | integer, truncated (`3.7` → `3`); a `bigint` outside JavaScript's safe integer range (`2^62` → `4611686018427387904n`) |
+| string | `Buffer` |
+| `true` / `false` | `1` / `null` (RESP3 after `redis.setresp(3)`: `true` / `false`) |
+| array table | array, up to the first `nil` |
+| `{ok='...'}` / `redis.status_reply(...)` | `{ ok }` |
+| `{err='...'}` / `redis.error_reply(...)` | `{ err, code? }` |
+| `{double=}`, `{map=}`, `{set=}`, `{big_number=}`, `{verbatim_string=}` | the matching RESP3 variant |
+| function, coroutine, userdata (e.g. `cjson.null`) | `null`, at any depth |
 
-On decode, an error payload of the form `CODE message` is split into `err` (the
-message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
-`code` is prepended back, so the wire form is always Redis's `CODE message`.
+Status replies from your host stay tables inside the script:
+`redis.call('SET', 'k', 'v')` gives `{ok='OK'}`, and
+`redis.call('SET', 'k', 'v').ok` is `'OK'`.
 
-`redis.error_reply(msg)` follows Redis 7.0+: one leading `-` is dropped. With no space,
-`ERR ` is prepended (`'foo'` → `ERR foo`). Otherwise the message is kept and its first
-token is the code, whatever its case (`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
-On decode, a token that is not uppercase, like `My`, stays in `err` with no `code`.
-The wire bytes are the same either way. Any call but one string argument returns
-`{err='ERR wrong number or type of arguments'}`.
+Typed tables such as `{double=1.5}` and `{map={...}}` come back typed even if
+the script never called `redis.setresp(3)`, as in Redis. If you serve RESP2
+clients, convert them yourself: Redis sends a RESP2 client a bulk string for
+`double`, `big_number` and `verbatim_string`, a flat key/value array for `map`,
+and a plain array for `set`.
 
-With `profile: "redis-6.2"` (or `compat.tableErrors: false`) it follows Redis 6.2
-instead: the string is returned unchanged (`'foo'` → `{err='foo'}`, `'-ERR x'` →
-`{err='-ERR x'}`), and a bad call returns
-`{err='@user_script: <line>: wrong number or type of arguments'}` with no code.
-
-`redis.status_reply(msg)` returns `{ok=msg}` for one string argument. Like
-`redis.error_reply`, any other call (no argument, a number, extra arguments)
-returns, without raising, `{err='ERR wrong number or type of arguments'}`, or
-the Redis 6.2 form above with `profile: "redis-6.2"` / `compat.tableErrors: false`.
-
-### Determining the Response Type
-
-Use type guards to inspect what Lua returned:
+To tell reply types apart:
 
 ```typescript
-const result = engine.eval(script);
-
-// Check for null (Lua nil)
-if (result === null) {
-  console.log("Got nil");
-}
-
-// Check for integer
-else if (typeof result === "number" || typeof result === "bigint") {
-  console.log("Got integer:", result);
-}
-
-// Check for array (Lua table with sequential keys)
-else if (Array.isArray(result)) {
-  console.log("Got array with", result.length, "elements");
-  for (const item of result) {
-    // Each element is also a ReplyValue - handle recursively
-  }
-}
-
-// Check for status reply ({ok: Buffer}) - e.g. from SET, PING
-else if (typeof result === "object" && "ok" in result) {
-  console.log("Got status:", result.ok.toString());
-}
-
-// Check for error reply ({err: Buffer})
-else if (typeof result === "object" && "err" in result) {
-  console.log("Got error:", result.err.toString());
-}
-
-// Otherwise it's a bulk string (Buffer)
-else if (Buffer.isBuffer(result)) {
-  console.log("Got bulk string:", result.toString());
+function describe(reply: ReplyValue): string {
+  if (reply === null) return "nil";
+  if (typeof reply === "number" || typeof reply === "bigint") return `integer ${reply}`;
+  if (typeof reply === "boolean") return `boolean ${reply}`;
+  if (Buffer.isBuffer(reply)) return `bulk string ${reply.toString()}`;
+  if (Array.isArray(reply)) return `array of ${reply.length}`;
+  if ("ok" in reply) return `status ${reply.ok.toString()}`;
+  if ("err" in reply) return `error ${reply.err.toString()}`;
+  return `RESP3 ${Object.keys(reply)[0]}`;
 }
 ```
 
-### Lua Type Conversions
+## API reference
 
-This matches Redis Lua behavior:
+| Export | Description |
+|---|---|
+| `LuaEngine.create(options)` | Load the module and create an engine with host callbacks. Options: `host` (required), `limits`, `profile`, `compat`, `redisProps`, `wasmPath`, `wasmBytes`, `modulePath`. |
+| `LuaEngine.createStandalone(options?)` | Same, without host callbacks. |
+| `engine.eval(script)` | Run a script; returns a `ReplyValue`. |
+| `engine.evalWithArgs(script, keys, args)` | Run a script with `KEYS` and `ARGV`. |
+| `engine.reset()` | Replace the Lua VM with a fresh one. |
+| `engine.dispose()` | Release the engine. |
+| `engine.getLimits()` | The limits the engine was created with. |
+| `LuaEngine.defaultWasmPath()`, `LuaEngine.defaultModulePath()` | Location of the bundled `redis_lua.wasm` / `redis_lua.mjs`. |
+| `load(options?)` | Load the module; returns a `LuaWasmModule` with `create(host)` and `createStandalone()`. |
+| `WasmFault` | Error class for a fault inside the WebAssembly module. |
+| `LuaWasmEngine` | Deprecated alias of `LuaEngine`; use `LuaEngine` instead. |
 
-```typescript
-// Lua nil → null
-engine.eval("return nil"); // null
+Types: `EngineOptions`, `StandaloneOptions`, `LoadOptions`, `EngineLimits`,
+`RedisHost`, `RedisCallHandler`, `RedisCallContext`, `RedisLogHandler`,
+`ReplyValue`, `ReplyErrorMeta`, `CompatProfile`, `CompatOverrides`,
+`RedisProp`, `RedisProps`.
 
-// Lua number → number (or bigint for large values)
-engine.eval("return 42"); // 42
-engine.eval("return 2^62"); // 4611686018427387904n (bigint)
+## Included Lua libraries
 
-// Lua string → Buffer
-engine.eval("return 'hello'"); // Buffer.from("hello")
+- **cjson**: JSON encoding and decoding
+- **cmsgpack**: MessagePack serialization
+- **struct**: binary data packing and unpacking
+- **bit**: bitwise operations
+- Lua 5.1's `base`, `table`, `string` and `math` libraries, plus `coroutine`
+  and, depending on the profile, a sandboxed `os` (`os.clock` only)
 
-// Lua table (array) → ReplyValue[]
-engine.eval("return {1, 2, 3}"); // [1, 2, 3]
-engine.eval("return {'a', 'b'}"); // [Buffer, Buffer]
-
-// Values with no reply type (functions, coroutines, userdata such as
-// cjson.null) → null, at any depth
-engine.eval("return function() end"); // null
-engine.eval("return {1, function() end, 3}"); // [1, null, 3]
-
-// Status reply: commands like SET, PING return {ok: "..."}
-// In Lua: local resp = redis.call('SET', 'k', 'v') → resp.ok == "OK"
-engine.eval("return redis.call('SET', 'k', 'v')"); // { ok: Buffer.from("OK") }
-engine.eval("return redis.call('SET', 'k', 'v').ok"); // Buffer.from("OK")
-
-// Error reply: redis.pcall catches errors as {err: "..."}
-// In Lua: local resp = redis.pcall('INVALID') → resp.err == "ERR ..."
-engine.eval("return redis.pcall('INVALID')"); // { err: Buffer.from("..."), code: Buffer.from("ERR") }
-```
-
-> **Note**: Status replies (`+OK`) become `{ok: "..."}` tables in Lua, matching real Redis behavior.
-> Use `resp.ok` to access the status string.
-
-## Resource Limits
-
-Protect against runaway scripts with configurable limits:
-
-```typescript
-const module = await load({
-  limits: {
-    maxFuel: 10_000_000, // Instruction budget
-    maxReplyBytes: 2 * 1024 * 1024, // Max encoded reply size
-    maxArgBytes: 1 * 1024 * 1024, // Max encoded KEYS + ARGV size
-  },
-});
-const engine = module.create(host);
-```
-
-| Limit            | Description                                   | On overflow                                 |
-| ---------------- | --------------------------------------------- | ------------------------------------------- |
-| `maxFuel`        | Instruction count budget                      | Script error (the script is stopped)        |
-| `maxReplyBytes`  | Size of the encoded script reply              | `ERR reply exceeds configured limit`        |
-| `maxArgBytes`    | Size of the encoded KEYS + ARGV array         | `ERR KEYS/ARGV exceeds configured limit`    |
-
-All limits are enforced by the WASM runtime; unset or 0 means no limit. Each
-must be a non-negative integer: `load()` throws a `RangeError` for negative,
-fractional or non-finite values (so e.g. `0.5` cannot silently mean "no
-limit"), and values above 2^32 - 1 are capped to it. `maxReplyBytes` is checked
-while the reply is encoded, so a small value that expands into a huge reply
-(e.g. a table referencing the same subtable many times) fails as soon as it
-crosses the limit. It covers the script's return value (including returned
-`{err=}` / `{ok=}` tables), not script errors or `redis.call` replies.
-`maxArgBytes` counts the ABI encoding: 4 bytes, plus 4 bytes and the data of
-each key and argument.
-
-`maxFuel` (default 10,000,000) is a deterministic budget of Lua VM instructions,
-charged in steps of 1000, not Redis's wall-clock `lua-time-limit` /
-`busy-reply-threshold`. The engine runs one script synchronously, so there is no
-`BUSY` reply, `SCRIPT KILL` or `SHUTDOWN NOSAVE`, and time spent in host callbacks
-or inside C functions such as `string.rep` is not charged. A script that spends the
-budget aborts with `{ err: "Script killed by fuel limit", code: "ERR" }` plus the
-usual `meta` (`line`, `sha`), where a killed Redis script reports
-`ERR Script killed by user with SCRIPT KILL...`. As in Redis after `SCRIPT KILL`,
-the kill cannot be caught: once raised it is raised again at every instruction, so
-it escapes any `pcall` or `xpcall` and reaches the host; no `xpcall` message
-handler runs for it, and a kill inside a coroutine stops the whole script. Each
-evaluation starts with the full budget. Known gap: a coroutine that finishes
-within 1000 instructions is never charged, so a script that runs its work in
-many short coroutines is not bounded by `maxFuel` (#75).
-
-The WASM heap is fixed at 64 MB (of which 2 MB is the C stack). A script that exhausts it fails with an ordinary
-`not enough memory` error and the engine stays usable; this includes `cjson.encode`
-of a value that expands into a document too large for the heap. Because Lua 5.1 has no
-emergency garbage collection, the engine runs a full collection after any
-evaluation that leaves more than 16 MB of Lua memory in use, so a heavy script's
-garbage (whether it succeeded, failed, or caught and rethrew an out-of-memory
-error) does not make the next script run out of memory; if that collection
-itself runs out of memory, the Lua VM is discarded and rebuilt. A script, KEYS
-or ARGV too large to copy into the heap makes `eval` / `evalWithArgs` throw a
-`RangeError`; KEYS/ARGV that fit as bytes but not as Lua strings reply
-`ERR not enough memory to set KEYS/ARGV`. In both cases the engine stays usable.
-
-Nested C calls (`string.gsub` callbacks, `pcall`, metamethods, `table.sort`
-comparators, coroutines) are limited to 200 levels as in Redis; past that the
-script gets Lua's `C stack overflow` error and the engine stays usable. The
-module's C stack (2 MB, taken from the fixed 64 MB heap) has room for that
-limit. `cjson.encode` / `cjson.decode` nest once per level of the value, up to
-`encode_max_depth` / `decode_max_depth` (1000 by default). A script may raise
-those limits, but the engine additionally stops cjson at about 4000 levels
-(about 2000 for objects) with the same catchable nesting error, because a few
-thousand more would exhaust the JavaScript engine's own stack, which throws a
-`RangeError` and leaves the engine unusable.
-
-## Included Lua Libraries
-
-The engine includes Redis-standard Lua modules:
-
-- **cjson** - JSON encoding/decoding
-- **cmsgpack** - MessagePack serialization
-- **struct** - Binary data packing/unpacking
-- **bit** - Bitwise operations
-
-Plus standard Lua 5.1 libraries: `base`, `table`, `string`, `math`.
-
-## Use Cases
-
-- **Powering [js-redis-server](https://github.com/fatal10110/js-redis-server)** - the primary use case: providing `EVAL`/`EVALSHA` scripting for an in-memory Redis-compatible server
-- **Testing** - Unit test Redis Lua scripts without a Redis server
-- **Sandboxing** - Execute untrusted Lua with resource limits
-- **Development** - Rapid iteration on Lua scripts locally
-- **Embedding** - Add Redis-compatible scripting to Node.js applications
+As in Redis, there is no file, network or clock access, and scripts cannot
+create or change globals.
 
 ## Compatibility
 
-| Feature                         | Status  |
-| ------------------------------- | ------- |
-| Redis version target            | 7.x     |
-| Lua version                     | 5.1     |
-| Binary-safe strings             | Yes     |
-| `redis.call` / `redis.pcall`    | Yes     |
-| `redis.log`                     | Yes     |
-| `redis.sha1hex`                 | Yes     |
-| Standard Lua libraries          | Yes     |
-| Redis Lua modules (cjson, etc.) | Yes     |
-| Debug / REPL helpers            | No      |
-| Redis Modules API               | Not yet |
+| Feature | Status |
+|---|---|
+| Redis version target | 7.x by default; Redis 6.2–8.0 and Valkey 8.0–9.0 via `profile` |
+| Lua version | 5.1 |
+| Binary-safe strings | Yes |
+| `redis.call` / `redis.pcall` | Yes |
+| `redis.log`, `redis.sha1hex`, `redis.error_reply`, `redis.status_reply` | Yes |
+| `redis.setresp` / RESP3 replies | Yes (no RESP3 push) |
+| Standard Lua libraries | Yes |
+| Redis Lua modules (cjson, etc.) | Yes |
+| Debug / REPL helpers | No |
+| Redis Modules API | Not yet |
 
-## Building from Source
+## Upgrading from 1.x
 
-```bash
-# Build everything (requires Emscripten via Docker)
-npm run build
+Version 2.0 changes some behavior your host can see. Most applications only
+need to:
 
-# Build steps individually
-npm run build:wasm  # Compile C to WASM
-npm run build:ts    # Compile TypeScript
+1. Replace `LuaWasmEngine` with `LuaEngine` (the old name still works but is
+   deprecated).
+2. Remove `maxMemoryBytes` from `limits`, and pass whole, non-negative numbers
+   for the other limits.
+3. Check your error handling: `code` can be missing, a string error's code is
+   always `ERR`, and scripts now see Redis 7 error tables. To keep 1.x-style
+   string errors, use `profile: "redis-6.2"` or `compat: { tableErrors: false }`.
 
-# Run tests
-npm test
-npm run test:skip-wasm  # Skip WASM rebuild
-```
+The full list, with what to do for each item, is in the
+[CHANGELOG's breaking changes](CHANGELOG.md#breaking-changes).
 
 ## Documentation
 
-- [Host Interface Contract](docs/host-interface.md)
-- [Binary ABI Specification](docs/abi.md)
-- [Limits and Compatibility](docs/limits-compat.md)
+- [Host interface](docs/host-interface.md): the callbacks in detail, call context, failures
+- [Errors](docs/errors.md): error replies, codes, `meta`, errors inside scripts, exceptions
+- [Resource limits](docs/limits.md): fuel, memory, stack and nesting limits
+- [Compatibility](docs/compat.md): profiles, sandbox rules, per-version wording
+- [Binary ABI](docs/abi.md): the WebAssembly interface, for contributors
+- [Limits and compatibility summary](docs/limits-compat.md)
+
+## Building from source
+
+Clone with submodules (the Lua sources come from the `vendor/valkey`
+submodule): `git clone --recursive`, or `git submodule update --init --recursive`.
+Building the WebAssembly module needs Docker (it runs Emscripten in a
+container).
+
+```bash
+npm ci
+
+npm run build           # WASM + TypeScript + copy the .wasm into dist/
+npm run build:wasm      # WASM only (Docker)
+npm run build:ts        # TypeScript only
+
+npm test                # rebuild the WASM, then run all tests
+npm run test:skip-wasm  # run all tests against the current WASM build
+npm run smoke           # native C smoke tests (Docker)
+
+# a single test file
+node --test --test-timeout=60000 --import tsx test/engine.test.ts
+```
 
 ## Contributing
 
@@ -705,12 +574,15 @@ This package is licensed under the **MIT License**. See [LICENSE](LICENSE) for d
 ### Third-Party Licenses
 
 The WASM module is built from C sources vendored from
-[Valkey](https://github.com/valkey-io/valkey) (the `vendor/valkey` submodule, pinned to a
-release tag), and parts of this project's C code are derived from Valkey / Redis 7.2.4.
-It includes third-party code under the BSD 3-Clause License:
+[Valkey](https://github.com/valkey-io/valkey) 8.0.11 (the `vendor/valkey`
+submodule, pinned to a release tag), and parts of this project's C code are
+derived from Valkey / Redis 7.2.4 and Redis 6.2. It includes third-party code
+under the BSD 3-Clause License:
 
 - **Valkey / Redis 7.2.4** (derived scripting code, Lua core modifications, `rand.c`) -
   Copyright (C) 2006-2020 Redis Ltd., (C) 2024-present Valkey contributors
+- **Redis 6.2** (derived `redis-6.2` profile error behavior) -
+  Copyright (C) 2009-2012 Salvatore Sanfilippo, Redis Ltd.
 
 under the MIT License:
 
@@ -729,6 +601,6 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full license texts.
 
 ## Acknowledgments
 
-- Redis team for the Lua integration design
+- Redis and Valkey teams for the Lua integration design
 - Emscripten project for WebAssembly tooling
 - Contributors and maintainers of the included Lua libraries
