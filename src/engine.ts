@@ -545,8 +545,8 @@ export class LuaWasmModule {
    *     if (cmd === "PING") return { ok: Buffer.from("PONG") };
    *     throw new Error("ERR unknown command");
    *   },
-   *   redisPcall(args) {
-   *     try { return this.redisCall(args); }
+   *   redisPcall(args, ctx) {
+   *     try { return this.redisCall(args, ctx); }
    *     catch (e) { return { err: Buffer.from(e.message) }; }
    *   },
    *   log(level, msg) { console.log(msg.toString()); }
@@ -639,7 +639,13 @@ export class LuaWasmModule {
     const exports = this.exports;
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
-      const ctx = { line: exports._current_call_line?.() ?? 0 };
+      const sourcePtr = exports._current_call_source?.() ?? 0;
+      const ctx = {
+        source: sourcePtr
+          ? readBytes(exports.HEAPU8, sourcePtr, exports.HEAPU8.indexOf(0, sourcePtr) - sourcePtr).toString("utf8")
+          : "",
+        line: exports._current_call_line?.() ?? 0,
+      };
       try {
         return isPcall
           ? host.redisPcall.call(host, args, ctx)

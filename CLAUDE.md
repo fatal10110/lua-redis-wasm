@@ -67,8 +67,8 @@ Argument encoding: `[count: u32le][len1: u32le][data1][len2: u32le][data2]...`
 Host provides callbacks injected into WASM:
 ```typescript
 type RedisHost = {
-  redisCall(args: Buffer[]): ReplyValue;   // Throws on error
-  redisPcall(args: Buffer[]): ReplyValue;  // Returns {err: Buffer} on error
+  redisCall(args: Buffer[], ctx?: RedisCallContext): ReplyValue;   // Throws on error
+  redisPcall(args: Buffer[], ctx?: RedisCallContext): ReplyValue;  // Returns {err: Buffer} on error
   log(level: number, message: Buffer): void;
 };
 ```

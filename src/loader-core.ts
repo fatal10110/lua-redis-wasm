@@ -79,9 +79,11 @@ export type WasmExports = {
   _set_compat?: (flags: number) => void;
 
   /**
-   * Script line of the redis.call/pcall currently dispatched to the host
-   * (0 when unknown). Only meaningful inside host_redis_call/pcall.
+   * Caller of the redis.call/pcall currently dispatched to the host: pointer to
+   * its NUL-terminated chunk source (0 when unknown) and its line (-1 for a C
+   * frame). Only meaningful inside host_redis_call/pcall.
    */
+  _current_call_source?: () => number;
   _current_call_line?: () => number;
 
   /**

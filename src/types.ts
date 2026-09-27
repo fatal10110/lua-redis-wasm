@@ -122,15 +122,20 @@ export type ReplyValue =
 export type RedisCallHandler = (args: Buffer[], ctx?: RedisCallContext) => ReplyValue;
 
 /**
- * Call-site context passed to {@link RedisCallHandler}.
+ * Call-site context passed to {@link RedisCallHandler}: the caller of
+ * `redis.call`/`redis.pcall` (stack level 1, as Redis 6.2's `luaPushError`
+ * sees it). Lets a host build Redis 6.2's `${source}: ${line}: ` prefix for
+ * pcall errors, which it returns as an error table rather than raising.
  */
 export type RedisCallContext = {
   /**
-   * Script line of the `redis.call`/`redis.pcall` (the nearest Lua frame, so a
-   * call made from a nested function reports that function's line). 0 when
-   * unknown. Lets a host build Redis 6.2's `@user_script: N: ...` prefix for
-   * pcall errors, which it returns as an error table rather than raising.
+   * Chunk source of the caller: `"@user_script"` for the script itself, the
+   * chunk string/name for `loadstring` code, `"=[C]"` when called from a C
+   * function (e.g. `pcall(redis.pcall, ...)`). Empty when unknown, in which
+   * case Redis omits the prefix.
    */
+  source: string;
+  /** Line of the call within `source`; -1 for a C caller, 0 when unknown. */
   line: number;
 };
 
@@ -174,10 +179,10 @@ export type RedisLogHandler = (level: number, message: Buffer) => void;
  *     if (cmd === "PING") return { ok: Buffer.from("PONG") };
  *     throw new Error("ERR unknown command");
  *   },
- *   redisPcall(args) {
+ *   redisPcall(args, ctx) {
  *     // Handle redis.pcall() - return error instead of throwing
  *     try {
- *       return this.redisCall(args);
+ *       return this.redisCall(args, ctx);
  *     } catch (err) {
  *       return { err: Buffer.from(err.message) };
  *     }

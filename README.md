@@ -44,8 +44,8 @@ const engine = await LuaWasmEngine.create({
       if (cmd === "GET") return Buffer.from("value");
       return { err: Buffer.from("ERR unknown command") };
     },
-    redisPcall(args) {
-      return this.redisCall(args);
+    redisPcall(args, ctx) {
+      return this.redisCall(args, ctx);
     },
     log(level, message) {
       console.log(`[${level}] ${message.toString()}`);
@@ -154,8 +154,8 @@ The host must implement three callbacks:
 
 ```typescript
 type RedisHost = {
-  redisCall: (args: Buffer[], ctx?: { line: number }) => ReplyValue; // For redis.call()
-  redisPcall: (args: Buffer[], ctx?: { line: number }) => ReplyValue; // For redis.pcall()
+  redisCall: (args: Buffer[], ctx?: RedisCallContext) => ReplyValue; // For redis.call()
+  redisPcall: (args: Buffer[], ctx?: RedisCallContext) => ReplyValue; // For redis.pcall()
   log: (level: number, message: Buffer) => void; // For redis.log()
 };
 ```
@@ -176,10 +176,12 @@ instead of throwing to match Redis behavior.
 
 ### Call context
 
-Both handlers receive `ctx.line`: the script line of the `redis.call`/`redis.pcall`
-(the nearest Lua frame, so calls inside nested functions report their own line; 0
-if unknown). Use it e.g. to emit Redis 6.2's `@user_script: N: ...` pcall error
-prefix.
+Both handlers receive `ctx: { source, line }`, the caller of `redis.call`/`redis.pcall`
+exactly as Redis 6.2's `luaPushError` sees it (stack level 1): `source` is
+`"@user_script"` for the script, the chunk for `loadstring` code, or `"=[C]"` (line
+`-1`) for a C caller such as `pcall(redis.pcall, ...)`. `source` is empty when unknown.
+Use it to emit Redis 6.2's `${source}: ${line}: ...` pcall error prefix. When
+delegating between handlers, pass `ctx` along (`this.redisCall(args, ctx)`).
 
 ### Error metadata
 

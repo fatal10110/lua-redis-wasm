@@ -12,12 +12,18 @@
 #define LOG_WARNING 3
 
 static uint32_t g_resp_version = 2;
-/* Script line of the redis.call/redis.pcall currently dispatched to the host
- * (0 when unknown). Read by the host via current_call_line() from inside its
- * callback, e.g. to build Redis 6.2's "@user_script: N:" pcall error prefix. */
-static uint32_t g_call_line = 0;
+/* Caller of the redis.call/redis.pcall currently dispatched to the host: the
+ * chunk source (NUL-terminated, NULL when unknown) and line. Read by the host
+ * via current_call_source()/current_call_line() from inside its callback, e.g.
+ * to build Redis 6.2's "<source>: <line>: " pcall error prefix. */
+static const char *g_call_source = NULL;
+static int32_t g_call_line = 0;
 
-uint32_t current_call_line(void) {
+uint32_t current_call_source(void) {
+  return (uint32_t)(uintptr_t)g_call_source;
+}
+
+int32_t current_call_line(void) {
   return g_call_line;
 }
 
@@ -342,18 +348,19 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
     lua_pushliteral(L, "__RLUA_E__:command-arg-type");
     return lua_error(L);
   }
-  /* Record the caller's line, skipping C frames (e.g. pcall(redis.call, ...)),
-   * like script_error_handler in runtime.c. Level 0 is this C function. */
+  /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
+   * as-is, without skipping C frames, so pcall(redis.pcall, ...) reports
+   * "=[C]" and line -1. ar.source stays valid for the duration of the call. */
   lua_Debug ar;
+  g_call_source = NULL;
   g_call_line = 0;
-  for (int level = 1; lua_getstack(L, level, &ar); level++) {
-    if (lua_getinfo(L, "l", &ar) && ar.currentline > 0) {
-      g_call_line = (uint32_t)ar.currentline;
-      break;
-    }
+  if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+    g_call_source = ar.source;
+    g_call_line = (int32_t)ar.currentline;
   }
   PtrLen reply = raise_on_error ? host_redis_call((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len)
                                 : host_redis_pcall((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len);
+  g_call_source = NULL;
   g_call_line = 0;
   free(ab.data);
   if (reply.ptr == 0 || reply.len == 0) {

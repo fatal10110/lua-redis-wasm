@@ -1562,10 +1562,10 @@ test("compat: default (no profile) keeps historical behavior", async () => {
   assertGlobalAbsent(engine, "print");
 });
 
-test("redis.call/pcall: handler receives the calling script line", async () => {
-  const lines: Array<[string, number | undefined]> = [];
-  const record = (kind: string) => (args: Buffer[], ctx?: { line: number }) => {
-    lines.push([`${kind} ${args[0].toString()}`, ctx?.line]);
+test("redis.call/pcall: handler receives the caller's source and line", async () => {
+  const calls: Array<[string, string | undefined, number | undefined]> = [];
+  const record = (kind: string) => (args: Buffer[], ctx?: { source: string; line: number }) => {
+    calls.push([`${kind} ${args[0].toString()}`, ctx?.source, ctx?.line]);
     return { err: Buffer.from("ERR nope") };
   };
   const module = await load();
@@ -1581,13 +1581,16 @@ test("redis.call/pcall: handler receives the calling script line", async () => {
       "pcall(function()",
       "  redis.call('c')",
       "end)",
-      "pcall(redis.call, 'd')"
+      "pcall(redis.pcall, 'd')",
+      "loadstring(\"return redis.pcall('e')\")()"
     ].join("\n")
   );
-  assert.deepEqual(lines, [
-    ["pcall a", 2],
-    ["pcall b", 4],
-    ["call c", 8],
-    ["call d", 10] // C frame (pcall) skipped: reports the script line
+  // Stack level 1 as-is, like Redis 6.2's luaPushError: no C-frame skipping.
+  assert.deepEqual(calls, [
+    ["pcall a", "@user_script", 2],
+    ["pcall b", "@user_script", 4],
+    ["call c", "@user_script", 8],
+    ["pcall d", "=[C]", -1],
+    ["pcall e", "return redis.pcall('e')", 1]
   ]);
 });
