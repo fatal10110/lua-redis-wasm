@@ -79,10 +79,11 @@ test("load() rejects on truncated wasm bytes instead of hanging", async () => {
 
 test("load() rejects on non-wasm bytes", async () => {
   const garbage = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03]);
-  await assert.rejects(
-    settleWithin(load({ wasmBytes: garbage })),
-    /Failed to instantiate redis_lua\.wasm/
-  );
+  await assert.rejects(settleWithin(load({ wasmBytes: garbage })), (err: Error) => {
+    assert.match(err.message, /Failed to instantiate redis_lua\.wasm/);
+    assert.ok(err.cause instanceof WebAssembly.CompileError);
+    return true;
+  });
 });
 
 test("load() rejects on an unresolvable import instead of hanging", async () => {
