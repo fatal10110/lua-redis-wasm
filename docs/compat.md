@@ -93,18 +93,21 @@ an integer, so a non-integer numeric prop reads back truncated.
   the other `redis.*` functions raise `{err=...}` tables, and the global `pcall`
   returns the `err` string of a caught error table. `redis-6.2` raises plain
   strings. Override with `compat.tableErrors`.
-- `redis.error_reply`, `redis.status_reply`, `redis.call` / `redis.pcall` and `redis.log`
-  follow the profile, checked against each version's source (`src/scripting.c`
-  in 6.2, `src/script_lua.c` later):
+- `redis.error_reply`, `redis.status_reply`, `redis.call` / `redis.pcall`,
+  `redis.log` and `redis.sha1hex` follow the profile, checked against each
+  version's source (`src/scripting.c` in 6.2, `src/script_lua.c` later):
   - with the Redis 7.0+ error model, `redis.error_reply` derives the code
     (`'foo'` → `ERR foo`, `'-ERR x'` → `ERR x`), a bad `error_reply` /
     `status_reply` call (anything but one string argument) returns
-    `{err='ERR wrong number or type of arguments'}`, and `redis.log` errors
-    carry the `ERR` code; Redis 6.2 returns the `error_reply` string unchanged,
-    positions a bad `error_reply` / `status_reply` call as
+    `{err='ERR wrong number or type of arguments'}`, and `redis.log`,
+    `redis.setresp` and `redis.sha1hex` errors carry the `ERR` code; Redis 6.2
+    returns the `error_reply` string unchanged, positions a bad `error_reply` /
+    `status_reply` call as
     `@user_script: <line>: wrong number or type of arguments`, and raises
-    `redis.log` and `redis.setresp` argument errors without a code. These
-    follow `compat.tableErrors`.
+    `redis.log`, `redis.setresp` and `redis.sha1hex` argument errors without a
+    code or position. These follow `compat.tableErrors`.
+  - `redis.sha1hex` with no argument or more than one raises
+    `wrong number of arguments` (`ERR`-coded in the Redis 7.0+ error model).
   - a `redis.pcall` argument that is not a string or number returns (does not
     raise) `{err='ERR Lua redis lib command arguments must be strings or
     integers'}` (Redis 7.x/8.0 profiles, no profile), `{err='ERR Command

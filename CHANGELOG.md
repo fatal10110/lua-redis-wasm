@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An uncaught string error keeps a leading `ERR`** (#93).
+  `error('ERR x', 0)` now reaches the host as `{ err: "ERR x", code: "ERR" }`
+  (was `err: "x"`), so the host writes `-ERR ERR x` like Redis 7.0+ and
+  Valkey. Redis 6.2 keeps the whole message too. In the `redis-6.2` model this
+  also applies to a host error that `redis.call` raises: `ERR unknown command`
+  → `err` `ERR unknown command` (Redis 6.2:
+  `... @user_script:1: ERR unknown command`). The engine's own errors still
+  never read `ERR ERR`: in the Redis 7 model they are raised as `{err='ERR ...'}`
+  tables, and with `redis-6.2` as bare strings (`reached lua stack limit`,
+  `Script killed by fuel limit`, `unknown error`, ...), which is what a
+  `redis-6.2` script that catches one now sees.
+- **`redis.sha1hex` checks its arity** (#95). No argument or more than one
+  raises `wrong number of arguments`, as in Redis (was Lua's `bad argument #1`
+  error, or the hash of the first argument). A script that catches it sees
+  `ERR wrong number of arguments`, or `wrong number of arguments` with
+  `redis-6.2`.
+
 ## [2.0.0] - 2026-09-27
 
 ### Breaking changes

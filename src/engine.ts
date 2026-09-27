@@ -658,7 +658,7 @@ function errorMessage(err: unknown): string {
  * (pcall). A thrown exception is a host failure, not a reply the host built,
  * so it gets the generic `ERR` code when its message has none (a returned
  * `{ err }` is passed on as is). If even that cannot be allocated, the zero
- * PtrLen makes C raise "ERR empty reply from host".
+ * PtrLen makes C raise "empty reply from host" (code ERR).
  */
 function writeReplyImport(
   exports: WasmExports,
@@ -714,7 +714,7 @@ function writeStatusImport(
 
 /**
  * Completes the redis.sha1hex import. On failure (heap exhaustion) the zero
- * PtrLen makes C raise "ERR sha1hex failed".
+ * PtrLen makes C raise "sha1hex failed" (code ERR).
  */
 function writeSha1Import(
   exports: WasmExports,

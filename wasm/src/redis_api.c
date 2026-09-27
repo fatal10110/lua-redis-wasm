@@ -79,6 +79,20 @@ int redis_raise_error(lua_State *L, const char *msg) {
   return lua_error(L);
 }
 
+/* Raises an error of the redis.* API given without a code (a bad argument to
+ * redis.log / redis.setresp / redis.sha1hex, or a failure of the engine's own).
+ * Redis 7.0+ raises these with luaPushError, which adds the generic ERR code;
+ * Redis 6.2 raised the bare message string (lua_pushstring + lua_error), so
+ * without table errors there is no code. Either way the engine's own errors
+ * never reach the host as a string that starts with "ERR " (#93): a string
+ * error is reported with the ERR code in front of its whole message.
+ * Derived from luaLogCommand / luaSetResp / luaRedisSha1hexCommand in Valkey
+ * 8.0's src/script_lua.c (same in Redis 7.2.4) and Redis 6.2's
+ * src/scripting.c, BSD-3-Clause. */
+static int raise_api_error(lua_State *L, const char *msg) {
+  return redis_raise_error(L, g_table_errors ? lua_pushfstring(L, "ERR %s", msg) : msg);
+}
+
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
   dst[1] = (uint8_t)((value >> 8) & 0xFF);
@@ -374,12 +388,14 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
    * key) before recursing: grow the Lua stack like redisProtocolToLuaType
    * instead of writing past its end, and cap the recursion depth. Redis panics
    * here; this runs under decode_reply_protected, so it surfaces as a normal
-   * script error instead. */
+   * script error instead, raised like the engine's other redis.call failures
+   * (raise_api_error): Redis's "reached lua stack limit" wording, ERR-coded
+   * with table errors. */
   if (depth > REDIS_REPLY_MAX_DEPTH || !lua_checkstack(L, 3)) {
-    return luaL_error(L, "ERR reached lua stack limit");
+    return raise_api_error(L, "reached lua stack limit");
   }
   if (*offset + 5 > len) {
-    return luaL_error(L, "ERR reply decoding failed");
+    return raise_api_error(L, "reply decoding failed");
   }
   uint8_t type = buf[*offset];
   uint32_t count_or_len = read_u32_le(buf + *offset + 1);
@@ -396,7 +412,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       return 1;
     case REPLY_INT: {
       if (*offset + 8 > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       int64_t value = read_i64_le(buf + *offset);
       *offset += 8;
@@ -405,7 +421,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
     }
     case REPLY_BULK: {
       if (*offset + count_or_len > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       lua_pushlstring(L, (const char *)(buf + *offset), count_or_len);
       *offset += count_or_len;
@@ -413,7 +429,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
     }
     case REPLY_STATUS: {
       if (*offset + count_or_len > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       int result = push_status_table(L, buf + *offset, count_or_len);
       *offset += count_or_len;
@@ -421,7 +437,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
     }
     case REPLY_ERROR: {
       if (*offset + count_or_len > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       const uint8_t *data = buf + *offset;
       *offset += count_or_len;
@@ -438,7 +454,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       }
       for (uint32_t i = 1; i <= count_or_len; i++) {
         if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
-          return luaL_error(L, "ERR reply decoding failed");
+          return raise_api_error(L, "reply decoding failed");
         }
         lua_rawseti(L, -2, (int)i);
       }
@@ -446,14 +462,14 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
     }
     case REPLY_BOOL:
       if (*offset + 1 > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       lua_pushboolean(L, buf[*offset] != 0);
       *offset += 1;
       return 1;
     case REPLY_DOUBLE:
       if (*offset + 8 > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       lua_createtable(L, 0, 1);
       lua_pushnumber(L, (lua_Number)read_f64_le(buf + *offset));
@@ -462,7 +478,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       return 1;
     case REPLY_BIG_NUMBER:
       if (*offset + count_or_len > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       lua_createtable(L, 0, 1);
       lua_pushlstring(L, (const char *)(buf + *offset), count_or_len);
@@ -472,12 +488,12 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
     case REPLY_VERBATIM: {
       size_t payload_end = *offset + count_or_len;
       if (count_or_len < 4 || payload_end > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       uint32_t format_len = read_u32_le(buf + *offset);
       *offset += 4;
       if (*offset + format_len > payload_end) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       size_t string_len = payload_end - *offset - format_len;
       lua_createtable(L, 0, 1);
@@ -486,7 +502,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       lua_setfield(L, -2, "format");
       *offset += format_len;
       if (*offset + string_len > len) {
-        return luaL_error(L, "ERR reply decoding failed");
+        return raise_api_error(L, "reply decoding failed");
       }
       lua_pushlstring(L, (const char *)(buf + *offset), string_len);
       lua_setfield(L, -2, "string");
@@ -500,7 +516,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       for (uint32_t i = 0; i < count_or_len; i++) {
         if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1 ||
             decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
-          return luaL_error(L, "ERR reply decoding failed");
+          return raise_api_error(L, "reply decoding failed");
         }
         lua_settable(L, -3);
       }
@@ -511,7 +527,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       lua_createtable(L, 0, (int)count_or_len);
       for (uint32_t i = 0; i < count_or_len; i++) {
         if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
-          return luaL_error(L, "ERR reply decoding failed");
+          return raise_api_error(L, "reply decoding failed");
         }
         lua_pushboolean(L, 1);
         lua_settable(L, -3);
@@ -519,7 +535,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       lua_setfield(L, -2, "set");
       return 1;
     default:
-      return luaL_error(L, "ERR unknown reply type");
+      return raise_api_error(L, "unknown reply type");
   }
 }
 
@@ -561,7 +577,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   g_call_line = 0;
   free(ab.data);
   if (reply.ptr == 0 || reply.len == 0) {
-    return redis_raise_error(L, "ERR empty reply from host");
+    return raise_api_error(L, "empty reply from host");
   }
   /* Decode in protected mode so the host reply is freed before any error
    * (command error, nil table key, decode failure) propagates to the script. */
@@ -608,8 +624,7 @@ static int stash_host_failure(lua_State *L) {
  * host's buffer; if the copy fails, that memory error is raised instead. */
 static int raise_host_failure(lua_State *L, PtrLen failure) {
   if (failure.ptr == 0) {
-    lua_pushliteral(L, "ERR host callback failed");
-    return lua_error(L);
+    return raise_api_error(L, "host callback failed");
   }
   HostFailure copy = {(const char *)(uintptr_t)failure.ptr, failure.len};
   int status = lua_cpcall(L, stash_host_failure, &copy);
@@ -625,16 +640,6 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
   lua_pushnil(L);
   lua_rawset(L, LUA_REGISTRYINDEX);
   return lua_error(L);
-}
-
-/* Raises a redis.log / redis.setresp argument error given without a code.
- * Redis 7.0+ raises these with luaPushError, which adds the generic ERR code;
- * Redis 6.2 raised the bare message string (lua_pushstring + lua_error), so
- * without table errors there is no code.
- * Derived from luaLogCommand / luaSetResp in Valkey 8.0's src/script_lua.c
- * (same in Redis 7.2.4) and Redis 6.2's src/scripting.c, BSD-3-Clause. */
-static int raise_api_error(lua_State *L, const char *msg) {
-  return redis_raise_error(L, g_table_errors ? lua_pushfstring(L, "ERR %s", msg) : msg);
 }
 
 /* redis.log(level, ...). Mirrors Redis's luaLogCommand (src/script_lua.c): the
@@ -688,12 +693,24 @@ static int l_redis_log(lua_State *L) {
   return 0;
 }
 
+/* redis.sha1hex(s). Like luaRedisSha1hexCommand, anything but exactly one
+ * argument raises "wrong number of arguments" (#95): {err="ERR ..."} with
+ * table errors, the bare string in Redis 6.2 (lua_pushstring + lua_error, no
+ * position). The one argument is read with luaL_checklstring: a number
+ * converts as with Redis's lua_tolstring, while a value with no string form
+ * (nil, a table) raises Lua's bad-argument error, where Redis hashes it as the
+ * empty string.
+ * Derived from luaRedisSha1hexCommand in Valkey 8.0's src/script_lua.c (same
+ * in Redis 7.2.4) and Redis 6.2's src/scripting.c, BSD-3-Clause. */
 static int l_redis_sha1hex(lua_State *L) {
+  if (lua_gettop(L) != 1) {
+    return raise_api_error(L, "wrong number of arguments");
+  }
   size_t len = 0;
   const char *data = luaL_checklstring(L, 1, &len);
   PtrLen out = host_sha1hex((uint32_t)(uintptr_t)data, (uint32_t)len);
   if (out.ptr == 0 || out.len == 0) {
-    return luaL_error(L, "ERR sha1hex failed");
+    return raise_api_error(L, "sha1hex failed");
   }
   lua_pushlstring(L, (const char *)(uintptr_t)out.ptr, out.len);
   free_mem(out.ptr);

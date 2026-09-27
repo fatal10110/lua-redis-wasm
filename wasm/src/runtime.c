@@ -301,7 +301,9 @@ static PtrLen reply_script_error(const char *msg, uint32_t line, uint8_t flags,
  *   error(redis.error_reply(...))): its `err` field, like
  *   luaExtractErrorInformation, or "ERR unknown error" when that is not a
  *   string (that fallback is derived from luaExtractErrorInformation in
- *   Valkey 8.0's src/script_lua.c, valkey-io/valkey#2229, BSD-3-Clause). Its
+ *   Valkey 8.0's src/script_lua.c, valkey-io/valkey#2229, BSD-3-Clause;
+ *   "unknown error" in the Redis 6.2 model, where the message is sent as a
+ *   string error and so gets its ERR code from the host, #93). Its
  *   `source`/`line` fields are not read: Redis's handler overwrites both with
  *   the error point, which is the line recorded here (#37);
  * - a number becomes its string form;
@@ -333,7 +335,11 @@ static int script_error_handler(lua_State *L) {
     case LUA_TTABLE:
       lua_getfield(L, 1, "err");
       if (!lua_isstring(L, -1)) {
-        lua_pushliteral(L, "ERR unknown error");
+        if (redis_table_errors()) {
+          lua_pushliteral(L, "ERR unknown error");
+        } else {
+          lua_pushliteral(L, "unknown error");
+        }
       }
       lua_tostring(L, -1); /* a numeric err converts in place */
       g_error_from_table = 1;
@@ -969,7 +975,13 @@ static void open_allowed_libs(lua_State *L, uint32_t flags) {
 }
 
 #define FUEL_KILL_MASK (LUA_MASKLINE | LUA_MASKCOUNT)
-#define FUEL_KILL_MSG "ERR Script killed by fuel limit"
+/* The kill's message in the profile's error model, like Redis's
+ * luaMaskCountHook: ERR-coded in the Redis 7 model (luaPushError adds the
+ * code), bare in Redis 6.2 (lua_pushstring), whose string errors the host
+ * reports with the ERR code in front (#93). A literal, so raising it from the
+ * hook formats nothing. */
+#define FUEL_KILL_MSG() \
+  (redis_table_errors() ? "ERR Script killed by fuel limit" : "Script killed by fuel limit")
 
 /* Set once the budget is spent; cleared by reset_fuel. run_script then replies
  * with the kill whatever the script did afterwards, e.g. a coroutine.resume
@@ -1022,7 +1034,7 @@ static void fuel_hook(lua_State *L, lua_Debug *ar) {
     lua_sethook(g_state, fuel_hook, FUEL_KILL_MASK, 1);
   }
   L->errfunc = 0;
-  redis_raise_error(L, FUEL_KILL_MSG);
+  redis_raise_error(L, FUEL_KILL_MSG());
 }
 
 static void reset_fuel(void) {
@@ -1369,7 +1381,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, script_len, "@user_script") != 0) {
     const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0, 0, NULL);
+    PtrLen out = reply_script_error(err ? err : "script load failed", 0, 0, NULL);
     lua_settop(g_state, 0);
     return out;
   }
@@ -1385,9 +1397,10 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   // run_guarded acts on the result once the reply is built.
   g_script_gc_status = collect_if_heap_high();
   if (g_fuel_killed) {
-    // Whether the kill escaped (status != 0) or was swallowed as a value. The
-    // message carries its code, like the error table Redis 7 raises for a kill.
-    PtrLen out = reply_script_error(FUEL_KILL_MSG, g_fuel_kill_line,
+    // Whether the kill escaped (status != 0) or was swallowed as a value. In
+    // the Redis 7 model the message carries its code, like the error table
+    // Redis 7 raises for a kill; in Redis 6.2's it is a string error.
+    PtrLen out = reply_script_error(FUEL_KILL_MSG(), g_fuel_kill_line,
                                     redis_table_errors() ? SCRIPT_ERROR_FROM_TABLE : 0, NULL);
     lua_settop(g_state, 0);
     return out;
@@ -1415,7 +1428,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
       }
     }
     const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line, flags,
+    PtrLen out = reply_script_error(err ? err : "script execution failed", g_error_line, flags,
                                     engine.kind ? &engine : NULL);
     lua_settop(g_state, 0);
     return out;

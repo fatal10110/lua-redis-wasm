@@ -89,7 +89,7 @@ test(
     );
     assert.deepEqual(JSON.parse(stdout), {
       reply: ["got:k", "a\x00b"],
-      error: { err: "boom", code: "ERR" }
+      error: { err: "ERR boom", code: "ERR" }
     });
   }
 );

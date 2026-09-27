@@ -390,37 +390,58 @@ test("host boundary: script buffers are freed when the script raises a host erro
   exports._free_mem = realFree;
 });
 
-test("host boundary: heap exhaustion while encoding a host reply raises a Lua error", async () => {
-  let failAlloc = false;
-  const engine = (await load()).create(
-    host({
-      redisCall: () => {
-        failAlloc = true;
-        return Buffer.from("value");
-      },
-      log() {
-        failAlloc = true;
-        throw new Error("boom");
-      },
-    }),
-  );
-  const exports = exportsOf(engine);
-  const realAlloc = exports._alloc;
-  exports._alloc = (size: number) => (failAlloc ? 0 : realAlloc(size));
+for (const profile of [undefined, "redis-6.2"] as const) {
+  const name = profile ?? "default";
 
-  // Neither the reply nor the fallback error reply can be allocated.
-  assertErr(engine.eval("return redis.call('GET', 'k')"), /empty reply from host/);
-  failAlloc = false;
-  // The log error message cannot be allocated: C raises a generic error.
-  assertErr(engine.eval("redis.log(redis.LOG_NOTICE, 'x')"), "host callback failed");
-  failAlloc = false;
-  // The 40-byte sha1hex digest cannot be allocated.
-  exports._alloc = (size: number) => (size === 40 ? 0 : realAlloc(size));
-  assertErr(engine.eval("return redis.sha1hex('x')"), /sha1hex failed/);
+  test(`host boundary (${name}): heap exhaustion while encoding a host reply raises a Lua error`, async () => {
+    let failAlloc = false;
+    const engine = (await load({ profile })).create(
+      host({
+        redisCall: () => {
+          failAlloc = true;
+          return Buffer.from("value");
+        },
+        log() {
+          failAlloc = true;
+          throw new Error("boom");
+        },
+      }),
+    );
+    const exports = exportsOf(engine);
+    const realAlloc = exports._alloc;
+    exports._alloc = (size: number) => (failAlloc ? 0 : realAlloc(size));
+    // The engine's own errors reach the host with code ERR and their message,
+    // never as "ERR ERR ..." (#93); a script that catches one sees it ERR-coded
+    // in the Redis 7 error model, bare in Redis 6.2's.
+    const engineErr = (value: ReplyValue, message: string) => {
+      const reply = assertErr(value, message);
+      assert.equal(reply.code?.toString("utf8"), "ERR");
+      assert.equal(reply.meta?.line, 1);
+    };
+    const caught = (message: string) => Buffer.from(profile === "redis-6.2" ? message : `ERR ${message}`);
 
-  exports._alloc = realAlloc;
-  assertUsable(engine);
-});
+    // Neither the reply nor the fallback error reply can be allocated.
+    engineErr(engine.eval("return redis.call('GET', 'k')"), "empty reply from host");
+    failAlloc = false;
+    assert.deepEqual(engine.eval("return select(2, pcall(redis.call, 'GET', 'k'))"), caught("empty reply from host"));
+    failAlloc = false;
+    // The log error message cannot be allocated: C raises a generic error.
+    engineErr(engine.eval("redis.log(redis.LOG_NOTICE, 'x')"), "host callback failed");
+    failAlloc = false;
+    assert.deepEqual(
+      engine.eval("return select(2, pcall(redis.log, redis.LOG_NOTICE, 'x'))"),
+      caught("host callback failed"),
+    );
+    failAlloc = false;
+    // The 40-byte sha1hex digest cannot be allocated.
+    exports._alloc = (size: number) => (size === 40 ? 0 : realAlloc(size));
+    engineErr(engine.eval("return redis.sha1hex('x')"), "sha1hex failed");
+    assert.deepEqual(engine.eval("return select(2, pcall(redis.sha1hex, 'x'))"), caught("sha1hex failed"));
+
+    exports._alloc = realAlloc;
+    assertUsable(engine);
+  });
+}
 
 test("host boundary: a redisProps allocation failure fails create()", async () => {
   const module = await load({ redisProps: { V: { value: "7.4.0" } } });
