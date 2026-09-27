@@ -280,7 +280,9 @@ table. A host command error becomes the same table `redis.pcall` returns:
 `{err='CODE message', ignore_error_stats_update=true}`, with the generic `ERR` code
 added to a message that has no space and trailing CR/LF trimmed, as in Redis. With
 `profile: "redis-6.2"` errors are plain strings and a host error reaches the script
-verbatim. The `compat.tableErrors` option overrides the profile. What the host
+verbatim; the other `redis.*` errors carry no `ERR` code and `redis.error_reply`
+returns its argument unchanged, as in Redis 6.2. The `compat.tableErrors` option
+overrides the profile. What the host
 receives when the error aborts the script is the same in both models, except that
 the table model trims CR/LF around the message after the code, as Redis does
 (host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`).
@@ -291,7 +293,7 @@ Called when Lua executes `redis.log(level, ...)`. Level is a numeric Redis log l
 (`redis.LOG_DEBUG`..`redis.LOG_WARNING`), truncated to an integer, which must be
 0..3. As in Redis, every argument after the level is joined with a space into
 `message`. Arguments `lua_tolstring` cannot convert (nil, booleans, tables) are
-skipped and get no separator of their own. Errors raised:
+skipped and get no separator of their own. Errors raised (default wording):
 
 - fewer than two arguments: `ERR redis.log() requires two arguments or more.`
 - a level that is not a number: `ERR First argument must be a number (log level).`
@@ -299,10 +301,18 @@ skipped and get no separator of their own. Errors raised:
 
 The handler receives every message, and filtering by verbosity is up to the host.
 
-`redis.log` and `redis.error_reply` follow Redis 7.4+ / Valkey semantics and wording
-whatever the `profile` compat option. Older versions differ: Redis 7.0/7.2 say
-`Invalid debug level.`, and Redis 6.2 returns the `error_reply` string unchanged and
-omits the `ERR` prefix on `redis.log` errors.
+The wording follows the `profile` compat option, as in each version's source:
+
+| profile | arity error | level error | `ERR` code |
+|---|---|---|---|
+| `redis-6.2` | `redis.log() requires ...` | `Invalid debug level.` | no |
+| `redis-7.0`, `redis-7.2` | `redis.log() requires ...` | `Invalid debug level.` | yes |
+| `redis-7.4`, `redis-8.0`, no profile | `redis.log() requires ...` | `Invalid log level.` | yes |
+| `valkey-8.0`, `valkey-9.0` | `server.log() requires ...` | `Invalid log level.` | yes |
+
+The `ERR` code came with the Redis 7 error model, so it follows
+`compat.tableErrors` (see [Error objects inside the script](#error-objects-inside-the-script));
+the wording itself follows the profile only.
 
 ## Reply Types
 
@@ -340,11 +350,17 @@ On decode, an error payload of the form `CODE message` is split into `err` (the
 message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
 `code` is prepended back, so the wire form is always Redis's `CODE message`.
 
-`redis.error_reply(msg)` follows Redis: one leading `-` is dropped. With no space, `ERR `
-is prepended (`'foo'` → `ERR foo`). Otherwise the message is kept and its first token
-is the code, whatever its case (`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
+`redis.error_reply(msg)` follows Redis 7.0+: one leading `-` is dropped. With no space,
+`ERR ` is prepended (`'foo'` → `ERR foo`). Otherwise the message is kept and its first
+token is the code, whatever its case (`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
 On decode, a token that is not uppercase, like `My`, stays in `err` with no `code`.
-The wire bytes are the same either way.
+The wire bytes are the same either way. Any call but one string argument returns
+`{err='ERR wrong number or type of arguments'}`.
+
+With `profile: "redis-6.2"` (or `compat.tableErrors: false`) it follows Redis 6.2
+instead: the string is returned unchanged (`'foo'` → `{err='foo'}`, `'-ERR x'` →
+`{err='-ERR x'}`), and a bad call returns
+`{err='@user_script: <line>: wrong number or type of arguments'}` with no code.
 
 ### Determining the Response Type
 

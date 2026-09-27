@@ -24,6 +24,12 @@ static uint32_t g_resp_version = 2;
  * raised as {err=...} tables and the global pcall unwraps them. Off, errors are
  * plain strings as in Redis 6.2. */
 static int g_table_errors = 0;
+/* redis.log error wording of the profile (compat flags, snapshot by
+ * register_redis_api): "Invalid debug level." (Redis 6.2-7.2) instead of
+ * "Invalid log level.", and "server.log()" (Valkey 8.0+) instead of
+ * "redis.log()" in the arity error. */
+static int g_log_debug_level = 0;
+static int g_server_log_name = 0;
 /* Caller of the redis.call/redis.pcall currently dispatched to the host: the
  * chunk source (NUL-terminated, NULL when unknown) and line. Read by the host
  * via current_call_source()/current_call_line() from inside its callback, e.g.
@@ -558,6 +564,15 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
   return lua_error(L);
 }
 
+/* Raises a redis.log argument error. Redis 7.0+ raises it with luaPushError,
+ * which adds the generic ERR code; Redis 6.2 raised the bare message string
+ * (lua_pushstring + lua_error), so without table errors there is no code.
+ * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c and
+ * Redis 6.2 src/scripting.c (luaLogCommand), BSD-3-Clause. */
+static int raise_log_error(lua_State *L, const char *msg) {
+  return redis_raise_error(L, g_table_errors ? lua_pushfstring(L, "ERR %s", msg) : msg);
+}
+
 /* redis.log(level, ...). Mirrors Redis's luaLogCommand (src/script_lua.c): the
  * level must be a number (numeric strings count, like lua_isnumber) truncated to
  * an int in 0..3, and every argument after it is converted with lua_tolstring
@@ -565,21 +580,25 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
  * tables, ...) are skipped, with no separator of their own; a separator is
  * written before every converted argument except the first one after the level,
  * exactly as Redis does. Verbosity filtering is left to the host, which receives
- * every message. */
+ * every message.
+ * The argument errors follow the profile's wording: Valkey 8.0+ names
+ * "server.log()" in the arity error, and Redis 6.2-7.2 say "Invalid debug
+ * level." (Redis 7.4 changed it to "Invalid log level.", as Valkey 8.0 did). */
 static int l_redis_log(lua_State *L) {
   int argc = lua_gettop(L);
   if (argc < 2) {
-    return redis_raise_error(L, "ERR redis.log() requires two arguments or more.");
+    return raise_log_error(L, g_server_log_name ? "server.log() requires two arguments or more."
+                                                : "redis.log() requires two arguments or more.");
   }
   if (!lua_isnumber(L, 1)) {
-    return redis_raise_error(L, "ERR First argument must be a number (log level).");
+    return raise_log_error(L, "First argument must be a number (log level).");
   }
   /* Redis assigns the number to an int (truncation toward zero) and then checks
    * LL_DEBUG..LL_WARNING. Range-check the double first so NaN / huge values
    * never reach the float-to-int conversion (which traps in WASM). */
   lua_Number raw_level = lua_tonumber(L, 1);
   if (!(raw_level > -1 && raw_level < 4)) {
-    return redis_raise_error(L, "ERR Invalid log level.");
+    return raise_log_error(L, g_log_debug_level ? "Invalid debug level." : "Invalid log level.");
   }
   int level = (int)raw_level;
 
@@ -617,14 +636,46 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
-/* redis.error_reply(msg). Mirrors Redis's luaRedisErrorReplyCommand +
- * luaPushErrorBuff (src/script_lua.c):
+/* redis.error_reply(msg) without table errors, like Redis 6.2's
+ * luaRedisErrorReplyCommand (luaRedisReturnSingleFieldTable + luaPushError in
+ * src/scripting.c, BSD-3-Clause):
+ * - one string argument is returned unchanged as {err=msg} (binary-safe, no
+ *   code added, no '-' dropped);
+ * - anything else returns {err="<source>: <line>: wrong number or type of
+ *   arguments"}, positioned at stack level 1 as-is (the script, or "=[C]" and
+ *   -1 for a C caller such as pcall), without a code. */
+static int l_redis_error_reply_legacy(lua_State *L) {
+  if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+    static const char bad_args[] = "wrong number or type of arguments";
+    lua_Debug ar;
+    lua_createtable(L, 0, 1);
+    if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+      lua_pushfstring(L, "%s: %d: %s", ar.source, ar.currentline, bad_args);
+    } else {
+      lua_pushstring(L, bad_args);
+    }
+    lua_setfield(L, -2, "err");
+    return 1;
+  }
+  lua_createtable(L, 0, 1);
+  lua_pushvalue(L, 1);
+  lua_setfield(L, -2, "err");
+  return 1;
+}
+
+/* redis.error_reply(msg). With table errors (Redis 7.0+ / Valkey), mirrors
+ * luaRedisErrorReplyCommand + luaPushErrorBuff (src/script_lua.c); both came
+ * with the Redis 7 error model (redis/redis#10329):
  * - anything but exactly one string argument returns (does not raise)
  *   {err="ERR wrong number or type of arguments"};
  * - the message is read as a C string (cut at the first NUL) and one leading
  *   '-' is dropped;
- * - the rest is split into code and message by push_error_reply. */
+ * - the rest is split into code and message by push_error_reply.
+ * Without table errors it behaves like Redis 6.2 (l_redis_error_reply_legacy). */
 static int l_redis_error_reply(lua_State *L) {
+  if (!g_table_errors) {
+    return l_redis_error_reply_legacy(L);
+  }
   if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
     static const char bad_args[] = "ERR wrong number or type of arguments";
     return push_error_table(L, (const uint8_t *)bad_args, (uint32_t)(sizeof(bad_args) - 1));
@@ -806,6 +857,8 @@ static int l_pcall_unwrap(lua_State *L) {
 
 void register_redis_api(lua_State *L) {
   g_table_errors = compat_table_errors();
+  g_log_debug_level = compat_log_debug_level();
+  g_server_log_name = compat_server_log_name();
   if (g_table_errors) {
     lua_pushcfunction(L, l_pcall_unwrap);
     lua_setglobal(L, "pcall");

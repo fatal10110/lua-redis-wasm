@@ -614,11 +614,18 @@ static void remove_package_entry(lua_State *L, const char *name) {
 #define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
 #define COMPAT_RESEED_RANDOM 0x8u // reseed math.random with 0 per script (Redis 6.2 only)
 #define COMPAT_TABLE_ERRORS 0x10u // {err=...} error tables + unwrapping pcall (Redis 7.0+)
+// Error wording only, set from the profile (no CompatOverrides field):
+#define COMPAT_LOG_DEBUG_LEVEL 0x20u // redis.log: "Invalid debug level." (Redis 6.2-7.2)
+#define COMPAT_SERVER_LOG_NAME 0x40u // redis.log: "server.log() requires ..." (Valkey 8.0+)
 static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS | COMPAT_TABLE_ERRORS;
 
 void set_compat(uint32_t flags) { g_compat_flags = flags; }
 
 int compat_table_errors(void) { return (g_compat_flags & COMPAT_TABLE_ERRORS) != 0; }
+
+int compat_log_debug_level(void) { return (g_compat_flags & COMPAT_LOG_DEBUG_LEVEL) != 0; }
+
+int compat_server_log_name(void) { return (g_compat_flags & COMPAT_SERVER_LOG_NAME) != 0; }
 
 // Mirror Redis's allow/deny arrays (src/script_lua.c) rather than a hand-rolled
 // deny set. Redis exposes loadstring/load/collectgarbage/gcinfo (lua_builtins_

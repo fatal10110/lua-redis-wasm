@@ -591,6 +591,8 @@ const COMPAT_OS = 0x2;
 const COMPAT_SERVER_ALIAS = 0x4;
 const COMPAT_RESEED_RANDOM = 0x8;
 const COMPAT_TABLE_ERRORS = 0x10;
+const COMPAT_LOG_DEBUG_LEVEL = 0x20;
+const COMPAT_SERVER_LOG_NAME = 0x40;
 
 /**
  * Profile presets -> the Lua behavior flags. Mirrors the
@@ -609,6 +611,22 @@ const COMPAT_PROFILES: Record<CompatProfile, Required<CompatOverrides>> = {
 // Default when no profile is given: preserve the historical behavior (≈ valkey-8.0).
 const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
 
+/**
+ * Error wording that differs by version but is no behavior of its own, so it
+ * follows the profile only (no override): `redis.log` says "Invalid debug
+ * level." up to Redis 7.2, and Valkey names `server.log()` in its arity error.
+ * No profile keeps the historical Redis 7.4+ wording.
+ */
+const COMPAT_PROFILE_WORDING: Record<CompatProfile, number> = {
+  "redis-6.2": COMPAT_LOG_DEBUG_LEVEL,
+  "redis-7.0": COMPAT_LOG_DEBUG_LEVEL,
+  "redis-7.2": COMPAT_LOG_DEBUG_LEVEL,
+  "redis-7.4": 0,
+  "redis-8.0": 0,
+  "valkey-8.0": COMPAT_SERVER_LOG_NAME,
+  "valkey-9.0": COMPAT_SERVER_LOG_NAME,
+};
+
 /** Resolve a profile + per-flag overrides to the u8 bitmask the WASM expects. */
 function resolveCompatFlags(
   profile?: CompatProfile,
@@ -623,7 +641,8 @@ function resolveCompatFlags(
     (merged.os ? COMPAT_OS : 0) |
     (merged.serverAlias ? COMPAT_SERVER_ALIAS : 0) |
     (merged.reseedRandom ? COMPAT_RESEED_RANDOM : 0) |
-    (merged.tableErrors ? COMPAT_TABLE_ERRORS : 0)
+    (merged.tableErrors ? COMPAT_TABLE_ERRORS : 0) |
+    (profile ? COMPAT_PROFILE_WORDING[profile] : 0)
   );
 }
 

@@ -287,6 +287,8 @@ export type EngineLimits = {
  * that differ across versions (see {@link CompatOverrides}) are emulated.
  * Aliases collapse to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
  * valkey-8.0 == valkey-9.0). Use {@link CompatOverrides} to tweak a single flag.
+ * The profile also selects the version's `redis.log` error wording, which has
+ * no override.
  */
 export type CompatProfile =
   | "redis-6.2"
@@ -319,8 +321,11 @@ export type CompatOverrides = {
   /**
    * Redis 7 error model: `redis.call` and the other `redis.*` functions raise
    * errors as `{err=...}` tables, and the global `pcall` returns the `err`
-   * string of a caught error table (`xpcall` handlers see the table). Off, errors
-   * are plain strings, as in Redis 6.2. Redis 7.0+ / Valkey. Default: true.
+   * string of a caught error table (`xpcall` handlers see the table). Also
+   * `redis.error_reply` derives the error code (`'foo'` -> `ERR foo`) and the
+   * `redis.log` argument errors carry the `ERR` code. Off, errors are plain
+   * strings and `redis.error_reply` returns its argument unchanged, as in
+   * Redis 6.2. Redis 7.0+ / Valkey. Default: true.
    */
   tableErrors?: boolean;
 };

@@ -66,6 +66,21 @@ through `redisProps`.
   the other `redis.*` functions raise `{err=...}` tables, and the global `pcall`
   returns the `err` string of a caught error table. `redis-6.2` raises plain
   strings. Override with `compat.tableErrors`.
+- `redis.error_reply` and `redis.log` follow the profile, checked against each
+  version's source (`src/scripting.c` in 6.2, `src/script_lua.c` later):
+  - with the Redis 7.0+ error model, `redis.error_reply` derives the code
+    (`'foo'` → `ERR foo`, `'-ERR x'` → `ERR x`) and `redis.log` errors carry the
+    `ERR` code; Redis 6.2 returns the `error_reply` string unchanged, positions a
+    bad call as `@user_script: <line>: wrong number or type of arguments`, and
+    raises `redis.log` errors without a code. These follow `compat.tableErrors`.
+  - an invalid `redis.log` level is `Invalid debug level.` on `redis-6.2`,
+    `redis-7.0` and `redis-7.2`, and `Invalid log level.` on `redis-7.4`,
+    `redis-8.0` and the Valkey profiles (redis/redis#12636);
+  - the Valkey profiles name `server.log()` in the arity error
+    (`server.log() requires two arguments or more.`), the Redis ones
+    `redis.log()`.
+  - This wording follows the profile only (there is no override); with no
+    profile it is the Redis 7.4+ wording (`redis.log()`, `Invalid log level.`).
 - An uncaught table error is reported by its `err` field, like Redis 7.0+'s
   `luaExtractErrorInformation`. This applies to every profile; Redis 6.2 itself
   fails on a table error.
