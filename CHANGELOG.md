@@ -52,12 +52,38 @@ Each item says what changed and what to do. Details are in the entries below.
   script's return value now reach the host as typed replies even without
   `redis.setresp(3)` (they were empty arrays). A host serving RESP2 clients must
   convert them itself (see the README).
-- **Scripts may see different values**, matching real Redis: `math.random`
-  uses Redis's generator (#45), so seeded sequences differ from 1.x; number
-  arguments to `redis.call` are formatted like Redis 7.4+ (`1e15` →
-  `1000000000000000`, #68); after `redis.setresp(3)` a null host reply is
-  `nil`, not `false` (#31); a returned function or userdata becomes `nil`
-  instead of failing the script (#66). Update tests that assert the old values.
+- **Scripts and hosts may see different values**, matching real Redis. Update
+  scripts and tests that rely on the 1.x behavior:
+  - `return 1, 2` replies `1`, the first value (was `2`, the last) (#36).
+  - `math.random` uses Redis's generator, so seeded sequences differ from 1.x
+    (#45).
+  - Number arguments to `redis.call` are formatted like Redis 7.4+ (`1e15` →
+    `1000000000000000`) (#68).
+  - After `redis.setresp(3)` a null host reply is `nil`, not `false` (#30).
+  - A returned function or userdata becomes `nil` instead of failing the
+    script (#66).
+  - A number outside the int64 range replies `-9223372036854775808` instead of
+    saturating (#46).
+  - `{ok=}` / `{err=}` reply strings are cut at the first NUL, and CR/LF become
+    spaces (#33).
+  - `error({err='MY custom'})` reports its `err` instead of
+    `ERR script execution failed` (#37).
+- **`redis.*` helpers follow Redis more closely.** Scripts that depended on
+  the 1.x behavior need updating:
+  - `redis.log` joins every argument after the level into the message (1.x
+    sent only the second argument), rejects levels outside 0..3 with
+    `ERR Invalid log level.` (1.x passed any integer to the host), and its
+    arity error is now `ERR redis.log() requires two arguments or more.`
+    (#49). Make sure your `log` host callback accepts the joined message.
+  - `redis.error_reply` adds `ERR ` only when the message has no space
+    (`'oops something'` → `{err='oops something'}`, was
+    `ERR oops something`) and drops one leading `-` (`'-ERR x'` → `ERR x`)
+    (#47).
+  - `redis.error_reply`, `redis.status_reply` and a bad `redis.pcall`
+    argument now return an error table instead of raising (#47, #82, #84).
+- **A fuel kill can't be caught.** Once a script spends its `maxFuel` budget,
+  the kill escapes every `pcall` / `xpcall` (#38). Scripts that caught it to
+  clean up must not rely on that; raise `maxFuel` instead.
 - **`eval` / `evalWithArgs` can throw.** A script or KEYS/ARGV too large for the
   WASM heap throws a `RangeError` (the engine stays usable); after an exception
   escapes the WASM module, every later call throws `LuaEngine is unusable: ...`
@@ -138,6 +164,22 @@ Each item says what changed and what to do. Details are in the entries below.
   prefix, and `redis.setresp` / `ERR empty reply from host` errors lose that
   prefix too. The fuel budget is documented as a deterministic instruction
   budget, not Redis's wall-clock `lua-time-limit` (#14).
+- `redis.error_reply` follows Redis 7.4+ / Valkey (`luaRedisErrorReplyCommand`):
+  one leading `-` is dropped (`'-ERR x'` → `ERR x`, was `ERR -ERR x`), `ERR `
+  is prepended only when the message has no space (`'foo'` → `ERR foo`), and
+  otherwise the first token is kept as the code whatever its case
+  (`'oops something'` → `{err='oops something'}`, was `ERR oops something`).
+  Anything but one string argument returns
+  `{err='ERR wrong number or type of arguments'}` instead of raising
+  `bad argument #1` (#47).
+- `redis.log` follows Redis 7.4+ / Valkey: every argument after the level is
+  joined with a space into the message (only the second one was sent), using
+  `lua_tolstring` semantics (arguments it cannot convert are skipped); the
+  level must be 0..3 (`ERR Invalid log level.`, any integer was passed on);
+  a missing argument raises `ERR redis.log() requires two arguments or more.`
+  (was `ERR redis.log requires level and message`) and a non-number level
+  `ERR First argument must be a number (log level).`, without a
+  `user_script:N:` position prefix (#49).
 - `redis.error_reply` and `redis.log` follow the compat profile instead of Redis
   7.4+ / Valkey semantics everywhere (#67). Without table errors (`redis-6.2`,
   or `compat.tableErrors: false`) `redis.error_reply` returns its argument
@@ -209,6 +251,13 @@ Each item says what changed and what to do. Details are in the entries below.
   module loads, so a static `import { LuaEngine } from "lua-redis-wasm"` works
   and the `Buffer` polyfill can be installed afterwards, before the first call
   (#90).
+- A script that returns several values replies with the first one, like Redis
+  (`return 1, 2` → `1`, was `2`); a script that returns nothing still replies
+  nil (#36). `eval` and `eval_with_args` share one code path in the runtime
+  (#51).
+- The finished reply buffer is handed to the host instead of being copied, so
+  a reply no longer needs a second copy in the WASM heap and larger replies fit
+  (returning an 11 MB string ran out of memory before) (#42).
 - After `redis.setresp(3)`, a null reply from the host reaches the script as
   `nil` instead of `false`, and a null inside an array reply ends the Lua table
   there, as in Redis 7.2/8.0 (RESP2 still gives `false`). A raised
@@ -434,8 +483,8 @@ Each item says what changed and what to do. Details are in the entries below.
   and `redis.call` / `redis.pcall` reject arguments that are not strings or
   numbers. A null host reply reaches the script as `false`, and
   `redis.error_reply` prepends `ERR ` only when the message has no code (#5).
-- The Lua 5.1 sources are vendored from the Redis tree as a git submodule
-  (`vendor/redis/deps/lua`).
+- Removed the unused top-level `lua` submodule; the build already took the
+  Lua 5.1 sources from `vendor/redis/deps/lua` (#5).
 
 ### Fixed
 
@@ -496,7 +545,7 @@ Each item says what changed and what to do. Details are in the entries below.
   but consumers that previously parsed `{ err }` strings to recover an error code should
   read the new `code` field instead.
 
-## [1.2.2] - 2025-01-18
+## [1.2.2] - 2026-01-18
 
 - Baseline published release: WebAssembly Redis Lua 5.1 engine with `redis.call` /
   `redis.pcall` / `redis.log` host integration, `cjson` / `cmsgpack` / `struct` / `bit`
