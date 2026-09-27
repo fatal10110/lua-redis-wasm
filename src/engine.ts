@@ -164,10 +164,9 @@ export class LuaEngine {
   eval(script: Buffer | Uint8Array | string): ReplyValue {
     this.assertUsable();
     const scriptBuf = ensureBuffer(script, "script");
-    const sha = computeSha1Hex(scriptBuf).toString("utf8");
     const scriptPtr = this.write(scriptBuf);
     try {
-      return this.run(sha, (retPtr) =>
+      return this.run(scriptBuf, (retPtr) =>
         this.exports._eval(retPtr, scriptPtr, scriptBuf.length),
       );
     } finally {
@@ -207,21 +206,14 @@ export class LuaEngine {
   ): ReplyValue {
     this.assertUsable();
     const scriptBuf = ensureBuffer(script, "script");
-    const sha = computeSha1Hex(scriptBuf).toString("utf8");
+    // maxArgBytes is enforced by the WASM runtime (run_script).
     const argBuf = encodeArgArray([...keys, ...args]);
-
-    // Enforce maxArgBytes limit on host side
-    if (this.limits?.maxArgBytes && argBuf.length > this.limits.maxArgBytes) {
-      return {
-        err: Buffer.from("ERR KEYS/ARGV exceeds configured limit", "utf8"),
-      };
-    }
 
     const scriptPtr = this.write(scriptBuf);
     try {
       const argsPtr = this.write(argBuf);
       try {
-        return this.run(sha, (retPtr) =>
+        return this.run(scriptBuf, (retPtr) =>
           this.exports._eval_with_args(
             retPtr,
             scriptPtr,
@@ -247,9 +239,11 @@ export class LuaEngine {
    * Host imports only throw a WasmFault (see `load()`), so an exception here
    * means the WASM frames were unwound past their C cleanup: the engine is
    * marked unusable before the exception is rethrown.
+   *
+   * `script` is only read to compute the SHA1 of a script-aborting error.
    * @private
    */
-  private run(sha: string, invoke: (retPtr: number) => void): ReplyValue {
+  private run(script: Buffer, invoke: (retPtr: number) => void): ReplyValue {
     const retPtr = this.guardAlloc(() => alloc(this.exports, 8));
     let result: PtrLen;
     try {
@@ -263,7 +257,7 @@ export class LuaEngine {
     } finally {
       this.release(retPtr);
     }
-    return this.decodeResult(result, sha);
+    return this.decodeResult(result, script);
   }
 
   /**
@@ -324,17 +318,13 @@ export class LuaEngine {
   }
 
   /**
-   * Decodes a PtrLen result from WASM into a ReplyValue.
+   * Decodes a PtrLen result from WASM into a ReplyValue. maxReplyBytes is
+   * enforced by the WASM runtime while it encodes the reply.
    * @private
    */
-  private decodeResult({ ptr, len }: PtrLen, sha: string): ReplyValue {
+  private decodeResult({ ptr, len }: PtrLen, script: Buffer): ReplyValue {
     if (!ptr || !len) {
       return null;
-    }
-
-    if (this.limits?.maxReplyBytes && len > this.limits.maxReplyBytes) {
-      this.exports._free_mem(ptr);
-      return { err: Buffer.from("ERR reply exceeds configured limit", "utf8") };
     }
 
     const buffer = readBytes(this.exports.HEAPU8, ptr, len);
@@ -352,7 +342,7 @@ export class LuaEngine {
       typeof value === "object" &&
       "err" in value
     ) {
-      return buildScriptError(value, sha);
+      return buildScriptError(value, script);
     }
 
     return value;
@@ -374,11 +364,15 @@ export class LuaEngine {
  * redis.call, which carry no `user_script:N:` text prefix. When the handler did
  * not run (load/syntax errors), `value.line` is absent and the line is parsed
  * from the message's `user_script:N:` prefix, defaulting to 1.
+ *
+ * The script's SHA1 is computed here, for script errors only, rather than on
+ * every evaluation.
  */
 function buildScriptError(
   value: { err: Buffer; code?: Buffer; line?: number },
-  sha: string,
+  script: Buffer,
 ): { err: Buffer; code: Buffer; meta: ReplyErrorMeta } {
+  const sha = computeSha1Hex(script).toString("utf8");
   const errStr = value.err.toString("utf8");
   let line = value.line ?? 1;
   if (value.line === undefined && errStr.startsWith("user_script:")) {
@@ -631,6 +625,35 @@ function resolveCompatFlags(
   );
 }
 
+const LIMIT_NAMES = ["maxFuel", "maxMemoryBytes", "maxReplyBytes", "maxArgBytes"] as const;
+const U32_MAX = 0xffff_ffff;
+
+/**
+ * Rejects limit values the WASM runtime cannot represent: every limit is a
+ * non-negative number of instructions or bytes (0 = not set).
+ */
+function validateLimits(limits: EngineLimits | undefined): void {
+  if (!limits) {
+    return;
+  }
+  for (const name of LIMIT_NAMES) {
+    const value = limits[name];
+    if (value !== undefined && (typeof value !== "number" || !(value >= 0))) {
+      throw new RangeError(
+        `limits.${name} must be a non-negative number, got ${String(value)}`,
+      );
+    }
+  }
+}
+
+/**
+ * A validated limit as the u32 `set_limits` takes. Fractions are truncated and
+ * values beyond u32 (including Infinity) saturate instead of wrapping.
+ */
+function toU32Limit(value: number | undefined): number {
+  return value === undefined ? 0 : Math.min(Math.floor(value), U32_MAX);
+}
+
 export class LuaWasmModule {
   private consumed = false;
 
@@ -733,11 +756,13 @@ export class LuaWasmModule {
   }
 
   private initializeLua(): void {
-    if (this.exports._set_limits && this.options.limits) {
+    const limits = this.options.limits;
+    if (this.exports._set_limits && limits) {
       this.exports._set_limits(
-        this.options.limits.maxFuel ?? 0,
-        this.options.limits.maxReplyBytes ?? 0,
-        this.options.limits.maxArgBytes ?? 0,
+        toU32Limit(limits.maxFuel),
+        toU32Limit(limits.maxReplyBytes),
+        toU32Limit(limits.maxArgBytes),
+        toU32Limit(limits.maxMemoryBytes),
       );
     }
 
@@ -839,6 +864,8 @@ export class LuaWasmModule {
  * ```
  */
 export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
+  validateLimits(options.limits);
+
   // Mutable handlers - these will be set by wireHostCallbacks/wireStandaloneCallbacks
   const handlers: MutableHandlers = {
     log: () => {},

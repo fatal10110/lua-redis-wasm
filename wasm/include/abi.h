@@ -80,7 +80,8 @@ int32_t reset(void);
 PtrLen eval(uint32_t ptr, uint32_t len);
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count);
-void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes);
+void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes,
+                uint32_t max_memory_bytes);
 void set_compat(uint32_t flags);
 uint32_t current_call_source(void);
 int32_t current_call_line(void);

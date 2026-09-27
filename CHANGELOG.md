@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `EngineLimits.maxMemoryBytes` is now enforced (it was documented but never
+  read): the Lua state uses a counting allocator that refuses, while a script
+  runs, any allocation that would take the engine's Lua memory (Lua objects,
+  uncollected garbage, cmsgpack pack buffers) past the cap. The script gets
+  Lua's `not enough memory` error and the engine stays usable. `set_limits`
+  takes the cap as a fourth argument (#54).
+
 - `redisCall`/`redisPcall` handlers receive a second `ctx: { source, line }`
   argument describing the caller (new WASM exports `current_call_source` /
   `current_call_line`), so hosts can build Redis 6.2's `@user_script: N:` prefix
@@ -42,9 +49,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Build outputs renamed: `dist/index.node.{mjs,cjs}` (Node) and
   `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
   is unchanged; only internal file names moved.
+- `maxReplyBytes` and `maxArgBytes` are enforced only by the WASM runtime; the
+  duplicate checks in `LuaEngine` are gone (#53). KEYS/ARGV over `maxArgBytes`
+  are now copied into the heap before being rejected, so ones too large for the
+  heap throw `RangeError` rather than returning the limit error.
+- `load()` throws a `RangeError` for a negative or non-numeric limit, and limits
+  above 2^32 - 1 saturate instead of wrapping around in the WASM call.
+- The script's SHA1 is computed only when a script error is built, not on every
+  `eval` / `evalWithArgs` (#57).
+- `cmsgpack` allocation failures raise Lua's `not enough memory` error instead
+  of aborting the module, and the pack buffers a failed call abandons are freed
+  when the evaluation ends.
 
 ### Fixed
 
+- `maxReplyBytes` is checked while the reply is encoded instead of after it is
+  built in full: a small value that expands into a huge reply (a table holding
+  the same subtable many times) fails straight away with
+  `ERR reply exceeds configured limit` instead of exhausting the heap. Without a
+  limit, a reply that does not fit the heap now replies
+  `ERR reply encoding failed` (previously it aborted, or, with
+  `-sABORTING_MALLOC=0`, was misreported as an unsupported return type) (#69).
 - Typed reply tables (`{double=}`, `{big_number=}`, `{map=}`, `{set=}`,
   `{verbatim_string=}`) in a script's return value now convert at any protocol
   level, matching real Redis 7.x/8.x. Previously they encoded as an empty array
@@ -91,9 +116,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ordinary `not enough memory` error instead of aborting the module, and a full
   garbage collection runs after any evaluation that leaves more than 16 MB of
   Lua memory in use, so one heavy script's garbage cannot make the next one run
-  out of memory. `cmsgpack.pack` still aborts when it runs out of heap (as with
-  Redis's aborting allocator), which marks the engine unusable, instead of
-  writing through a NULL buffer.
+  out of memory. `cmsgpack.pack` running out of heap no longer writes through a
+  NULL buffer (see Changed for how it fails).
 - Returning a function, coroutine or userdata (e.g. `cjson.null`) now replies
   nil in its place, at any depth (array elements, `{map=}` keys/values, `{set=}`
   members), like Redis, instead of failing the whole script with

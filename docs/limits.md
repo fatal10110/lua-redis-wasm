@@ -5,9 +5,10 @@
 - Fuel exhaustion behavior: abort with a Redis error reply.
 
 ## Memory Limits
-- WASM linear memory: 64 MiB max.
-- Max argument buffer size: 8 MiB per call.
-- Max reply size: 8 MiB per script result.
+- WASM linear memory: 64 MiB, fixed.
+- Optional, configured through `EngineLimits`: `maxMemoryBytes` (Lua heap
+  cap), `maxReplyBytes` (encoded reply size, checked while encoding) and
+  `maxArgBytes` (encoded KEYS + ARGV size). None is set by default.
 
 ## Stack Limits
 These come from the Lua 5.1 build in `vendor/redis/deps/lua` (`luaconf.h`):

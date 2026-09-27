@@ -439,8 +439,7 @@ test("eval: multi-value return replies with the first value (issue #36)", async 
 
 test("eval: reply-limit error reply is exact (no trailing NUL byte)", async () => {
   await resolveWasmPath();
-  // The limit is large enough for the error reply itself, so it is the C error
-  // reply that reaches the decoder (not the host-side limit fallback).
+  // The limit is enforced in C only; its error reply reaches the decoder as is.
   const module = await load({ limits: { maxReplyBytes: 64 } });
   const engine = module.create(createTestHost());
   const result = engine.eval("return string.rep('x', 100)") as { err: Buffer; code?: Buffer };

@@ -247,29 +247,55 @@ export type RedisProps = Record<string, RedisProp>;
  * Resource limits for the Lua engine.
  *
  * These limits protect against runaway scripts and resource exhaustion.
- * All limits are optional - unset limits are not enforced.
+ * All limits are optional - unset (or 0) limits are not enforced. All are
+ * enforced by the WASM runtime. Values must be non-negative numbers (`load()`
+ * throws a RangeError otherwise); fractions are truncated and values above
+ * 2^32 - 1 are capped to it.
  *
  * @example
  * ```typescript
  * const limits: EngineLimits = {
- *   maxFuel: 10_000_000,           // ~10M instructions
- *   maxMemoryBytes: 64 * 1024 * 1024, // 64 MB
+ *   maxFuel: 10_000_000,              // ~10M instructions
+ *   maxMemoryBytes: 32 * 1024 * 1024, // 32 MB of Lua heap
  *   maxReplyBytes: 2 * 1024 * 1024,   // 2 MB replies
- *   maxArgBytes: 1 * 1024 * 1024      // 1 MB per argument
+ *   maxArgBytes: 1 * 1024 * 1024      // 1 MB of KEYS + ARGV
  * };
  * ```
  */
 export type EngineLimits = {
-  /** Maximum instruction count (fuel) for script execution. Enforced by WASM runtime. */
+  /** Maximum instruction count (fuel) for script execution. */
   maxFuel?: number;
 
-  /** Maximum memory bytes. Soft limit coordinated with host. */
+  /**
+   * Cap on the memory the engine's Lua state may hold, in bytes: every Lua
+   * object (including KEYS/ARGV, the ~20 KB the standard libraries take, and
+   * not-yet-collected garbage) plus cmsgpack's pack buffers.
+   * A script whose allocation would cross it fails with Lua's
+   * `not enough memory` error, like one that exhausts the fixed 64 MB WASM
+   * heap, and the engine stays usable.
+   *
+   * Lua 5.1 has no emergency garbage collection, so garbage counts until the
+   * next collection cycle reclaims it: allow roughly twice a script's live
+   * data. Allocations outside the Lua allocator (the encoded reply, bounded by
+   * `maxReplyBytes`; cjson's scratch buffers) are not counted, and the cap is
+   * only checked while a script runs.
+   */
   maxMemoryBytes?: number;
 
-  /** Maximum reply payload size in bytes. Enforced by WASM runtime. */
+  /**
+   * Maximum size in bytes of the encoded script reply (see docs/abi.md). The
+   * limit is checked while the reply is encoded, so an oversized reply fails
+   * with `ERR reply exceeds configured limit` as soon as it crosses it. Error
+   * replies for script errors are not limited.
+   */
   maxReplyBytes?: number;
 
-  /** Maximum argument size in bytes. Enforced by host before passing to WASM. */
+  /**
+   * Maximum size in bytes of the encoded KEYS + ARGV array passed to
+   * `evalWithArgs` (4 bytes of count, plus 4 bytes of length and the data of
+   * each entry). A larger one fails with `ERR KEYS/ARGV exceeds configured
+   * limit` without running the script.
+   */
   maxArgBytes?: number;
 };
 
