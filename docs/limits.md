@@ -1,8 +1,19 @@
 # Resource Limits
 
 ## Execution Limits
-- Instruction fuel limit: 10,000,000 steps per script.
-- Fuel exhaustion behavior: abort with a Redis error reply.
+- Instruction fuel limit: 10,000,000 Lua VM instructions per script by default
+  (`maxFuel`), charged in steps of 1000. This is a deterministic budget, not
+  Redis's wall-clock `lua-time-limit`: there is no `BUSY` state or
+  `SCRIPT KILL`, and time spent in host callbacks or C functions is not charged.
+- Fuel exhaustion behavior: the script aborts with the error
+  `ERR Script killed by fuel limit` (Redis: `ERR Script killed by user with
+  SCRIPT KILL...`). Like a Redis `SCRIPT KILL`, it cannot be caught: after a
+  `pcall`/`xpcall` catches it, it is raised again at the next instruction until
+  it escapes the script. No `xpcall` message handler runs for it, and a kill
+  inside a coroutine stops the whole script.
+- Known gap (#75): fuel is charged per thread every 1000 instructions, so a
+  coroutine that finishes within 1000 instructions is never charged. Work spread
+  over many short coroutines is not bounded by the budget.
 
 ## Memory Limits
 - WASM linear memory: 64 MiB max.

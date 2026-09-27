@@ -18,6 +18,17 @@ void register_redis_api(lua_State *L);
 uint32_t redis_resp_version(void);
 void redis_reset_resp_version(void);
 
+/* Whether the Redis 7 error model is selected (COMPAT_TABLE_ERRORS, defined in
+ * runtime.c): errors are raised as {err=...} tables and the global pcall
+ * unwraps them (Redis 7.0+, Valkey); otherwise they are plain strings (Redis
+ * 6.2). register_redis_api snapshots it when a state is set up. */
+int compat_table_errors(void);
+
+/* Raises `msg` ("CODE message") as a script error in the error model of the
+ * current state: {err=msg} with table errors, the string itself otherwise.
+ * Never returns. */
+int redis_raise_error(lua_State *L, const char *msg);
+
 /* Decodes the host_redis_props blob and assigns each entry onto the global
  * `redis` table. Returns 0 on success, -1 on a malformed blob. */
 int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len);

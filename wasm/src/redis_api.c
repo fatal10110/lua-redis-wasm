@@ -15,6 +15,10 @@
 #define LOG_WARNING 3
 
 static uint32_t g_resp_version = 2;
+/* Redis 7 error model (compat flag, snapshot by register_redis_api): errors are
+ * raised as {err=...} tables and the global pcall unwraps them. Off, errors are
+ * plain strings as in Redis 6.2. */
+static int g_table_errors = 0;
 /* Caller of the redis.call/redis.pcall currently dispatched to the host: the
  * chunk source (NUL-terminated, NULL when unknown) and line. Read by the host
  * via current_call_source()/current_call_line() from inside its callback, e.g.
@@ -36,6 +40,24 @@ uint32_t redis_resp_version(void) {
 
 void redis_reset_resp_version(void) {
   g_resp_version = 2;
+}
+
+/* Raises `msg` (a complete "CODE message" string) without luaL_error's
+ * "user_script:N:" position prefix; the script line reaches the host through
+ * the error handler instead. In table-error mode the error object is
+ * {err=msg}, like Redis 7's luaPushError + luaError; otherwise it is the plain
+ * string, like Redis 6.2.
+ * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c
+ * (luaPushError, luaError), BSD-3-Clause. */
+int redis_raise_error(lua_State *L, const char *msg) {
+  if (g_table_errors) {
+    lua_createtable(L, 0, 1);
+    lua_pushstring(L, msg);
+    lua_setfield(L, -2, "err");
+  } else {
+    lua_pushstring(L, msg);
+  }
+  return lua_error(L);
 }
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
@@ -205,6 +227,70 @@ static int push_error_table(lua_State *L, const uint8_t *data, uint32_t len) {
   return 1;
 }
 
+static int is_crlf(char c) {
+  return c == '\r' || c == '\n';
+}
+
+/* Pushes {err="CODE message"} for an error reply in Redis's "-CODE message"
+ * form, with the leading '-' already removed. Mirrors luaPushErrorBuff on that
+ * form (derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c,
+ * BSD-3-Clause):
+ * - with no space, the generic "ERR " code is prepended; otherwise the token
+ *   before the first space is the error code, taken as-is (no case check);
+ * - the text after the code is trimmed of '\r'/'\n' at both ends (sdstrim). */
+static int push_error_reply(lua_State *L, const char *err, size_t len) {
+  const char *code = "ERR";
+  size_t code_len = 3;
+  const char *msg = err;
+  size_t msg_len = len;
+  const char *space = memchr(err, ' ', len);
+  if (space != NULL) {
+    code = err;
+    code_len = (size_t)(space - err);
+    msg = space + 1;
+    msg_len = len - code_len - 1;
+  }
+  while (msg_len > 0 && is_crlf(msg[0])) {
+    msg++;
+    msg_len--;
+  }
+  while (msg_len > 0 && is_crlf(msg[msg_len - 1])) {
+    msg_len--;
+  }
+
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  luaL_addlstring(&b, code, code_len);
+  luaL_addchar(&b, ' ');
+  luaL_addlstring(&b, msg, msg_len);
+  luaL_pushresult(&b);
+  size_t out_len = 0;
+  const char *out = lua_tolstring(L, -1, &out_len);
+  return push_error_table(L, (const uint8_t *)out, (uint32_t)out_len);
+}
+
+/* A command error reply from the host. Table-error mode builds it like Redis
+ * 7's redisProtocolToLuaType_Error: luaPushErrorBuff's form plus
+ * ignore_error_stats_update=true, the same table whether redis.call raises it
+ * or redis.pcall returns it. Otherwise it is kept verbatim: raised as a string
+ * or returned as {err=...}, as in Redis 6.2.
+ * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c
+ * (redisProtocolToLuaType_Error), BSD-3-Clause. */
+static int push_command_error(lua_State *L, const uint8_t *data, uint32_t len,
+                              int raise_on_error) {
+  if (g_table_errors) {
+    push_error_reply(L, (const char *)data, len);
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "ignore_error_stats_update");
+    return raise_on_error ? lua_error(L) : 1;
+  }
+  if (raise_on_error) {
+    lua_pushlstring(L, (const char *)data, len);
+    return lua_error(L);
+  }
+  return push_error_table(L, data, len);
+}
+
 static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *offset,
                         int raise_on_error, int depth) {
   /* Each level pushes up to 3 slots (a map's wrapper table, inner table and
@@ -260,14 +346,9 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       if (*offset + count_or_len > len) {
         return luaL_error(L, "ERR reply decoding failed");
       }
-      if (raise_on_error) {
-        lua_pushlstring(L, (const char *)(buf + *offset), count_or_len);
-        *offset += count_or_len;
-        return lua_error(L);
-      }
-      int result = push_error_table(L, buf + *offset, count_or_len);
+      const uint8_t *data = buf + *offset;
       *offset += count_or_len;
-      return result;
+      return push_command_error(L, data, count_or_len, raise_on_error);
     }
     case REPLY_ARRAY: {
       /* At RESP3, lua_newtable like real Redis: with a nil hole, later
@@ -388,8 +469,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
     // Coded kind, no name (Redis's wording for this takes no variable). Raised
     // without a "user_script:N:" position prefix, matching real Redis; the host
     // renders "Lua redis lib command arguments must be strings or integers".
-    lua_pushliteral(L, "__RLUA_E__:command-arg-type");
-    return lua_error(L);
+    return redis_raise_error(L, "__RLUA_E__:command-arg-type");
   }
   /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
    * as-is, without skipping C frames, so pcall(redis.pcall, ...) reports
@@ -407,7 +487,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   g_call_line = 0;
   free(ab.data);
   if (reply.ptr == 0 || reply.len == 0) {
-    return luaL_error(L, "ERR empty reply from host");
+    return redis_raise_error(L, "ERR empty reply from host");
   }
   /* Decode in protected mode so the host reply is freed before any error
    * (command error, nil table key, decode failure) propagates to the script. */
@@ -473,16 +553,6 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
   return lua_error(L);
 }
 
-/* Raises `msg` as a plain string, without luaL_error's "user_script:N:"
- * position prefix, the same way this engine currently raises redis.call errors;
- * the script line reaches the host through the error handler instead. Redis 7
- * (luaPushError + luaError) raises a table {err="ERR ..."} here; switching to
- * table errors is tracked in #48. */
-static int raise_bare_error(lua_State *L, const char *msg) {
-  lua_pushstring(L, msg);
-  return lua_error(L);
-}
-
 /* redis.log(level, ...). Mirrors Redis's luaLogCommand (src/script_lua.c): the
  * level must be a number (numeric strings count, like lua_isnumber) truncated to
  * an int in 0..3, and every argument after it is converted with lua_tolstring
@@ -494,17 +564,17 @@ static int raise_bare_error(lua_State *L, const char *msg) {
 static int l_redis_log(lua_State *L) {
   int argc = lua_gettop(L);
   if (argc < 2) {
-    return raise_bare_error(L, "ERR redis.log() requires two arguments or more.");
+    return redis_raise_error(L, "ERR redis.log() requires two arguments or more.");
   }
   if (!lua_isnumber(L, 1)) {
-    return raise_bare_error(L, "ERR First argument must be a number (log level).");
+    return redis_raise_error(L, "ERR First argument must be a number (log level).");
   }
   /* Redis assigns the number to an int (truncation toward zero) and then checks
    * LL_DEBUG..LL_WARNING. Range-check the double first so NaN / huge values
    * never reach the float-to-int conversion (which traps in WASM). */
   lua_Number raw_level = lua_tonumber(L, 1);
   if (!(raw_level > -1 && raw_level < 4)) {
-    return raise_bare_error(L, "ERR Invalid log level.");
+    return redis_raise_error(L, "ERR Invalid log level.");
   }
   int level = (int)raw_level;
 
@@ -542,19 +612,13 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
-static int is_crlf(char c) {
-  return c == '\r' || c == '\n';
-}
-
 /* redis.error_reply(msg). Mirrors Redis's luaRedisErrorReplyCommand +
  * luaPushErrorBuff (src/script_lua.c):
  * - anything but exactly one string argument returns (does not raise)
  *   {err="ERR wrong number or type of arguments"};
  * - the message is read as a C string (cut at the first NUL) and one leading
  *   '-' is dropped;
- * - with no space, the generic "ERR " code is prepended; otherwise the token
- *   before the first space is the error code, taken as-is (no case check);
- * - the text after the code is trimmed of '\r'/'\n' at both ends (sdstrim). */
+ * - the rest is split into code and message by push_error_reply. */
 static int l_redis_error_reply(lua_State *L) {
   if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
     static const char bad_args[] = "ERR wrong number or type of arguments";
@@ -566,35 +630,7 @@ static int l_redis_error_reply(lua_State *L) {
     err++;
     len--;
   }
-
-  const char *code = "ERR";
-  size_t code_len = 3;
-  const char *msg = err;
-  size_t msg_len = len;
-  const char *space = memchr(err, ' ', len);
-  if (space != NULL) {
-    code = err;
-    code_len = (size_t)(space - err);
-    msg = space + 1;
-    msg_len = len - code_len - 1;
-  }
-  while (msg_len > 0 && is_crlf(msg[0])) {
-    msg++;
-    msg_len--;
-  }
-  while (msg_len > 0 && is_crlf(msg[msg_len - 1])) {
-    msg_len--;
-  }
-
-  luaL_Buffer b;
-  luaL_buffinit(L, &b);
-  luaL_addlstring(&b, code, code_len);
-  luaL_addchar(&b, ' ');
-  luaL_addlstring(&b, msg, msg_len);
-  luaL_pushresult(&b);
-  size_t out_len = 0;
-  const char *out = lua_tolstring(L, -1, &out_len);
-  return push_error_table(L, (const uint8_t *)out, (uint32_t)out_len);
+  return push_error_reply(L, err, len);
 }
 
 static int l_redis_status_reply(lua_State *L) {
@@ -606,7 +642,7 @@ static int l_redis_status_reply(lua_State *L) {
 static int l_redis_setresp(lua_State *L) {
   uint32_t next = (uint32_t)luaL_checkinteger(L, 1);
   if (next != 2 && next != 3) {
-    return luaL_error(L, "ERR RESP version must be 2 or 3.");
+    return redis_raise_error(L, "ERR RESP version must be 2 or 3.");
   }
   /* Notify the host so it can match reply shapes; switch only if it accepted. */
   PtrLen failure = host_redis_setresp(next);
@@ -734,7 +770,42 @@ int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
   return 0;
 }
 
+/* Global pcall in table-error mode. Derived from luaRedisPcall in Valkey
+ * src/script_lua.c / Redis 7.2.4 src/script_lua.c, BSD-3-Clause: errors are {err=...} tables there, so for backward
+ * compatibility a caught table error whose `err` is a string is returned as
+ * that string. Any other error value, and every success, is returned as the
+ * stock pcall would. Unlike Redis, a table error without a string `err` is
+ * returned alone, without the extra nil Redis leaves behind, and a call with no
+ * arguments is rejected like the stock pcall instead of calling past the stack.
+ * xpcall is untouched, as in Redis: its handler sees the raw table. */
+static int l_pcall_unwrap(lua_State *L) {
+  luaL_checkany(L, 1);
+  int argc = lua_gettop(L);
+  lua_pushboolean(L, 1); /* result placeholder */
+  lua_insert(L, 1);
+  if (lua_pcall(L, argc - 1, LUA_MULTRET, 0) != 0) {
+    lua_remove(L, 1); /* the placeholder: room for at least one element */
+    if (lua_istable(L, -1)) {
+      lua_getfield(L, -1, "err");
+      if (lua_isstring(L, -1)) {
+        lua_replace(L, -2); /* replace the error table with its message */
+      } else {
+        lua_pop(L, 1);
+      }
+    }
+    lua_pushboolean(L, 0);
+    lua_insert(L, 1);
+  }
+  return lua_gettop(L);
+}
+
 void register_redis_api(lua_State *L) {
+  g_table_errors = compat_table_errors();
+  if (g_table_errors) {
+    lua_pushcfunction(L, l_pcall_unwrap);
+    lua_setglobal(L, "pcall");
+  }
+
   lua_newtable(L);
 
   lua_pushcfunction(L, decode_reply_protected);
