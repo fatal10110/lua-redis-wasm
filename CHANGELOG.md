@@ -175,10 +175,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nested 60-70 deep or an erroring `xpcall` handler inside ~30 of them used to
   corrupt memory (a trap that made the engine unusable, or a hang), and so did
   `cjson.decode` of arrays nested ~700 deep. The C stack is now 2 MB (was
-  Emscripten's 64 KB default), enough for Lua's own limit of 200 nested C calls,
-  so scripts get the `C stack overflow` error as in Redis, and it is placed
-  below static data, so an overflow past that traps instead of overwriting
-  memory (#77).
+  Emscripten's 64 KB default; it is taken from the fixed 64 MB heap, so the
+  memory left for Lua drops by about 2 MB), enough for Lua's own limit of 200
+  nested C calls, so scripts get the `C stack overflow` error as in Redis, and
+  it is placed below static data, so an overflow past that traps instead of
+  overwriting memory. cjson's nesting is capped at about 4000 levels (2000 for
+  objects) even when a script raises `encode_max_depth` / `decode_max_depth`,
+  giving cjson's usual nesting error: deeper values exhausted the JavaScript
+  engine's own stack and made the engine unusable (#77).
 - `maxReplyBytes` is checked while the reply is encoded instead of after it is
   built in full: a small value that expands into a huge reply (a table holding
   the same subtable many times) fails straight away with

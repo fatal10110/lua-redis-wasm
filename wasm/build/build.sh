@@ -43,12 +43,12 @@ MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/valkey/deps/fpconv/fpconv_dtoa.c" #
 # C stack (#77). Emscripten's default is 64 KB, far below what Lua's own limit
 # of 200 nested C calls (LUAI_MAXCCALLS, as in Redis) needs: a string.gsub
 # callback level takes about 1.5 KB, so 200 levels take about 300 KB, and a
-# cjson.decode level about 120 bytes, at most ~8000 levels (~1 MB). With 2 MB,
-# scripts get Lua's "C stack overflow" error instead of overflowing, and for
-# nesting Lua does not limit the JS engine's own stack (~1 MB in Node)
-# typically runs out first. --stack-first puts the stack at the bottom of
-# memory, so an overflow traps (the engine reports it and refuses further
-# evals) instead of silently overwriting static data.
+# cjson level about 120 bytes, capped at ~4000 levels (~0.5 MB, see
+# lua_cjson_checked.c). With 2 MB, taken from the fixed 64 MB heap, scripts
+# get Lua's "C stack overflow" error instead of overflowing. --stack-first
+# puts the stack at the bottom of memory, so any overflow traps (the engine
+# reports it and refuses further evals) instead of silently overwriting static
+# data.
 STACK_FLAGS="-sSTACK_SIZE=2097152 -Wl,--stack-first"
 
 emcc -O2 -DENABLE_CJSON_GLOBAL \

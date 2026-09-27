@@ -26,6 +26,9 @@
  *   finished. The encode buffer kept in the cjson config (the default) outlives
  *   calls; cjson_release_buffers() shrinks it back to its initial size, so one
  *   large encode does not hold the memory for later scripts.
+ *
+ * It also caps how deep cjson may nest when a script raises its depth limits,
+ * see CJSON_MAX_STACK_SLOTS.
  */
 #include <emscripten/stack.h>
 #include <stdint.h>
@@ -53,11 +56,29 @@ static void *newuserdata_noting_thread(lua_State *L, size_t size) {
   return lua_newuserdata(L, size);
 }
 
+/* cjson recurses in C once per nesting level of the value it encodes or
+ * decodes, and checks its depth limit (encode_max_depth / decode_max_depth,
+ * 1000 by default) together with lua_checkstack, the only two places it calls
+ * it. A script can raise those limits, which leaves Lua's own stack limit
+ * (LUAI_MAXCSTACK, 8000 slots) as the bound, and about 6500 levels already
+ * exhaust the JS engine's native stack (~1 MB in Node) that the WASM code runs
+ * on: a RangeError that leaves the engine unusable (#77). Capping the Lua
+ * stack cjson may use at 4000 slots stops it at about 4000 levels (2000 for
+ * objects) with its usual catchable nesting error; the default limit of 1000
+ * is unaffected. */
+#define CJSON_MAX_STACK_SLOTS 4000
+
+static int checkstack_capped(lua_State *L, int n) {
+  return lua_gettop(L) + n <= CJSON_MAX_STACK_SLOTS && lua_checkstack(L, n);
+}
+
 #define lua_touserdata touserdata_noting_thread
 #define lua_newuserdata newuserdata_noting_thread
+#define lua_checkstack checkstack_capped
 #include "lua_cjson.c" /* also includes strbuf.h, which has no include guard */
 #undef lua_touserdata
 #undef lua_newuserdata
+#undef lua_checkstack
 
 #include "ldo.h" /* luaD_throw: raise LUA_ERRMEM like a failed Lua allocation */
 

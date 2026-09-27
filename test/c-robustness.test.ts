@@ -19,9 +19,11 @@ async function standalone() {
 
 type Engine = Awaited<ReturnType<typeof standalone>>;
 
-function assertErr(value: ReplyValue, message: RegExp): void {
+function assertErr(value: ReplyValue, message: RegExp, code = "ERR"): void {
   assert.ok(value && typeof value === "object" && "err" in value, `expected an error reply, got ${String(value)}`);
-  assert.match((value as { err: Buffer }).err.toString("utf8"), message);
+  const reply = value as { err: Buffer; code?: Buffer };
+  assert.match(reply.err.toString("utf8"), message);
+  assert.equal(String(reply.code), code);
 }
 
 function assertUsable(engine: Engine): void {
@@ -77,6 +79,15 @@ test("cjson: the memory error can be caught, and cjson keeps working", TIMEOUT, 
   ]);
   assertUsable(engine);
   assertLargeAllocationSucceeds(engine);
+});
+
+test("cjson: the buffer cjson keeps between calls is shrunk after the script", TIMEOUT, async () => {
+  const engine = await standalone();
+  // A successful 12 MB encode grows the kept buffer to 16 MB.
+  const encode = "local s = string.rep('a', 1000) local t = {} for i = 1, 12000 do t[i] = s end return #cjson.encode(t)";
+  assert.equal(engine.eval(encode), 12036001);
+  assertLargeAllocationSucceeds(engine);
+  assertUsable(engine);
 });
 
 test("cjson: a failed encode with encode_keep_buffer off does not leak its buffer", TIMEOUT, async () => {
@@ -172,7 +183,7 @@ test("C stack: nested string.gsub callbacks up to Lua's limit run", TIMEOUT, asy
 test("C stack: nesting past Lua's limit raises 'C stack overflow'", TIMEOUT, async () => {
   const engine = await standalone();
   for (const depth of [200, 1000]) {
-    assertErr(engine.eval(nestedGsub(depth)), /stack overflow/);
+    assertErr(engine.eval(nestedGsub(depth)), /^C stack overflow$/);
     assertUsable(engine);
   }
   // Caught inside the script like any other error.
@@ -192,7 +203,32 @@ test("C stack: an xpcall handler that raises again terminates", TIMEOUT, async (
   for (const depth of [0, 30, 100]) {
     assert.deepEqual(engine.eval(nestedGsub(depth, bottom)), depth === 0 ? null : Buffer.from("x"), `depth ${depth}`);
   }
-  assertErr(engine.eval(nestedGsub(199, bottom)), /stack overflow/);
+  assertErr(engine.eval(nestedGsub(199, bottom)), /^C stack overflow$/);
+  assertUsable(engine);
+});
+
+test("C stack: cjson stops at the engine's depth cap even when a script raises its limits", TIMEOUT, async () => {
+  const engine = await standalone();
+  // Deeper than this exhausted the JS engine's native stack (RangeError, the
+  // engine became unusable) from about 6500 levels, even at the top level.
+  engine.eval("cjson.decode_max_depth(100000) cjson.encode_max_depth(100000)");
+  const arrays = (depth: number) => `string.rep('[', ${depth}) .. string.rep(']', ${depth})`;
+  const objects = (depth: number) => `string.rep('{"a":', ${depth}) .. '1' .. string.rep('}', ${depth})`;
+  const nestedTable = (depth: number) => `local t = {} for i = 1, ${depth} do t = {t} end`;
+  for (const depth of [7999, 9000]) {
+    assertErr(engine.eval(`return cjson.decode(${arrays(depth)})`), /Found too many nested data structures/);
+    assertErr(engine.eval(`return cjson.decode(${objects(depth)})`), /Found too many nested data structures/);
+    assertErr(engine.eval(`${nestedTable(depth)} return cjson.encode(t)`), /Cannot serialise, excessive nesting/);
+    // Also inside other nested C calls, and catchable.
+    const caught = engine.eval(
+      nestedGsub(190, `local ok, err = pcall(cjson.decode, ${arrays(depth)}) return tostring(ok) .. ' ' .. err`),
+    ) as Buffer;
+    assert.match(caught.toString(), /^false .*Found too many nested data structures/);
+    assertUsable(engine);
+  }
+  // Raised limits below the cap still work.
+  assert.equal(engine.eval(`return #cjson.decode(${arrays(3000)})`), 1);
+  assert.equal(engine.eval(`${nestedTable(3000)} return #cjson.encode(t)`), 6002);
   assertUsable(engine);
 });
 
