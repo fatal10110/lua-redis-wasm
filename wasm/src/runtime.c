@@ -13,10 +13,20 @@
 #define DEFAULT_FUEL_LIMIT 10000000
 #define FUEL_HOOK_STEP 1000
 
+/* Why a ReplyBuffer write failed (ReplyBuffer.status). */
+#define RB_OK 0
+#define RB_NO_MEMORY 1  /* the heap could not grow the buffer */
+#define RB_OVER_LIMIT 2 /* the write would take the reply past `limit` */
+
 typedef struct ReplyBuffer {
   uint8_t *data;
   size_t len;
   size_t cap;
+  /* Maximum size of the encoded reply in bytes, 0 for none. Enforced on every
+   * write, so an oversized reply fails as soon as it crosses the limit instead
+   * of being built in full first. */
+  size_t limit;
+  int status;
 } ReplyBuffer;
 
 static lua_State *g_state = NULL;
@@ -64,19 +74,36 @@ static void rb_init(ReplyBuffer *rb) {
   rb->data = NULL;
   rb->len = 0;
   rb->cap = 0;
+  rb->limit = 0;
+  rb->status = RB_OK;
 }
 
+// Makes room for `extra` more bytes. Fails (-1, reason in rb->status) when the
+// heap is exhausted or when the reply would exceed rb->limit; the capacity
+// never grows past the limit.
 static int rb_reserve(ReplyBuffer *rb, size_t extra) {
+  if (extra > SIZE_MAX - rb->len) {
+    rb->status = RB_NO_MEMORY;
+    return -1;
+  }
   size_t needed = rb->len + extra;
+  if (rb->limit > 0 && needed > rb->limit) {
+    rb->status = RB_OVER_LIMIT;
+    return -1;
+  }
   if (needed <= rb->cap) {
     return 0;
   }
   size_t new_cap = rb->cap == 0 ? 256 : rb->cap;
   while (new_cap < needed) {
-    new_cap *= 2;
+    new_cap = new_cap > SIZE_MAX / 2 ? needed : new_cap * 2;
+  }
+  if (rb->limit > 0 && new_cap > rb->limit) {
+    new_cap = rb->limit;
   }
   uint8_t *next = (uint8_t *)realloc(rb->data, new_cap);
   if (!next) {
+    rb->status = RB_NO_MEMORY;
     return -1;
   }
   rb->data = next;
@@ -1061,15 +1088,19 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   }
   ReplyBuffer rb;
   rb_init(&rb);
+  rb.limit = g_max_reply_bytes;
   int rc = encode_reply(g_state, -1, &rb);
   lua_settop(g_state, 0);
   if (rc != 0) {
+    // The reply buffer records whether a write crossed maxReplyBytes; any
+    // other failure is the heap (a buffer that could not grow, or a Lua memory
+    // error in encode_reply).
+    int status = rb.status;
     free(rb.data);
+    if (status == RB_OVER_LIMIT) {
+      return REPLY_ERROR_LIT("ERR reply exceeds configured limit");
+    }
     return REPLY_ERROR_LIT("ERR reply encoding failed");
-  }
-  if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
-    free(rb.data);
-    return REPLY_ERROR_LIT("ERR reply exceeds configured limit");
   }
   PtrLen out = rb_finalize(&rb);
   if (out.ptr == 0) {

@@ -411,20 +411,29 @@ Protect against runaway scripts with configurable limits:
 const module = await load({
   limits: {
     maxFuel: 10_000_000, // Instruction budget
-    maxMemoryBytes: 64 * 1024 * 1024, // Memory cap (host-coordinated)
-    maxReplyBytes: 2 * 1024 * 1024, // Max reply size
-    maxArgBytes: 1 * 1024 * 1024, // Max single argument size
+    maxReplyBytes: 2 * 1024 * 1024, // Max encoded reply size
+    maxArgBytes: 1 * 1024 * 1024, // Max encoded KEYS + ARGV size
   },
 });
 const engine = module.create(host);
 ```
 
-| Limit            | Description                  | Enforcement      |
-| ---------------- | ---------------------------- | ---------------- |
-| `maxFuel`        | Instruction count budget     | WASM runtime     |
-| `maxMemoryBytes` | Memory growth cap            | Host-coordinated |
-| `maxReplyBytes`  | Maximum reply payload size   | WASM runtime     |
-| `maxArgBytes`    | Maximum single argument size | WASM runtime     |
+| Limit            | Description                                   | On overflow                                 |
+| ---------------- | --------------------------------------------- | ------------------------------------------- |
+| `maxFuel`        | Instruction count budget                      | Script error (the script is stopped)        |
+| `maxReplyBytes`  | Size of the encoded script reply              | `ERR reply exceeds configured limit`        |
+| `maxArgBytes`    | Size of the encoded KEYS + ARGV array         | `ERR KEYS/ARGV exceeds configured limit`    |
+
+All limits are enforced by the WASM runtime; unset or 0 means no limit. Each
+must be a non-negative integer: `load()` throws a `RangeError` for negative,
+fractional or non-finite values (so e.g. `0.5` cannot silently mean "no
+limit"), and values above 2^32 - 1 are capped to it. `maxReplyBytes` is checked
+while the reply is encoded, so a small value that expands into a huge reply
+(e.g. a table referencing the same subtable many times) fails as soon as it
+crosses the limit. It covers the script's return value (including returned
+`{err=}` / `{ok=}` tables), not script errors or `redis.call` replies.
+`maxArgBytes` counts the ABI encoding: 4 bytes, plus 4 bytes and the data of
+each key and argument.
 
 The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
 `not enough memory` error and the engine stays usable. Because Lua 5.1 has no

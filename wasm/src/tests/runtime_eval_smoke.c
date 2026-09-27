@@ -74,7 +74,18 @@ int main(void) {
 
   set_limits(0, 8, 0);
   expect_error("return 'this reply is too long'", "ERR reply exceeds configured limit");
+  /* The limit is inclusive: an integer reply is 13 bytes. */
+  set_limits(0, 13, 0);
+  expect_int("return 42", 42);
+  set_limits(0, 12, 0);
+  expect_error("return 42", "ERR reply exceeds configured limit");
+  /* Enforced while encoding: a small value expanding into a huge reply
+   * (2^24 leaves) fails at the limit instead of exhausting the heap. */
+  set_limits(0, 1000, 0);
+  expect_error("local t = {} for i = 1, 24 do t = {t, t} end return t",
+               "ERR reply exceeds configured limit");
   set_limits(0, 0, 0);
+  expect_int("return 42", 42);
 
   return 0;
 }

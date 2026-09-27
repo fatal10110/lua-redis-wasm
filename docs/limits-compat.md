@@ -2,14 +2,14 @@
 
 ## Limits
 
-Limits are optional and enforced by the WASM runtime where possible.
+Limits are optional and all enforced by the WASM runtime (see the README's
+"Resource Limits" section for details).
 
 | Limit | Meaning | Enforced |
 | --- | --- | --- |
 | `maxFuel` | Instruction budget for a script | Yes |
-| `maxMemoryBytes` | Soft cap for memory growth coordination | Host-coordinated |
-| `maxReplyBytes` | Max reply payload size | Yes |
-| `maxArgBytes` | Max single argument size | Yes |
+| `maxReplyBytes` | Max encoded reply size, checked while encoding | Yes |
+| `maxArgBytes` | Max encoded KEYS + ARGV size | Yes |
 
 Example:
 
@@ -18,7 +18,6 @@ const engine = await LuaWasmEngine.create({
   host,
   limits: {
     maxFuel: 10_000_000,
-    maxMemoryBytes: 64 * 1024 * 1024,
     maxReplyBytes: 2 * 1024 * 1024,
     maxArgBytes: 1 * 1024 * 1024
   }

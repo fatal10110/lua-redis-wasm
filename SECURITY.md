@@ -42,7 +42,7 @@ We take the security of lua-redis-wasm seriously. If you discover a security vul
 lua-redis-wasm includes resource limits to protect against:
 
 - **Runaway scripts**: Fuel-based instruction limiting
-- **Memory exhaustion**: Memory growth caps
+- **Memory exhaustion**: A fixed-size WASM heap
 - **Large payloads**: Reply and argument size limits
 
 Always configure appropriate limits for your use case:
@@ -52,7 +52,6 @@ const engine = await LuaWasmEngine.create({
   host,
   limits: {
     maxFuel: 10_000_000,              // Instruction budget
-    maxMemoryBytes: 64 * 1024 * 1024, // 64 MB
     maxReplyBytes: 2 * 1024 * 1024,   // 2 MB
     maxArgBytes: 1 * 1024 * 1024      // 1 MB
   }

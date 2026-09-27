@@ -42,9 +42,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Build outputs renamed: `dist/index.node.{mjs,cjs}` (Node) and
   `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
   is unchanged; only internal file names moved.
+- `maxReplyBytes` and `maxArgBytes` are enforced only by the WASM runtime; the
+  duplicate checks in `LuaEngine` are gone (#53). KEYS/ARGV over `maxArgBytes`
+  are now copied into the heap before being rejected, so ones too large for the
+  heap throw `RangeError` rather than returning the limit error.
+- `load()` throws a `RangeError` for a limit that is not a non-negative integer
+  (negative, fractional, `NaN`, `Infinity`, non-numeric), and limits above
+  2^32 - 1 saturate instead of wrapping around in the WASM call.
+- The script's SHA1 is computed only when a script error is built, not on every
+  `eval` / `evalWithArgs` (#57).
+
+### Removed
+
+- `EngineLimits.maxMemoryBytes` (was never enforced) (#54).
 
 ### Fixed
 
+- `maxReplyBytes` is checked while the reply is encoded instead of after it is
+  built in full: a small value that expands into a huge reply (a table holding
+  the same subtable many times) fails straight away with
+  `ERR reply exceeds configured limit` instead of first exhausting the heap
+  (#69).
 - Typed reply tables (`{double=}`, `{big_number=}`, `{map=}`, `{set=}`,
   `{verbatim_string=}`) in a script's return value now convert at any protocol
   level, matching real Redis 7.x/8.x. Previously they encoded as an empty array
