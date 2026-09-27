@@ -24,8 +24,19 @@ export type WasmExports = {
   /** Initialize the Lua VM. Returns 0 on success. */
   _init: () => number;
 
-  /** Reset Lua state to initial configuration. Returns 0 on success. */
+  /**
+   * Replace the Lua VM with a fresh one (limits and compat flags are kept,
+   * props are fetched again). Returns 0 on success, -1 while an eval is
+   * active or when the new VM could not be built.
+   */
   _reset: () => number;
+
+  /**
+   * Close the Lua VM for good (engine disposal). Idempotent. Returns 0, or -1
+   * while an eval is active. Optional: absent from custom binaries built
+   * before it existed.
+   */
+  _close_vm?: () => number;
 
   /**
    * Evaluate a Lua script buffer. The PtrLen result is returned through the
@@ -108,7 +119,6 @@ export type HostImport = (...args: number[]) => void;
  */
 export type EmscriptenModuleFactory = (options: {
   locateFile?: (path: string) => string;
-  wasmBinary?: Uint8Array;
   instantiateWasm?: (
     imports: WebAssembly.Imports,
     successCallback: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void
@@ -133,28 +143,84 @@ export function defaultModulePath(): string {
 }
 
 /**
- * Instantiate an already-loaded Emscripten factory + WASM bytes, injecting the
- * host callbacks into the module's imports. Shared by both platform loaders.
+ * Compiled modules, so that only the first `load()` of a given binary reads
+ * and compiles it; every later one only instantiates it (a new instance with
+ * its own linear memory). Keyed by the resolved path/URL of the `.wasm` file,
+ * or by the identity of a `wasmBytes` array (held weakly: dropping the array
+ * drops its entry). A file is read once per process, so a binary rebuilt on
+ * disk is only picked up by a new process. Failed compilations are not cached.
+ */
+const compiledByLocation = new Map<string, Promise<WebAssembly.Module>>();
+const compiledByBytes = new WeakMap<Uint8Array, Promise<WebAssembly.Module>>();
+
+/**
+ * Where the WASM binary comes from: its bytes (`options.wasmBytes`), or the
+ * resolved location of the file plus how to read it.
+ */
+export type WasmSource =
+  | Uint8Array
+  | { location: string; read: () => Promise<Uint8Array> };
+
+/** Compiles `bytes`, reporting a failure the way instantiation does. */
+async function compile(bytes: Uint8Array): Promise<WebAssembly.Module> {
+  try {
+    // Looked up per call (not captured) so tests can count compilations.
+    return await WebAssembly.compile(bytes as Uint8Array<ArrayBuffer>);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to instantiate redis_lua.wasm: ${detail}`, { cause: err });
+  }
+}
+
+/** Caches `compiled` under `key` unless it fails. */
+function remember<K>(
+  cache: { set(key: K, value: Promise<WebAssembly.Module>): unknown; delete(key: K): unknown },
+  key: K,
+  compiled: Promise<WebAssembly.Module>
+): Promise<WebAssembly.Module> {
+  cache.set(key, compiled);
+  compiled.catch(() => cache.delete(key));
+  return compiled;
+}
+
+/** The compiled module for `source`: cached, or read and compiled on first use. */
+export function compiledModule(source: WasmSource): Promise<WebAssembly.Module> {
+  if (ArrayBuffer.isView(source)) {
+    return (
+      compiledByBytes.get(source) ?? remember(compiledByBytes, source, compile(source))
+    );
+  }
+  const { location, read } = source;
+  return (
+    compiledByLocation.get(location) ??
+    remember(compiledByLocation, location, read().then(compile))
+  );
+}
+
+/**
+ * Instantiate an already-loaded Emscripten factory with a compiled WASM module,
+ * injecting the host callbacks into the module's imports. Every call creates a
+ * new instance with its own linear memory, so engines share no state. Shared
+ * by both platform loaders.
  */
 export async function instantiate(
   moduleFactory: EmscriptenModuleFactory,
-  wasmBinary: Uint8Array,
+  wasmModule: WebAssembly.Module,
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
   // The Emscripten glue wraps `instantiateWasm` in a promise that only ever
   // resolves (via successCallback) — it has no failure path. If instantiation
-  // fails (corrupt bytes, import mismatch) the factory promise would never
-  // settle, so surface the failure through a separate promise and race them.
+  // fails (import mismatch) the factory promise would never settle, so surface
+  // the failure through a separate promise and race them.
   let failInstantiation!: (reason: unknown) => void;
   const instantiationFailed = new Promise<never>((_, reject) => {
     failInstantiation = reject;
   });
 
   const modulePromise = moduleFactory({
-    // wasmBinary + the custom instantiateWasm below fully drive instantiation,
-    // so locateFile is never consulted for the .wasm — pass other files through.
+    // The custom instantiateWasm below fully drives instantiation, so
+    // locateFile is never consulted for the .wasm — pass other files through.
     locateFile: (file) => file,
-    wasmBinary,
 
     // Custom instantiation to inject host imports.
     instantiateWasm(imports, successCallback) {
@@ -164,10 +230,9 @@ export async function instantiate(
       const env = (imports.env as Record<string, WebAssembly.ImportValue>) || {};
       imports.env = { ...env, ...hostImports } as WebAssembly.ModuleImports;
 
-      WebAssembly.instantiate(wasmBinary, imports)
-        .then((result) => {
-          const instantiated = result as unknown as WebAssembly.WebAssemblyInstantiatedSource;
-          successCallback(instantiated.instance, instantiated.module);
+      WebAssembly.instantiate(wasmModule, imports)
+        .then((instance) => {
+          successCallback(instance, wasmModule);
         })
         .catch((err: unknown) => {
           const detail = err instanceof Error ? err.message : String(err);

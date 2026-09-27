@@ -12,12 +12,14 @@
 
 import type { LoadOptions } from "./types.js";
 import {
+  compiledModule,
   instantiate,
   defaultModulePath,
   defaultWasmPath,
   type EmscriptenModuleFactory,
   type HostImport,
-  type WasmExports
+  type WasmExports,
+  type WasmSource
 } from "./loader-core.js";
 
 export { defaultModulePath, defaultWasmPath };
@@ -57,18 +59,33 @@ async function loadGlueFactory(
   return (imported.default ?? imported) as EmscriptenModuleFactory;
 }
 
-/** Read the WASM binary bytes from disk (or `options.wasmBytes` if provided). */
-async function loadWasmBinary(options: LoadOptions): Promise<Uint8Array> {
+/**
+ * Where the WASM binary comes from: `options.wasmBytes`, or the file on disk
+ * (read only on a compiled-module cache miss).
+ */
+async function wasmSource(options: LoadOptions): Promise<WasmSource> {
   if (options.wasmBytes) {
     return options.wasmBytes;
   }
-  const { readFile } = await import("node:fs/promises");
+  const path = await import("node:path");
   const wasmPath = options.wasmPath ?? (await nodeAssetPath("redis_lua.wasm"));
-  return new Uint8Array(await readFile(wasmPath));
+  // A `file://` URL and the plain path name the same file: key both alike.
+  const location = /^file:\/\//i.test(wasmPath)
+    ? (await import("node:url")).fileURLToPath(wasmPath)
+    : path.resolve(wasmPath);
+  return {
+    location,
+    read: async () => {
+      const { readFile } = await import("node:fs/promises");
+      return new Uint8Array(await readFile(location));
+    }
+  };
 }
 
 /**
  * Loads and instantiates the Emscripten WASM module with host imports (Node).
+ * The compiled module is cached (see `compiledModule`); each call creates a
+ * new instance.
  *
  * @param options - Engine or standalone options with optional custom paths
  * @param hostImports - Map of host callback functions to inject
@@ -79,6 +96,6 @@ export async function loadModule(
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
   const moduleFactory = await loadGlueFactory(options);
-  const wasmBinary = await loadWasmBinary(options);
-  return instantiate(moduleFactory, wasmBinary, hostImports);
+  const wasmModule = await compiledModule(await wasmSource(options));
+  return instantiate(moduleFactory, wasmModule, hostImports);
 }
