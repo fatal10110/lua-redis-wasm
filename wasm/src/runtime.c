@@ -1115,13 +1115,32 @@ int32_t init(void) {
   return setup_state();
 }
 
+/* Replaces the VM with a fresh one, keeping everything configured outside it
+ * (limits, compat flags; props are fetched from the host again). Also recovers
+ * a VM that is missing because a previous init/reset/rebuild ran out of memory
+ * or close_vm ran. */
 int32_t reset(void) {
-  if (g_eval_active || !g_state) {
+  if (g_eval_active) {
     return -1;
   }
-  lua_close(g_state);
-  g_state = NULL;
+  if (g_state) {
+    lua_close(g_state);
+    g_state = NULL;
+  }
   return setup_state();
+}
+
+/* Closes the VM for good (the engine is being disposed). Idempotent; refused
+ * while an eval is active, like init and reset. */
+int32_t close_vm(void) {
+  if (g_eval_active) {
+    return -1;
+  }
+  if (g_state) {
+    lua_close(g_state);
+    g_state = NULL;
+  }
+  return 0;
 }
 
 /* Lua memory in use (KB) above which a run is followed by a full collection:

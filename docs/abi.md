@@ -97,10 +97,19 @@ and the C side raises them as ordinary Lua errors.
 The WASM module exports the following functions:
 
 - `init() -> int`
-  - Initializes the Lua VM and preloads modules.
+  - Initializes the Lua VM and preloads modules. Returns 0, or -1 while an
+    eval is active or when the VM could not be built.
 
 - `reset() -> int`
-  - Clears Lua state and re-initializes globals.
+  - Replaces the Lua VM with a fresh one (`LuaEngine.reset()`). Limits and
+    compat flags are kept, props are fetched again through `host_redis_props`,
+    and a missing VM (a failed build, or after `close_vm`) is rebuilt. Returns
+    0, or -1 while an eval is active or when the VM could not be built.
+
+- `close_vm() -> int`
+  - Closes the Lua VM for good (`LuaEngine.dispose()`); later evals reply
+    `ERR Lua VM not initialized`. Idempotent. Returns 0, or -1 while an eval
+    is active.
 
 - `eval(ptr, len) -> ptr_len`
   - Evaluates a Lua script buffer and returns encoded Reply.

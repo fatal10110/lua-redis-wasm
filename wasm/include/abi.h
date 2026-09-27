@@ -77,6 +77,7 @@ HOST_IMPORT(host_redis_props) PtrLen host_redis_props(void);
 /* WASM exports */
 int32_t init(void);
 int32_t reset(void);
+int32_t close_vm(void);
 PtrLen eval(uint32_t ptr, uint32_t len);
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count);
