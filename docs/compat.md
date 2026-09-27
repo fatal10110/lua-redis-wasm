@@ -91,9 +91,14 @@ through `redisProps`.
   - the Valkey profiles name `server.log()` in the arity error
     (`server.log() requires two arguments or more.`), the Redis ones
     `redis.log()`.
-  - This wording follows the profile only (there is no override); with no
-    profile it is the Redis 7.4+ wording (`redis.log()`, `Invalid log level.`,
-    `Lua redis lib command arguments ...`).
+  - The `Invalid debug level.` / `Invalid log level.` choice and the Valkey
+    wording (`server.log()`, `Command arguments ...`) follow the profile only
+    (there is no override); with no profile it is the Redis 7.4+ wording
+    (`redis.log()`, `Invalid log level.`, `Lua redis lib command arguments
+    ...`). The Redis 6.2 `redis.pcall` form (`@user_script: <line>: Lua
+    redis() ...`) follows `compat.tableErrors` instead, like the other 6.2
+    forms above: `redis-8.0` or `valkey-8.0` with `tableErrors: false` gets it,
+    and `redis-6.2` with `tableErrors: true` gets `ERR Lua redis lib ...`.
 - An uncaught table error is reported by its `err` field, like Redis 7.0+'s
   `luaExtractErrorInformation`. This applies to every profile; Redis 6.2 itself
   fails on a table error.

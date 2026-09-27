@@ -18,7 +18,7 @@
  * - redis.pcall with an argument that is not a string or number returns the
  *   error table instead of raising (luaRedisGenericCommand): "Lua redis()
  *   command arguments must be strings or integers" positioned and code-less in
- *   Redis 6.2, "ERR Lua redis lib command arguments ..." in Redis 7.0-7.2 and
+ *   Redis 6.2, "ERR Lua redis lib command arguments ..." in Redis 7.0-8.0 and
  *   "ERR Command arguments ..." in Valkey 8.0. redis.call still raises the
  *   command-arg-type engine error (#84).
  */

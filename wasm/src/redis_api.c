@@ -25,13 +25,13 @@ static uint32_t g_resp_version = 2;
  * raised as {err=...} tables and the global pcall unwraps them. Off, errors are
  * plain strings as in Redis 6.2. */
 static int g_table_errors = 0;
-/* redis.log error wording of the profile (compat flags, snapshot by
- * register_redis_api): "Invalid debug level." (Redis 6.2-7.2) instead of
- * "Invalid log level.", and "server.log()" (Valkey 8.0+) instead of
- * "redis.log()" in the arity error. The Valkey flag also selects Valkey's
- * "Command arguments must be strings or integers" for redis.pcall. */
+/* Error wording of the profile (compat flags, snapshot by register_redis_api):
+ * "Invalid debug level." (Redis 6.2-7.2) instead of "Invalid log level.", and
+ * the Valkey 8.0+ wording: "server.log()" instead of "redis.log()" in the
+ * redis.log arity error and, with table errors, "Command arguments must be
+ * strings or integers" for a bad redis.pcall argument. */
 static int g_log_debug_level = 0;
-static int g_server_log_name = 0;
+static int g_valkey_wording = 0;
 /* Caller of the redis.call/redis.pcall currently dispatched to the host: the
  * chunk source (NUL-terminated, NULL when unknown) and line. Read by the host
  * via current_call_source()/current_call_line() from inside its callback, e.g.
@@ -531,7 +531,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
       if (!g_table_errors) {
         return push_bad_call_error(L, "Lua redis() command arguments must be strings or integers");
       }
-      return push_bad_call_error(L, g_server_log_name
+      return push_bad_call_error(L, g_valkey_wording
                                         ? "Command arguments must be strings or integers"
                                         : "Lua redis lib command arguments must be strings or integers");
     }
@@ -646,7 +646,7 @@ static int raise_api_error(lua_State *L, const char *msg) {
 static int l_redis_log(lua_State *L) {
   int argc = lua_gettop(L);
   if (argc < 2) {
-    return raise_api_error(L, g_server_log_name ? "server.log() requires two arguments or more."
+    return raise_api_error(L, g_valkey_wording ? "server.log() requires two arguments or more."
                                                 : "redis.log() requires two arguments or more.");
   }
   if (!lua_isnumber(L, 1)) {
@@ -922,7 +922,7 @@ static int l_pcall_unwrap(lua_State *L) {
 void register_redis_api(lua_State *L) {
   g_table_errors = compat_table_errors();
   g_log_debug_level = compat_log_debug_level();
-  g_server_log_name = compat_server_log_name();
+  g_valkey_wording = compat_valkey_wording();
   if (g_table_errors) {
     lua_pushcfunction(L, l_pcall_unwrap);
     lua_setglobal(L, "pcall");

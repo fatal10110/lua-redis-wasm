@@ -794,7 +794,7 @@ const COMPAT_SERVER_ALIAS = 0x4;
 const COMPAT_RESEED_RANDOM = 0x8;
 const COMPAT_TABLE_ERRORS = 0x10;
 const COMPAT_LOG_DEBUG_LEVEL = 0x20;
-const COMPAT_SERVER_LOG_NAME = 0x40;
+const COMPAT_VALKEY_WORDING = 0x40;
 
 /**
  * Profile presets -> the Lua behavior flags. Mirrors the
@@ -818,7 +818,10 @@ const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
  * follows the profile only (no override): `redis.log` says "Invalid debug
  * level." up to Redis 7.2, and Valkey names `server.log()` in its arity error
  * and says "Command arguments must be ..." for a bad `redis.pcall` argument.
- * No profile keeps the historical Redis 7.4+ wording.
+ * No profile keeps the historical Redis 7.4+ wording. Only these bits are
+ * profile-only: the Redis 6.2 forms (e.g. redis.pcall's "@user_script: <line>:
+ * Lua redis() ..." text) follow `compat.tableErrors`, so the override changes
+ * them.
  */
 const COMPAT_PROFILE_WORDING: Record<CompatProfile, number> = {
   "redis-6.2": COMPAT_LOG_DEBUG_LEVEL,
@@ -826,8 +829,8 @@ const COMPAT_PROFILE_WORDING: Record<CompatProfile, number> = {
   "redis-7.2": COMPAT_LOG_DEBUG_LEVEL,
   "redis-7.4": 0,
   "redis-8.0": 0,
-  "valkey-8.0": COMPAT_SERVER_LOG_NAME,
-  "valkey-9.0": COMPAT_SERVER_LOG_NAME,
+  "valkey-8.0": COMPAT_VALKEY_WORDING,
+  "valkey-9.0": COMPAT_VALKEY_WORDING,
 };
 
 /** Resolve a profile + per-flag overrides to the u8 bitmask the WASM expects. */
