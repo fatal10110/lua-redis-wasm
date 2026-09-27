@@ -498,24 +498,60 @@ test("eval: table with both ok and err is an error (err wins)", async () => {
   assert.equal((result as { err: Buffer }).err.toString("utf8"), "ERRR");
 });
 
-test("redis.error_reply: prepends ERR to lowercase multi-word messages", async () => {
+test("redis.error_reply: derives the code like Redis (luaPushErrorBuff)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  type Err = { err: Buffer; code?: Buffer };
+
+  // Script-side value of the {err=...} table, before any host-side splitting.
+  const cases: [string, string][] = [
+    ["'My Error'", "My Error"], // leading token is the code as-is, no case check
+    ["'my bad'", "my bad"],
+    ["'-ERR x'", "ERR x"], // one leading '-' is stripped
+    ["'-WRONGTYPE x y'", "WRONGTYPE x y"],
+    ["'WRONGTYPE x'", "WRONGTYPE x"],
+    ["'foo'", "ERR foo"], // no space: generic ERR code is prepended
+    ["'-foo'", "ERR foo"],
+    ["''", "ERR "],
+    ["'-'", "ERR "],
+    ["'CODE msg\\r\\n'", "CODE msg"], // message trimmed of CR/LF (sdstrim)
+    ["'CODE \\r\\nmsg'", "CODE msg"],
+    ["'word\\n'", "ERR word"],
+    ["'a\\0b c'", "ERR a"], // read as a C string: cut at the first NUL
+  ];
+  for (const [arg, expected] of cases) {
+    const got = engine.eval(`return redis.error_reply(${arg}).err`) as Buffer;
+    assert.equal(got.toString("utf8"), expected, `redis.error_reply(${arg})`);
+  }
+
+  // Returned to the host, the leading token is split out as the code.
+  const mixed = engine.eval("return redis.error_reply('My Error')") as Err;
+  assert.equal(mixed.code?.toString("utf8"), "My");
+  assert.equal(mixed.err.toString("utf8"), "Error");
+
+  const word = engine.eval("return redis.error_reply('foo')") as Err;
+  assert.equal(word.code?.toString("utf8"), "ERR");
+  assert.equal(word.err.toString("utf8"), "foo");
+
+  const dashed = engine.eval("return redis.error_reply('-ERR x')") as Err;
+  assert.equal(dashed.code?.toString("utf8"), "ERR");
+  assert.equal(dashed.err.toString("utf8"), "x");
+});
+
+test("redis.error_reply: wrong number or type of arguments returns an error table", async () => {
   await resolveWasmPath();
   const module = await load();
   const engine = module.create(createTestHost());
 
-  const lower = engine.eval("return redis.error_reply('my bad')") as { err: Buffer; code?: Buffer };
-  assert.equal(lower.err.toString("utf8"), "my bad");
-  assert.equal(lower.code?.toString("utf8"), "ERR");
-
-  // Single-word still gets the prefix.
-  const word = engine.eval("return redis.error_reply('foo')") as { err: Buffer; code?: Buffer };
-  assert.equal(word.err.toString("utf8"), "foo");
-  assert.equal(word.code?.toString("utf8"), "ERR");
-
-  // Existing uppercase code is left untouched.
-  const coded = engine.eval("return redis.error_reply('WRONGTYPE x')") as { err: Buffer; code?: Buffer };
-  assert.equal(coded.err.toString("utf8"), "x");
-  assert.equal(coded.code?.toString("utf8"), "WRONGTYPE");
+  for (const args of ["", "1", "nil", "{}", "'a', 'b'"]) {
+    const got = engine.eval(`return redis.error_reply(${args}).err`) as Buffer;
+    assert.equal(
+      got.toString("utf8"),
+      "ERR wrong number or type of arguments",
+      `redis.error_reply(${args})`,
+    );
+  }
 });
 
 test("redis.setresp: RESP2 is accepted and returns no value", async () => {
@@ -1038,6 +1074,93 @@ test("redis.log: calls host log handler", async () => {
   assert.ok(loggedMessage !== null);
   assert.ok(Buffer.isBuffer(loggedMessage));
   assert.equal(loggedMessage.toString(), "test message");
+});
+
+test("redis.log: joins every argument after the level with a space", async () => {
+  await resolveWasmPath();
+  const logs: [number, string][] = [];
+  const host = createTestHost({
+    log(level, message) {
+      logs.push([level, message.toString("utf8")]);
+    },
+  });
+  const module = await load();
+  const engine = module.create(host);
+
+  engine.eval("redis.log(redis.LOG_NOTICE, 'a', 'b', 'c')");
+  // Numbers are converted like lua_tolstring; a numeric string level is accepted.
+  engine.eval("redis.log('1', 'n', 42, 1.5)");
+  // Non-convertible values are skipped with no separator of their own. Redis
+  // writes " " before every converted argument but the first after the level,
+  // so a skipped first argument leaves a leading space.
+  engine.eval("redis.log(0, 'x', nil, true, {}, 'y')");
+  engine.eval("redis.log(0, nil, 'z')");
+  // The level is truncated toward zero, like Redis's int assignment.
+  engine.eval("redis.log(3.9, 'w')");
+
+  assert.deepEqual(logs, [
+    [2, "a b c"],
+    [1, "n 42 1.5"],
+    [0, "x y"],
+    [0, " z"],
+    [3, "w"],
+  ]);
+});
+
+test("redis.log: keeps binary message bytes", async () => {
+  await resolveWasmPath();
+  let logged: Buffer | null = null;
+  const host = createTestHost({
+    log(_level, message) {
+      logged = message;
+    },
+  });
+  const module = await load();
+  const engine = module.create(host);
+
+  engine.eval("redis.log(redis.LOG_DEBUG, 'a\\0b', 'c')");
+  assert.ok(logged);
+  assert.deepEqual(logged, Buffer.from("a\0b c", "binary"));
+});
+
+test("redis.log: rejects invalid levels and too few arguments like Redis", async () => {
+  await resolveWasmPath();
+  let calls = 0;
+  const host = createTestHost({
+    log() {
+      calls += 1;
+    },
+  });
+  const module = await load();
+  const engine = module.create(host);
+
+  // Raised like Redis's luaError: the bare "ERR ..." message, no
+  // "user_script:N:" prefix; the line travels in meta for the host.
+  const expectError = (script: string, message: string) => {
+    const result = engine.eval(`\n${script}`) as {
+      err: Buffer;
+      code?: Buffer;
+      meta?: { line: number };
+    };
+    assert.ok(result && typeof result === "object" && "err" in result, script);
+    assert.equal(result.code?.toString("utf8"), "ERR", script);
+    assert.equal(result.err.toString("utf8"), message, script);
+    assert.equal(result.meta?.line, 2, script);
+  };
+
+  expectError("redis.log()", "redis.log() requires two arguments or more.");
+  expectError("redis.log(redis.LOG_WARNING)", "redis.log() requires two arguments or more.");
+  expectError("redis.log('x', 'msg')", "First argument must be a number (log level).");
+  expectError("redis.log(nil, 'msg')", "First argument must be a number (log level).");
+  expectError("redis.log(-1, 'msg')", "Invalid log level.");
+  expectError("redis.log(4, 'msg')", "Invalid log level.");
+  expectError("redis.log(0/0, 'msg')", "Invalid log level.");
+  expectError("redis.log(1/0, 'msg')", "Invalid log level.");
+  assert.equal(calls, 0);
+
+  // The error is catchable from Lua.
+  const caught = engine.eval("local ok, e = pcall(redis.log, 9, 'x'); return e") as Buffer;
+  assert.equal(caught.toString("utf8"), "ERR Invalid log level.");
 });
 
 // =============================================================================

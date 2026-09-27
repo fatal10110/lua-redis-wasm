@@ -87,16 +87,26 @@ const PROP_VTYPE_NUMBER = 2;
 const PROP_VTYPE_STRING = 3;
 
 /**
+ * Redis looks for the code-ending space only in the first 32 bytes of the
+ * `-CODE message` line (afterErrorReply in src/networking.c). Without the
+ * leading `-`, that leaves 31 bytes of payload.
+ */
+const ERROR_CODE_SEARCH_LIMIT = 31;
+
+/**
  * Splits a raw error payload (`CODE message`) into a structured error reply.
  *
- * The leading token is treated as the error code only when it matches
- * `/^[A-Z][A-Z0-9]*$/` (Redis error-code convention); otherwise the whole
- * payload is the message and `code` is omitted. Binary-safe: the message bytes
- * are preserved verbatim.
+ * `isCode` decides whether the token before the first space is an error code;
+ * if not (or there is no such space), the whole payload is the message and
+ * `code` is omitted. Either way `code + " " + err` rebuilds the payload, so
+ * the wire form is unchanged. Binary-safe: the message bytes are kept as-is.
  */
-function splitErrorPayload(payload: Buffer): { err: Buffer; code?: Buffer } {
+function splitErrorPayload(
+  payload: Buffer,
+  isCode: (buffer: Buffer, end: number) => boolean,
+): { err: Buffer; code?: Buffer } {
   const space = payload.indexOf(0x20);
-  if (space > 0 && isErrorCode(payload, space)) {
+  if (space > 0 && isCode(payload, space)) {
     return {
       err: Buffer.from(payload.subarray(space + 1)),
       code: Buffer.from(payload.subarray(0, space)),
@@ -105,8 +115,25 @@ function splitErrorPayload(payload: Buffer): { err: Buffer; code?: Buffer } {
   return { err: Buffer.from(payload) };
 }
 
-/** Tests whether `buffer[0, end)` matches the Redis error-code shape `[A-Z][A-Z0-9]*`. */
-function isErrorCode(buffer: Buffer, end: number): boolean {
+/**
+ * Code rule for error values ({err=...} tables the script returns). Redis
+ * sends these as `-<err>` and counts the token before the first space as the
+ * error code, taken as-is (no case check), when that space falls in the search
+ * window. `redis.error_reply` builds these payloads the same way.
+ */
+function isReplyErrorCode(_buffer: Buffer, end: number): boolean {
+  return end < ERROR_CODE_SEARCH_LIMIT;
+}
+
+/**
+ * Code rule for script-aborting errors (REPLY_SCRIPT_ERROR). These arrive as
+ * plain Lua error strings, where the leading token can be position info
+ * (`user_script:1: boom`) rather than a code. Redis prefixes such errors with
+ * `ERR`, so only a token shaped like a code (`[A-Z][A-Z0-9]*`, e.g. a
+ * propagated `WRONGTYPE`) is split out; anything else falls back to `ERR` in
+ * buildScriptError.
+ */
+function isScriptErrorCode(buffer: Buffer, end: number): boolean {
   if (buffer[0] < 0x41 || buffer[0] > 0x5a) {
     return false;
   }
@@ -354,7 +381,7 @@ export function decodeReply(
   if (type === REPLY_ERROR) {
     const payload = buffer.subarray(cursor, cursor + countOrLen);
     cursor += countOrLen;
-    return { value: splitErrorPayload(payload), offset: cursor };
+    return { value: splitErrorPayload(payload, isReplyErrorCode), offset: cursor };
   }
 
   if (type === REPLY_SCRIPT_ERROR) {
@@ -363,7 +390,7 @@ export function decodeReply(
     const line = buffer.readUInt32LE(cursor);
     const payload = buffer.subarray(cursor + 4, cursor + countOrLen);
     cursor += countOrLen;
-    const error = splitErrorPayload(payload);
+    const error = splitErrorPayload(payload, isScriptErrorCode);
     // `line` is internal plumbing consumed by buildScriptError; it is not part of
     // the public ReplyValue contract, hence the cast.
     const value = (line > 0 ? { ...error, line } : error) as ReplyValue;

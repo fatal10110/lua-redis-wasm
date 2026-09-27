@@ -217,7 +217,12 @@ Hosts should return plain, undecorated error messages.
 
 ### log
 
-Called when Lua executes `redis.log(level, message)`. Level is a numeric Redis log level.
+Called when Lua executes `redis.log(level, ...)`. Level is a numeric Redis log level
+(0..3, `redis.LOG_DEBUG`..`redis.LOG_WARNING`). As in Redis, every argument after the
+level is joined with a space into `message`. Arguments `lua_tolstring` cannot convert
+(nil, booleans, tables) are skipped and get no separator of their own. A level outside 0..3 raises `ERR Invalid log level.`,
+and fewer than two arguments raise `ERR redis.log() requires two arguments or more.`.
+The handler receives every message, and filtering by verbosity is up to the host.
 
 ## Reply Types
 
@@ -252,8 +257,17 @@ bulk string for `double`, `big_number` and `verbatim_string`, a flat
 key/value array for `map`, and a plain array for `set`.
 
 On decode, an error payload of the form `CODE message` is split into `err` (the
-message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
-`code` is prepended back, so the wire form is always Redis's `CODE message`.
+message) and `code`. For error values a script returns (e.g. `redis.error_reply`,
+`return redis.pcall(...)`), `code` is the token before the first space, taken as-is,
+the way Redis counts error codes (only if that space is within Redis's 32-byte search
+window). A payload with no such space is left whole in `err` with no `code`. For errors
+that abort the script, only a leading `[A-Z][A-Z0-9]*` token (e.g. a propagated
+`WRONGTYPE`) is split out, and anything else gets `ERR`. On encode the `code` is
+prepended back, so the wire form is always Redis's `CODE message`.
+
+`redis.error_reply(msg)` follows Redis: one leading `-` is dropped. With no space, `ERR `
+is prepended (`'foo'` → `ERR foo`). Otherwise the first token is the code as-is
+(`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
 
 ### Determining the Response Type
 
