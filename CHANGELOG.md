@@ -68,7 +68,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overrunning the Lua stack (#50). The JS reply encoder (`encodeReplyValue`) is
   recursive, so a very deep host reply (about 3000 levels for arrays, less for
   `{map=}` replies or under nested `pcall` frames) can still overflow the JS
-  stack before it reaches the decoder. See `docs/limits.md`.
+  stack before it reaches the decoder; that overflow surfaces as an error reply
+  (see below). See `docs/limits.md`.
 - Lua numbers outside the int64 range (including NaN and `±math.huge`) now
   convert to the integer reply `-9223372036854775808`, matching Redis on x86-64,
   instead of saturating (#46).
@@ -79,12 +80,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arguments becomes an error reply for `redis.call` / `redis.pcall`.
   `eval` / `evalWithArgs` always free their buffers, and an exception that still
   escapes WASM marks the engine unusable (later calls throw
-  `LuaEngine is unusable: ...`).
+  `LuaEngine is unusable: ...`). A throwing `_alloc` is reported as the new
+  exported `WasmFault` error class.
 - WASM allocation failures are checked (#40): a script, KEYS/ARGV or host buffer
   that does not fit the 64 MB heap throws a `RangeError` (the engine stays usable)
   instead of writing at address 0. A Lua script exhausting the heap now gets an
-  ordinary `not enough memory` error followed by a full garbage collection,
-  instead of aborting the module.
+  ordinary `not enough memory` error instead of aborting the module, and a full
+  garbage collection runs after any evaluation that leaves more than 16 MB of
+  Lua memory in use, so one heavy script's garbage cannot make the next one run
+  out of memory. `cmsgpack.pack` still aborts when it runs out of heap (as with
+  Redis's aborting allocator), which marks the engine unusable, instead of
+  writing through a NULL buffer.
 
 ## [1.3.0] - 2026-06-08
 

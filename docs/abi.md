@@ -113,8 +113,11 @@ The WASM module exports the following functions:
     and the module is linked with `-sABORTING_MALLOC=0`, so an exhausted heap
     returns 0, which callers must treat as an allocation failure (the engine
     throws a recoverable `RangeError`). A Lua script exhausting the heap gets
-    an ordinary `not enough memory` error, after which the runtime runs a full
-    garbage collection. An exception thrown *from* `alloc` (or any other
+    an ordinary `not enough memory` error; the runtime runs a full garbage
+    collection after any `eval` that leaves more than 16 MB of Lua memory in
+    use. `cmsgpack` allocates without NULL checks, so it is compiled
+    (`wasm/src/lua_cmsgpack_checked.c`) against an allocator that aborts on
+    OOM, like Redis's. An exception thrown *from* `alloc` (or any other
     export) unwound WASM frames without their cleanup, so the engine treats it
     as fatal and refuses further evaluations.
 

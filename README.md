@@ -185,10 +185,26 @@ exception message (a script can catch it with `pcall`); this differs from Redis,
 where `redis.log` cannot fail. A throwing `onSetResp` also leaves the protocol
 unchanged.
 
-If an exception still escapes the WASM module (a trap, or a throwing `_alloc`),
-the VM can no longer be trusted: that call throws, and every later `eval` /
-`evalWithArgs` throws `LuaEngine is unusable: ...` (with the original error as
-`cause`). Create a new engine to continue.
+If an exception still escapes the WASM module, the VM can no longer be trusted:
+that call throws, and every later `eval` / `evalWithArgs` throws
+`LuaEngine is unusable: ...` (with the original error as `cause`). Create a new
+engine to continue. This covers a WASM trap or abort (e.g. `cmsgpack.pack`
+running out of heap aborts, as in Redis) and a throwing `_alloc`, which is
+reported as the exported `WasmFault` error class:
+
+```typescript
+import { WasmFault } from "lua-redis-wasm";
+
+try {
+  engine.eval(script);
+} catch (err) {
+  if (err instanceof RangeError) {
+    // The script or KEYS/ARGV did not fit in the WASM heap; the engine is fine.
+  } else {
+    // WasmFault, a WASM trap/abort, or "LuaEngine is unusable": recreate it.
+  }
+}
+```
 
 ### Call context
 
@@ -389,9 +405,13 @@ const engine = module.create(host);
 | `maxArgBytes`    | Maximum single argument size | WASM runtime     |
 
 The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
-`not enough memory` error, after which its garbage is collected and the engine stays
-usable. A script, KEYS or ARGV too large to copy into the heap makes `eval` /
-`evalWithArgs` throw a `RangeError`; the engine stays usable.
+`not enough memory` error and the engine stays usable. Because Lua 5.1 has no
+emergency garbage collection, the engine runs a full collection after any
+evaluation that leaves more than 16 MB of Lua memory in use, so a heavy script's
+garbage (whether it succeeded, failed, or caught and rethrew an out-of-memory
+error) does not make the next script run out of memory. A script, KEYS or ARGV
+too large to copy into the heap makes `eval` / `evalWithArgs` throw a
+`RangeError`; the engine stays usable.
 
 ## Included Lua Libraries
 
