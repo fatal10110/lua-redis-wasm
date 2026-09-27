@@ -48,7 +48,7 @@ lua-redis-wasm includes resource limits to protect against:
 Always configure appropriate limits for your use case:
 
 ```typescript
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host,
   limits: {
     maxFuel: 10_000_000,              // Instruction budget
@@ -81,7 +81,7 @@ The host interface allows Lua scripts to call back into JavaScript:
 Example secure host implementation:
 
 ```typescript
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host: {
     redisCall(args) {
       // Validate command allowlist

@@ -331,7 +331,7 @@ export type CompatOverrides = {
 };
 
 /**
- * Configuration options for creating a LuaWasmEngine with host integration.
+ * Configuration options for `LuaEngine.create` (an engine with host integration).
  *
  * @example
  * ```typescript
@@ -344,18 +344,26 @@ export type CompatOverrides = {
  *   limits: { maxFuel: 10_000_000 }
  * };
  *
- * const engine = await LuaWasmEngine.create(options);
+ * const engine = await LuaEngine.create(options);
  * ```
  */
 export type EngineOptions = {
   /** Required host interface for redis.call/pcall/log. */
   host: RedisHost;
 
-  /** Optional path to the WASM binary file. Uses bundled file if not provided. */
+  /**
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
+   * The file is read and compiled once per process; later loads reuse it.
+   */
   wasmPath?: string;
 
-  /** Optional pre-loaded WASM binary. Takes precedence over wasmPath. */
-  wasmBytes?: Uint8Array;
+  /**
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
+   */
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. Uses bundled module if not provided. */
   modulePath?: string;
@@ -378,14 +386,14 @@ export type EngineOptions = {
 };
 
 /**
- * Configuration options for creating a standalone LuaWasmEngine.
+ * Configuration options for `LuaEngine.createStandalone`.
  *
  * Standalone mode runs without redis.call/pcall support - those
  * functions will return errors if called. Useful for pure Lua computations.
  *
  * @example
  * ```typescript
- * const engine = await LuaWasmEngine.createStandalone({
+ * const engine = await LuaEngine.createStandalone({
  *   limits: { maxFuel: 1_000_000 }
  * });
  *
@@ -394,11 +402,19 @@ export type EngineOptions = {
  * ```
  */
 export type StandaloneOptions = {
-  /** Optional path to the WASM binary file. */
+  /**
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
+   * The file is read and compiled once per process; later loads reuse it.
+   */
   wasmPath?: string;
 
-  /** Optional pre-loaded WASM binary. */
-  wasmBytes?: Uint8Array;
+  /**
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
+   */
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. */
   modulePath?: string;
@@ -436,11 +452,19 @@ export type StandaloneOptions = {
  * ```
  */
 export type LoadOptions = {
-  /** Optional path to the WASM binary file. */
+  /**
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
+   * The file is read and compiled once per process; later loads reuse it.
+   */
   wasmPath?: string;
 
-  /** Optional pre-loaded WASM binary. */
-  wasmBytes?: Uint8Array;
+  /**
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
+   */
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. */
   modulePath?: string;

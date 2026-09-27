@@ -4,12 +4,14 @@
  * This module provides the primary API for the redis-lua-wasm package:
  * - `load()` - Async function to load the WASM module
  * - `LuaWasmModule` - Factory for creating engine instances
- * - `LuaEngine` - Executes Lua scripts
- * - `LuaWasmEngine` - Convenience API (combines load and create)
+ * - `LuaEngine` - Executes Lua scripts; `LuaEngine.create()` /
+ *   `LuaEngine.createStandalone()` combine load and create
+ * - `LuaWasmEngine` - Deprecated alias of `LuaEngine`
  *
  * ## Architecture
  *
- * The API separates async loading from sync execution:
+ * The API separates async loading from sync execution. The compiled WASM
+ * module is cached, so every `load()` after the first only instantiates it:
  *
  * ```
  * ┌─────────────────────────────────────────────────────────────┐
@@ -31,6 +33,7 @@
  * │                      LuaEngine                              │
  * │  - eval(script)                                             │
  * │  - evalWithArgs(script, keys, args)                         │
+ * │  - reset() (fresh Lua VM), dispose() (release the instance) │
  * └─────────────────────────────────────────────────────────────┘
  * ```
  *
@@ -94,11 +97,17 @@ import {
  * Lua script execution engine.
  *
  * This class provides methods to evaluate Lua scripts. Instances are created
- * via `LuaWasmModule` or `LuaWasmEngine`.
+ * with `LuaEngine.create()` / `LuaEngine.createStandalone()`, or from a
+ * `LuaWasmModule` returned by `load()`.
+ *
+ * Each engine owns its own WASM instance (and linear memory); the compiled
+ * WASM module is shared. Call `dispose()` when done with an engine.
  *
  * ## Evaluating Scripts
  *
  * ```typescript
+ * const engine = await LuaEngine.createStandalone();
+ *
  * // Simple evaluation
  * engine.eval("return 1 + 1");  // Returns: 2
  *
@@ -108,6 +117,8 @@ import {
  *   [Buffer.from("key")],
  *   [Buffer.from("arg")]
  * );
+ *
+ * engine.dispose();
  * ```
  */
 export class LuaEngine {
@@ -120,13 +131,156 @@ export class LuaEngine {
   private fault: unknown = undefined;
   private faulted = false;
 
+  /** Set by dispose(); `instance` and `handlers` are then dropped. */
+  private disposed = false;
+
+  /**
+   * Evaluations in progress. Non-zero while a script runs, i.e. whenever a
+   * host callback of this engine is executing (a nested eval, which the
+   * runtime refuses, counts too).
+   */
+  private activeEvals = 0;
+
+  private instance: WasmExports | null;
+  private handlers: MutableHandlers | null;
+
   /**
    * @internal
    */
   constructor(
-    private exports: WasmExports,
+    exports: WasmExports,
     private limits: EngineLimits | undefined,
-  ) {}
+    handlers: MutableHandlers,
+  ) {
+    this.instance = exports;
+    this.handlers = handlers;
+  }
+
+  /**
+   * Loads the WASM module and creates an engine with full Redis host
+   * integration: `load(options)` followed by `create(options.host)`.
+   *
+   * @example
+   * ```typescript
+   * const engine = await LuaEngine.create({
+   *   host: myRedisHost,
+   *   limits: { maxFuel: 10_000_000 },
+   * });
+   * ```
+   */
+  static async create(options: EngineOptions): Promise<LuaEngine> {
+    const module = await load(options);
+    return module.create(options.host);
+  }
+
+  /**
+   * Loads the WASM module and creates a standalone engine (no
+   * redis.call/pcall): `load(options)` followed by `createStandalone()`.
+   *
+   * @example
+   * ```typescript
+   * const engine = await LuaEngine.createStandalone();
+   * engine.eval("return math.sqrt(16)");  // 4
+   * ```
+   */
+  static async createStandalone(
+    options: StandaloneOptions = {},
+  ): Promise<LuaEngine> {
+    const module = await load(options);
+    return module.createStandalone();
+  }
+
+  /**
+   * Returns the default path to the bundled WASM binary.
+   */
+  static defaultWasmPath(): string {
+    return defaultWasmPath();
+  }
+
+  /**
+   * Returns the default path to the bundled Emscripten JS module.
+   */
+  static defaultModulePath(): string {
+    return defaultModulePath();
+  }
+
+  /**
+   * Replaces the Lua VM with a fresh one, as if the engine had just been
+   * created: whatever earlier scripts left in the VM (e.g. `cjson` settings)
+   * is discarded. The limits, compat profile, `redisProps` and host callbacks
+   * are kept, and so is the `math.random` generator state (process-wide in
+   * Redis too; see docs/compat.md).
+   *
+   * @throws Error if a script is running (i.e. when called from one of this
+   *   engine's host callbacks), after dispose(), or if the engine is unusable
+   * @throws Error if the new VM could not be built (out of memory, or the
+   *   `redisProps` could not be applied); until a later reset() succeeds,
+   *   every eval returns an `ERR Lua VM not initialized` error reply
+   */
+  reset(): void {
+    this.assertUsable();
+    this.assertIdle("reset");
+    const exports = this.exports;
+    const handlers = this.handlers!;
+    handlers.propsFault = undefined;
+    let rc: number;
+    try {
+      rc = exports._reset();
+    } catch (err) {
+      this.markFaulted(err);
+      throw err;
+    }
+    // Written by the props import during _reset (TS keeps the narrowing above).
+    const propsFault = handlers.propsFault as MutableHandlers["propsFault"];
+    if (propsFault) {
+      handlers.propsFault = undefined;
+      if (propsFault.error instanceof WasmFault) {
+        this.markFaulted(propsFault.error);
+      } else {
+        // The VM was built without the props; leave none rather than that one.
+        exports._close_vm?.();
+      }
+      throw propsFault.error;
+    }
+    if (rc !== 0) {
+      throw new Error(
+        "Failed to reset the Lua VM; every eval returns an error until reset() succeeds",
+      );
+    }
+  }
+
+  /**
+   * Releases the engine: closes the Lua VM and drops this engine's references
+   * to its WASM instance (with its linear memory) and to the host callbacks,
+   * so they can be garbage collected. Afterwards eval, evalWithArgs and reset
+   * throw. Calling it again does nothing.
+   *
+   * @throws Error if a script is running (i.e. when called from one of this
+   *   engine's host callbacks); the engine is left untouched, so dispose it
+   *   after the evaluation returns
+   */
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.assertIdle("dispose");
+    const exports = this.instance;
+    // After a fault the module is not trusted: just drop it.
+    if (exports && !this.faulted) {
+      try {
+        exports._close_vm?.();
+      } catch {
+        // The instance is dropped either way.
+      }
+    }
+    this.disposed = true;
+    this.instance = null;
+    if (this.handlers) {
+      // The WASM imports keep the handlers object; detach the host from it.
+      Object.assign(this.handlers, idleHandlers());
+      this.handlers = null;
+    }
+  }
 
   /**
    * Returns the configured resource limits, if any.
@@ -152,6 +306,7 @@ export class LuaEngine {
    *   stays usable)
    * @throws Error if an exception escaped the WASM module, now or in a
    *   previous call; the engine is then unusable
+   * @throws Error if the engine has been disposed
    *
    * @example
    * ```typescript
@@ -188,6 +343,7 @@ export class LuaEngine {
    *   (the engine stays usable)
    * @throws Error if an exception escaped the WASM module, now or in a
    *   previous call; the engine is then unusable
+   * @throws Error if the engine has been disposed
    *
    * @example
    * ```typescript
@@ -247,11 +403,14 @@ export class LuaEngine {
     const retPtr = this.guardAlloc(() => alloc(this.exports, 8));
     let result: PtrLen;
     try {
+      this.activeEvals++;
       try {
         invoke(retPtr);
       } catch (err) {
         this.markFaulted(err);
         throw err;
+      } finally {
+        this.activeEvals--;
       }
       result = readPtrLen(this.exports.HEAPU8, retPtr);
     } finally {
@@ -304,9 +463,35 @@ export class LuaEngine {
   }
 
   /**
+   * The WASM exports. Every public entry point checks assertUsable() first,
+   * so this never sees a disposed engine.
+   * @private
+   */
+  private get exports(): WasmExports {
+    if (!this.instance) {
+      throw new Error(DISPOSED_MESSAGE);
+    }
+    return this.instance;
+  }
+
+  /**
+   * @private
+   */
+  private assertIdle(action: "reset" | "dispose"): void {
+    if (this.activeEvals > 0) {
+      throw new Error(
+        `LuaEngine.${action}() cannot be called while a script is running (from a host callback); call it after the evaluation returns`,
+      );
+    }
+  }
+
+  /**
    * @private
    */
   private assertUsable(): void {
+    if (this.disposed) {
+      throw new Error(DISPOSED_MESSAGE);
+    }
     if (this.faulted) {
       const reason =
         this.fault instanceof Error ? this.fault.message : String(this.fault);
@@ -563,9 +748,25 @@ type MutableHandlers = {
   call: (args: Buffer[]) => ReplyValue;
   pcall: (args: Buffer[]) => ReplyValue;
   props: (retPtr: number) => void;
-  /** Set when the props import failed during `_init`; rethrown by create(). */
+  /**
+   * Set when the props import failed during `_init` / `_reset`; rethrown by
+   * create() / reset().
+   */
   propsFault?: { error: unknown };
 };
+
+/** Handlers with no host attached: before create() and after dispose(). */
+function idleHandlers(): Omit<MutableHandlers, "propsFault"> {
+  return {
+    log: () => {},
+    setresp: () => {},
+    call: () => null,
+    pcall: () => null,
+    props: () => {},
+  };
+}
+
+const DISPOSED_MESSAGE = "LuaEngine has been disposed; create a new engine";
 
 /**
  * Loaded WASM module that can create engine instances.
@@ -678,16 +879,21 @@ function toU32Limit(value: number | undefined): number {
 }
 
 export class LuaWasmModule {
-  private consumed = false;
+  /** Dropped once consumed: from then on only the engine holds them. */
+  private exports: WasmExports | null;
+  private handlers: MutableHandlers | null;
 
   /**
    * @internal
    */
   constructor(
-    private exports: WasmExports,
-    private handlers: MutableHandlers,
+    exports: WasmExports,
+    handlers: MutableHandlers,
     private options: LoadOptions,
-  ) {}
+  ) {
+    this.exports = exports;
+    this.handlers = handlers;
+  }
 
   /**
    * Creates an engine with full Redis host integration.
@@ -718,13 +924,12 @@ export class LuaWasmModule {
    * ```
    */
   create(host: RedisHost): LuaEngine {
-    this.ensureNotConsumed();
-    this.consumed = true;
+    const { exports, handlers } = this.consume();
 
-    this.wireHostCallbacks(host);
-    this.initializeLua();
+    this.wireHostCallbacks(exports, handlers, host);
+    this.initializeLua(exports, handlers);
 
-    return new LuaEngine(this.exports, this.options.limits);
+    return new LuaEngine(exports, this.options.limits, handlers);
   }
 
   /**
@@ -747,13 +952,12 @@ export class LuaWasmModule {
    * ```
    */
   createStandalone(): LuaEngine {
-    this.ensureNotConsumed();
-    this.consumed = true;
+    const { exports, handlers } = this.consume();
 
-    this.wireStandaloneCallbacks();
-    this.initializeLua();
+    this.wireStandaloneCallbacks(handlers);
+    this.initializeLua(exports, handlers);
 
-    return new LuaEngine(this.exports, this.options.limits);
+    return new LuaEngine(exports, this.options.limits, handlers);
   }
 
   /**
@@ -770,32 +974,40 @@ export class LuaWasmModule {
     return defaultModulePath();
   }
 
-  private ensureNotConsumed(): void {
-    if (this.consumed) {
+  /**
+   * Marks the module used and hands its instance over to the engine being
+   * created.
+   */
+  private consume(): { exports: WasmExports; handlers: MutableHandlers } {
+    if (!this.exports || !this.handlers) {
       throw new Error(
         "LuaWasmModule has already been used. Load a new module with load().",
       );
     }
+    const taken = { exports: this.exports, handlers: this.handlers };
+    this.exports = null;
+    this.handlers = null;
+    return taken;
   }
 
-  private initializeLua(): void {
+  private initializeLua(exports: WasmExports, handlers: MutableHandlers): void {
     const limits = this.options.limits;
-    if (this.exports._set_limits && limits) {
-      this.exports._set_limits(
+    if (exports._set_limits && limits) {
+      exports._set_limits(
         toU32Limit(limits.maxFuel),
         toU32Limit(limits.maxReplyBytes),
         toU32Limit(limits.maxArgBytes),
       );
     }
 
-    if (this.exports._set_compat) {
-      this.exports._set_compat(
+    if (exports._set_compat) {
+      exports._set_compat(
         resolveCompatFlags(this.options.profile, this.options.compat),
       );
     }
 
-    const initResult = this.exports._init();
-    const propsFault = this.handlers.propsFault;
+    const initResult = exports._init();
+    const propsFault = handlers.propsFault;
     if (propsFault) {
       throw propsFault.error;
     }
@@ -804,9 +1016,11 @@ export class LuaWasmModule {
     }
   }
 
-  private wireHostCallbacks(host: RedisHost): void {
-    const exports = this.exports;
-
+  private wireHostCallbacks(
+    exports: WasmExports,
+    handlers: MutableHandlers,
+    host: RedisHost,
+  ): void {
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
       // source is copied lazily: for loadstring code it is the whole chunk, and
       // most handlers never read it. The pointer is only valid during the
@@ -837,19 +1051,19 @@ export class LuaWasmModule {
       }
     };
 
-    this.handlers.log = (level: number, message: Buffer): void => {
+    handlers.log = (level: number, message: Buffer): void => {
       host.log(level, message);
     };
 
-    this.handlers.setresp = (version: number): void => {
+    handlers.setresp = (version: number): void => {
       host.onSetResp?.call(host, version as 2 | 3);
     };
 
-    this.handlers.call = (args: Buffer[]): ReplyValue => callHandler(args, false);
-    this.handlers.pcall = (args: Buffer[]): ReplyValue => callHandler(args, true);
+    handlers.call = (args: Buffer[]): ReplyValue => callHandler(args, false);
+    handlers.pcall = (args: Buffer[]): ReplyValue => callHandler(args, true);
   }
 
-  private wireStandaloneCallbacks(): void {
+  private wireStandaloneCallbacks(handlers: MutableHandlers): void {
     const notSupported = (action: string): ReplyValue => ({
       err: Buffer.from(
         `ERR ${action} is not available in standalone mode`,
@@ -857,9 +1071,9 @@ export class LuaWasmModule {
       ),
     });
 
-    this.handlers.log = (): void => {};
-    this.handlers.call = (): ReplyValue => notSupported("redis.call");
-    this.handlers.pcall = (): ReplyValue => notSupported("redis.pcall");
+    handlers.log = (): void => {};
+    handlers.call = (): ReplyValue => notSupported("redis.call");
+    handlers.pcall = (): ReplyValue => notSupported("redis.pcall");
   }
 }
 
@@ -889,13 +1103,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
   validateLimits(options.limits);
 
   // Mutable handlers - these will be set by wireHostCallbacks/wireStandaloneCallbacks
-  const handlers: MutableHandlers = {
-    log: () => {},
-    setresp: () => {},
-    call: () => null,
-    pcall: () => null,
-    props: () => {},
-  };
+  const handlers: MutableHandlers = idleHandlers();
 
   // Assigned once instantiated; WASM only calls the imports after that.
   let exports: WasmExports;
@@ -939,60 +1147,23 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
 }
 
 /**
- * This class provides a convenience API
- * where `create()` and `createStandalone()` are static async methods.
+ * @deprecated Use `LuaEngine.create()` / `LuaEngine.createStandalone()`.
+ * `LuaWasmEngine` is now an alias of `LuaEngine` (same statics, instances are
+ * `LuaEngine`s) and will be removed in the next major version.
  *
  * @example
  * ```typescript
- * // Convenience API
+ * // Before
  * const engine = await LuaWasmEngine.create({ host: myHost });
- *
- * // Modular API
- * const module = await load();
- * const engine = module.create(myHost);
+ * // After
+ * const engine = await LuaEngine.create({ host: myHost });
  * ```
  */
-export class LuaWasmEngine {
-  private constructor(private engine: LuaEngine) {}
-
-  static async create(options: EngineOptions): Promise<LuaWasmEngine> {
-    const module = await load(options);
-    const engine = module.create(options.host);
-    return new LuaWasmEngine(engine);
-  }
-
-  static async createStandalone(
-    options: StandaloneOptions = {},
-  ): Promise<LuaWasmEngine> {
-    const module = await load(options);
-    const engine = module.createStandalone();
-    return new LuaWasmEngine(engine);
-  }
-
-  static defaultWasmPath(): string {
-    return defaultWasmPath();
-  }
-
-  static defaultModulePath(): string {
-    return defaultModulePath();
-  }
-
-  eval(script: Buffer | Uint8Array | string): ReplyValue {
-    return this.engine.eval(script);
-  }
-
-  evalWithArgs(
-    script: Buffer | Uint8Array | string,
-    keys: Array<Buffer | Uint8Array | string> = [],
-    args: Array<Buffer | Uint8Array | string> = [],
-  ): ReplyValue {
-    return this.engine.evalWithArgs(script, keys, args);
-  }
-
-  getLimits(): EngineLimits | undefined {
-    return this.engine.getLimits();
-  }
-}
+export const LuaWasmEngine = LuaEngine;
+/**
+ * @deprecated Use `LuaEngine`. Will be removed in the next major version.
+ */
+export type LuaWasmEngine = LuaEngine;
 
 export type {
   EngineOptions,

@@ -45,7 +45,7 @@ emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sEXPORTED_RUNTIME_METHODS="['HEAPU8']" \
   -sINCOMING_MODULE_JS_API="['locateFile','instantiateWasm']" \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 -sABORTING_MALLOC=0 \
-  -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat','_current_call_source','_current_call_line']" \
+  -sEXPORTED_FUNCTIONS="['_init','_reset','_close_vm','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat','_current_call_source','_current_call_line']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$LUA_DEPS" -I"$VALKEY_SRC" \
   "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" "$SRC_DIR/redis_math.c" "$SRC_DIR/lua_cmsgpack_checked.c" \
   "$VALKEY_SRC/rand.c" $CORE_FILES $LIB_FILES $MODULE_FILES \

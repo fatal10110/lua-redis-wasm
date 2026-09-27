@@ -13,12 +13,14 @@
 
 import type { LoadOptions } from "./types.js";
 import {
+  compiledModule,
   instantiate,
   defaultModulePath,
   defaultWasmPath,
   type EmscriptenModuleFactory,
   type HostImport,
-  type WasmExports
+  type WasmExports,
+  type WasmSource
 } from "./loader-core.js";
 
 export { defaultModulePath, defaultWasmPath };
@@ -41,24 +43,34 @@ async function loadGlueFactory(
   return (imported.default ?? imported) as EmscriptenModuleFactory;
 }
 
-/** Fetch the WASM binary bytes (or use `options.wasmBytes` if provided). */
-async function loadWasmBinary(options: LoadOptions): Promise<Uint8Array> {
+/**
+ * Where the WASM binary comes from: `options.wasmBytes`, or its URL (fetched
+ * only on a compiled-module cache miss).
+ */
+function wasmSource(options: LoadOptions): WasmSource {
   if (options.wasmBytes) {
     return options.wasmBytes;
   }
   // Explicit URL (e.g. jsdelivr) wins; otherwise the co-located bundled asset.
-  const wasmUrl = options.wasmPath ?? new URL("./redis_lua.wasm", import.meta.url);
-  const response = await fetch(wasmUrl);
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch redis_lua.wasm: ${response.status} ${response.statusText}`
-    );
-  }
-  return new Uint8Array(await response.arrayBuffer());
+  const wasmUrl = options.wasmPath ?? new URL("./redis_lua.wasm", import.meta.url).href;
+  return {
+    location: wasmUrl,
+    read: async () => {
+      const response = await fetch(wasmUrl);
+      if (!response.ok) {
+        throw new Error(
+          `Failed to fetch redis_lua.wasm: ${response.status} ${response.statusText}`
+        );
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    }
+  };
 }
 
 /**
- * Loads and instantiates the Emscripten WASM module with host imports (browser).
+ * Loads and instantiates the Emscripten WASM module with host imports
+ * (browser). The compiled module is cached (see `compiledModule`); each call
+ * creates a new instance.
  *
  * @param options - Engine or standalone options with optional custom paths
  * @param hostImports - Map of host callback functions to inject
@@ -69,6 +81,6 @@ export async function loadModule(
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
   const moduleFactory = await loadGlueFactory(options);
-  const wasmBinary = await loadWasmBinary(options);
-  return instantiate(moduleFactory, wasmBinary, hostImports);
+  const wasmModule = await compiledModule(wasmSource(options));
+  return instantiate(moduleFactory, wasmModule, hostImports);
 }
