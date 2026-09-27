@@ -77,8 +77,8 @@ Creates a new engine instance with host integration.
 const engine = await LuaEngine.create({
   host: RedisHost,         // Required: host callbacks
   limits?: EngineLimits,   // Optional: resource limits
-  wasmPath?: string,       // Optional: custom WASM file path
-  wasmBytes?: Uint8Array,  // Optional: pre-loaded WASM binary
+  wasmPath?: string,       // Optional: custom WASM file path (Node: path or file:// URL)
+  wasmBytes?: Uint8Array | ArrayBuffer, // Optional: pre-loaded WASM binary
   redisProps?: RedisProps, // Optional: host-injected redis.* constants/stubs
 });
 ```
@@ -186,7 +186,7 @@ const engine = module.create(myHost); // or module.createStandalone()
 
 A `LuaWasmModule` creates exactly one engine. The compiled WASM module is cached
 for the process (keyed by the resolved `wasmPath`/URL, or by the `wasmBytes`
-array), so only the first `load()` reads and compiles the binary; every engine
+object), so only the first `load()` reads and compiles the binary; every engine
 still gets its own instance and memory, and engines share no state.
 
 ### LuaWasmEngine (deprecated)

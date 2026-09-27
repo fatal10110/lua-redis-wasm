@@ -352,16 +352,18 @@ export type EngineOptions = {
   host: RedisHost;
 
   /**
-   * Optional path to the WASM binary file. Uses bundled file if not provided.
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
    * The file is read and compiled once per process; later loads reuse it.
    */
   wasmPath?: string;
 
   /**
-   * Optional pre-loaded WASM binary. Takes precedence over wasmPath. Compiled
-   * once per array: pass the same array again to reuse it (do not mutate it).
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
    */
-  wasmBytes?: Uint8Array;
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. Uses bundled module if not provided. */
   modulePath?: string;
@@ -401,16 +403,18 @@ export type EngineOptions = {
  */
 export type StandaloneOptions = {
   /**
-   * Optional path to the WASM binary file. Uses bundled file if not provided.
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
    * The file is read and compiled once per process; later loads reuse it.
    */
   wasmPath?: string;
 
   /**
-   * Optional pre-loaded WASM binary. Takes precedence over wasmPath. Compiled
-   * once per array: pass the same array again to reuse it (do not mutate it).
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
    */
-  wasmBytes?: Uint8Array;
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. */
   modulePath?: string;
@@ -449,16 +453,18 @@ export type StandaloneOptions = {
  */
 export type LoadOptions = {
   /**
-   * Optional path to the WASM binary file. Uses bundled file if not provided.
+   * Optional location of the WASM binary file: a filesystem path or `file://`
+   * URL in Node, a URL in the browser. Uses the bundled file if not provided.
    * The file is read and compiled once per process; later loads reuse it.
    */
   wasmPath?: string;
 
   /**
-   * Optional pre-loaded WASM binary. Takes precedence over wasmPath. Compiled
-   * once per array: pass the same array again to reuse it (do not mutate it).
+   * Optional pre-loaded WASM binary (e.g. `await response.arrayBuffer()`).
+   * Takes precedence over wasmPath. Compiled once per object: pass the same
+   * one again to reuse it (do not mutate it).
    */
-  wasmBytes?: Uint8Array;
+  wasmBytes?: Uint8Array | ArrayBuffer;
 
   /** Optional path to the Emscripten JS module. */
   modulePath?: string;

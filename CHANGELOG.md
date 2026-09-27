@@ -38,10 +38,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The compiled `WebAssembly.Module` is cached per process, keyed by the
-  resolved `wasmPath` / URL or by the `wasmBytes` array: only the first `load()`
-  reads and compiles the binary, later ones only instantiate it (each engine
-  still gets its own instance and memory). A failed compilation is not cached.
-  In Node, `wasmPath` may also be a `file://` URL (#43).
+  resolved `wasmPath` / URL or by the `wasmBytes` object: only the first
+  `load()` reads and compiles the binary, later ones only instantiate it (each
+  engine still gets its own instance and memory). A failed compilation is not
+  cached. In Node, `wasmPath` may also be a `file://` URL, and `wasmBytes` is
+  typed `Uint8Array | ArrayBuffer` (an ArrayBuffer was already accepted at
+  runtime) (#43).
 - A `LuaWasmModule` hands its WASM instance over to the engine it creates and
   keeps no reference to it (#43).
 - The WASM `reset` export also rebuilds a missing VM (after a failed build or

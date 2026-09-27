@@ -146,26 +146,29 @@ export function defaultModulePath(): string {
  * Compiled modules, so that only the first `load()` of a given binary reads
  * and compiles it; every later one only instantiates it (a new instance with
  * its own linear memory). Keyed by the resolved path/URL of the `.wasm` file,
- * or by the identity of a `wasmBytes` array (held weakly: dropping the array
- * drops its entry). A file is read once per process, so a binary rebuilt on
+ * or by the identity of the `wasmBytes` object, a typed array or an ArrayBuffer
+ * (held weakly: dropping it drops its entry). A file is read once per process, so a binary rebuilt on
  * disk is only picked up by a new process. Failed compilations are not cached.
  */
 const compiledByLocation = new Map<string, Promise<WebAssembly.Module>>();
-const compiledByBytes = new WeakMap<Uint8Array, Promise<WebAssembly.Module>>();
+const compiledByBytes = new WeakMap<WasmBytes, Promise<WebAssembly.Module>>();
+
+/** A WASM binary as `options.wasmBytes` accepts it. */
+export type WasmBytes = ArrayBufferView | ArrayBuffer;
 
 /**
  * Where the WASM binary comes from: its bytes (`options.wasmBytes`), or the
  * resolved location of the file plus how to read it.
  */
 export type WasmSource =
-  | Uint8Array
+  | WasmBytes
   | { location: string; read: () => Promise<Uint8Array> };
 
 /** Compiles `bytes`, reporting a failure the way instantiation does. */
-async function compile(bytes: Uint8Array): Promise<WebAssembly.Module> {
+async function compile(bytes: WasmBytes): Promise<WebAssembly.Module> {
   try {
     // Looked up per call (not captured) so tests can count compilations.
-    return await WebAssembly.compile(bytes as Uint8Array<ArrayBuffer>);
+    return await WebAssembly.compile(bytes as BufferSource);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to instantiate redis_lua.wasm: ${detail}`, { cause: err });
@@ -183,9 +186,19 @@ function remember<K>(
   return compiled;
 }
 
+/**
+ * Bytes are anything but a location: an ArrayBuffer or any view, including
+ * ones from another realm (which `instanceof` / `ArrayBuffer.isView` miss).
+ */
+function isLocation(
+  source: WasmSource
+): source is Extract<WasmSource, { location: string }> {
+  return typeof (source as { read?: unknown }).read === "function";
+}
+
 /** The compiled module for `source`: cached, or read and compiled on first use. */
 export function compiledModule(source: WasmSource): Promise<WebAssembly.Module> {
-  if (ArrayBuffer.isView(source)) {
+  if (!isLocation(source)) {
     return (
       compiledByBytes.get(source) ?? remember(compiledByBytes, source, compile(source))
     );
