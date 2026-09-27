@@ -145,10 +145,10 @@ Example:
 ```typescript
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { LuaWasmEngine } from '../src/index.js';
+import { LuaEngine } from '../src/index.js';
 
 test('description of test', async () => {
-  const engine = await LuaWasmEngine.createStandalone();
+  const engine = await LuaEngine.createStandalone();
   const result = engine.eval('return 1 + 1');
   assert.strictEqual(result, 2);
 });
