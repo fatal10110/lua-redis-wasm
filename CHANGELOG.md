@@ -27,18 +27,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The vendored C sources (Lua 5.1 with cjson/cmsgpack/struct/bit, `fpconv`,
-  `rand.c`) now come from Valkey 9.1.2 (BSD-3-Clause, `vendor/valkey` submodule)
+  `rand.c`) now come from Valkey 8.0.11 (BSD-3-Clause, `vendor/valkey` submodule)
   instead of the Redis 8.4 tree (`vendor/redis`), whose newer files are licensed
-  under RSALv2/SSPLv1/AGPLv3. All the Lua security fixes the Redis tree carried
-  (CVE-2024-31449, CVE-2025-46817, CVE-2025-46818, CVE-2025-46819,
-  CVE-2025-49844) are in Valkey's copy too. `THIRD_PARTY_NOTICES.md` now covers
-  the BSD-3-Clause code from Valkey / Redis 7.2.4 (including the portions of
-  `wasm/src` derived from it), `strbuf.c`, `fpconv.c` and `fpconv_powers.h`.
-- Lua strings are hashed with Valkey's murmur32 (Valkey 8.1+) instead of Redis's
-  hash, so the order in which `pairs`/`next` visit string keys, and therefore the
-  key order of `cjson.encode` / `cmsgpack.pack` output for tables with string
-  keys, now matches Valkey 8.1+ / 9.x rather than Redis. Lua does not define this
-  order, and it already differs between Redis and Valkey 8.1+.
+  under RSALv2/SSPLv1/AGPLv3. Valkey 8.0.11's Lua is the same code as Redis 8.4's
+  apart from `cjson.decode_array_with_array_mt` (see Removed): it carries the same
+  security fixes (CVE-2024-31449, CVE-2025-46817, CVE-2025-46818, CVE-2025-46819,
+  CVE-2025-49844) and the same string hashing, so table iteration order is
+  unchanged. `THIRD_PARTY_NOTICES.md` now covers the BSD-3-Clause code from
+  Valkey / Redis 7.2.4 (including the portions of `wasm/src` derived from it),
+  `strbuf.c`, `fpconv.c` and `fpconv_powers.h`.
 - WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
   (`{0,0}` on success, otherwise the error message C raises as a Lua error), and
   every `PtrLen`-returning export and import uses the struct-return pointer only.

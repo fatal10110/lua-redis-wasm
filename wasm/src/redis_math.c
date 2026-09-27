@@ -2,11 +2,11 @@
  *
  * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
  * THIRD_PARTY_NOTICES.md): Valkey's redis_math_random / redis_math_randomseed
- * (src/modules/lua/script_lua.c).
+ * (src/script_lua.c).
  *
  * Redis and Valkey replace Lua's math.random and math.randomseed, which use the
  * libc rand()/srand(), with versions driven by the rand48 PRNG in src/rand.c
- * (vendor/valkey/src/rand.c, compiled as is; Valkey calls it serverLrand48 /
+ * (vendor/valkey/src/rand.c, compiled as is; Valkey 8.0 calls it serverLrand48 /
  * serverSrand48, Redis redisLrand48 / redisSrand48 -- same generator), so a seed
  * yields the same sequence on every platform. The functions below are Lua 5.1's
  * math_random and math_randomseed (vendor/valkey/deps/lua/src/lmathlib.c) with
@@ -30,7 +30,7 @@
 
 static int redis_math_random(lua_State *L) {
   /* the `%' avoids the (rare) case of r==1 */
-  lua_Number r = (lua_Number)(serverLrand48() % SERVER_LRAND48_MAX) / (lua_Number)SERVER_LRAND48_MAX;
+  lua_Number r = (lua_Number)(serverLrand48() % REDIS_LRAND48_MAX) / (lua_Number)REDIS_LRAND48_MAX;
   switch (lua_gettop(L)) { /* check number of arguments */
     case 0: {              /* no arguments */
       lua_pushnumber(L, r); /* Number between 0 and 1 */

@@ -10,8 +10,8 @@ all of this third-party code are reproduced below.
 ## Valkey / Redis 7.2.4
 - Files:
   - Portions of `wasm/src/runtime.c`, `wasm/src/redis_api.c` and `wasm/src/redis_math.c`
-    derived from Valkey / Redis 7.2.4 (`src/script_lua.c`, `src/eval.c`, `src/util.c`;
-    `src/modules/lua/` in Valkey 9.x): the scripting sandbox (globals allow/deny lists,
+    derived from Valkey / Redis 7.2.4 (`src/script_lua.c`, `src/eval.c`, `src/util.c`
+    in Valkey 8.0): the scripting sandbox (globals allow/deny lists,
     readonly table and basic-type metatable protection), the Lua <-> RESP value
     conversions, the `redis.*` API bindings and `double2ll`.
   - Redis and Valkey modifications to the Lua 5.1 core in `vendor/valkey/deps/lua/src`
