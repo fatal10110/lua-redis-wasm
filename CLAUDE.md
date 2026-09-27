@@ -35,7 +35,7 @@ Application → Public API (engine.ts) → Loader (loader.ts) → Emscripten Glu
 
 ### Layer Responsibilities
 
-- **src/engine.ts** - Core API: `LuaEngine` (evaluation, `reset()`/`dispose()`, static `create`/`createStandalone` convenience factories), `LuaWasmModule` (factory), `load()`, compat profile resolution, `LuaWasmEngine` (deprecated alias of `LuaEngine`, to be removed in a future major)
+- **src/engine.ts** - Core API: `LuaEngine` (evaluation, compile-only check `compile()`, `reset()`/`dispose()`, static `create`/`createStandalone` convenience factories), `LuaWasmModule` (factory), `load()`, compat profile resolution, `LuaWasmEngine` (deprecated alias of `LuaEngine`, to be removed in a future major)
 - **src/loader.ts** / **src/loader.browser.ts** / **src/loader-core.ts** - WASM module loading (compiled module cached per process), host import injection
 - **src/codec.ts** - Binary encoding/decoding for ABI (reply values, argument arrays)
 - **src/helpers.ts** - WASM memory operations, ABI helpers, SHA1
@@ -55,6 +55,7 @@ engine.eval(script);
 const engine = await LuaEngine.create({ host, limits });
 engine.eval(script);
 
+engine.compile(script); // null, or the compile error eval would give (for SCRIPT LOAD)
 engine.reset();   // fresh Lua VM, same limits/compat/props/host
 engine.dispose(); // close the VM and drop the WASM instance
 
@@ -63,10 +64,10 @@ engine.dispose(); // close the VM and drop the WASM instance
 
 ### Binary Protocol (ABI)
 
-ABI version 3; the full spec is in `docs/abi.md`.
+ABI version 4; the full spec is in `docs/abi.md`.
 
 Reply encoding: `[type: u8][length_or_count: u32le][payload]`
-- Type tags: 0x00=NULL, 0x01=INTEGER, 0x02=BULK STRING, 0x03=ARRAY, 0x04=STATUS, 0x05=ERROR, 0x06=SCRIPT ERROR (`[line: u32le][flags: u8]`, engine kind/name when flagged, then the message), 0x07-0x0c=RESP3 (boolean, double, map, set, big number, verbatim)
+- Type tags: 0x00=NULL, 0x01=INTEGER, 0x02=BULK STRING, 0x03=ARRAY, 0x04=STATUS, 0x05=ERROR, 0x06=SCRIPT ERROR (`[line: u32le][flags: u8]`, engine kind/name when flagged, then the message; flag 0x04 marks a compile error), 0x07-0x0c=RESP3 (boolean, double, map, set, big number, verbatim)
 
 Argument encoding: `[count: u32le][len1: u32le][data1][len2: u32le][data2]...`
 
@@ -85,7 +86,7 @@ type RedisHost = {
 ## Key Patterns
 
 - **Module is one-time use**: After `create()` or `createStandalone()`, the module cannot create another engine (it hands its instance to the engine); the compiled `WebAssembly.Module` is cached, so another `load()` only instantiates
-- **Lifecycle**: `reset()`/`dispose()` are refused while a script runs (from a host callback); after `dispose()` every eval/reset throws
+- **Lifecycle**: `reset()`/`dispose()` are refused while a script runs (from a host callback); after `dispose()` every eval/compile/reset throws
 - **Binary-safe throughout**: All data flows as Buffers, never strings (except intentional UTF-8 for commands)
 - **sret ABI**: `PtrLen`-returning exports/imports take a leading struct-return pointer; the engine writes/reads the 8-byte result there
 - **Host imports never throw**: each import catches everything and reports failure via its return value, which C raises as a Lua error; an exception that still escapes WASM marks the engine unusable
