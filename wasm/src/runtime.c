@@ -213,7 +213,12 @@ static int script_error_handler(lua_State *L) {
   return 1;
 }
 
-static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb);
+/* Encoder failure codes. ENCODE_STACK_LIMIT is turned into a
+ * "reached lua stack limit" error reply by encode_lua_value. */
+#define ENCODE_FAILED -1
+#define ENCODE_STACK_LIMIT -2
+
+static int encode_value(lua_State *L, int idx, ReplyBuffer *rb, int depth);
 
 static size_t table_pair_count(lua_State *L, int idx) {
   size_t count = 0;
@@ -225,32 +230,37 @@ static size_t table_pair_count(lua_State *L, int idx) {
   return count;
 }
 
-static int encode_map(lua_State *L, int idx, ReplyBuffer *rb) {
+static int encode_map(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
   size_t count = table_pair_count(L, idx);
   if (rb_write_header(rb, REPLY_MAP, (uint32_t)count) != 0) {
-    return -1;
+    return ENCODE_FAILED;
   }
   lua_pushnil(L);
   while (lua_next(L, idx) != 0) {
-    if (encode_lua_value(L, -2, rb) != 0 || encode_lua_value(L, -1, rb) != 0) {
-      lua_pop(L, 1);
-      return -1;
+    int rc = encode_value(L, -2, rb, depth + 1);
+    if (rc == 0) {
+      rc = encode_value(L, -1, rb, depth + 1);
+    }
+    if (rc != 0) {
+      lua_pop(L, 2);
+      return rc;
     }
     lua_pop(L, 1);
   }
   return 0;
 }
 
-static int encode_set(lua_State *L, int idx, ReplyBuffer *rb) {
+static int encode_set(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
   size_t count = table_pair_count(L, idx);
   if (rb_write_header(rb, REPLY_SET, (uint32_t)count) != 0) {
-    return -1;
+    return ENCODE_FAILED;
   }
   lua_pushnil(L);
   while (lua_next(L, idx) != 0) {
-    if (encode_lua_value(L, -2, rb) != 0) {
-      lua_pop(L, 1);
-      return -1;
+    int rc = encode_value(L, -2, rb, depth + 1);
+    if (rc != 0) {
+      lua_pop(L, 2);
+      return rc;
     }
     lua_pop(L, 1);
   }
@@ -269,7 +279,7 @@ static int rawget_field(lua_State *L, int idx, const char *key) {
   return lua_type(L, -1);
 }
 
-static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
+static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
   if (rawget_field(L, idx, "double") == LUA_TNUMBER) {
     double value = (double)lua_tonumber(L, -1);
     uint8_t payload[8];
@@ -327,7 +337,7 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
 
   if (rawget_field(L, idx, "map") == LUA_TTABLE) {
     int abs = lua_gettop(L);
-    int rc = encode_map(L, abs, rb);
+    int rc = encode_map(L, abs, rb, depth);
     lua_pop(L, 1);
     return rc;
   }
@@ -335,7 +345,7 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
 
   if (rawget_field(L, idx, "set") == LUA_TTABLE) {
     int abs = lua_gettop(L);
-    int rc = encode_set(L, abs, rb);
+    int rc = encode_set(L, abs, rb, depth);
     lua_pop(L, 1);
     return rc;
   }
@@ -344,7 +354,7 @@ static int encode_typed_table(lua_State *L, int idx, ReplyBuffer *rb) {
   return 1;
 }
 
-static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
+static int encode_table(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
   if (idx < 0) {
     idx = lua_gettop(L) + idx + 1;
   }
@@ -369,7 +379,7 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
 
   // Typed tables convert at any script protocol level, like real Redis. Only
   // booleans depend on redis.setresp(3).
-  int typed = encode_typed_table(L, idx, rb);
+  int typed = encode_typed_table(L, idx, rb, depth);
   if (typed != 1) {
     return typed;
   }
@@ -390,29 +400,47 @@ static int encode_table(lua_State *L, int idx, ReplyBuffer *rb) {
   }
   for (size_t i = 1; i <= count; i++) {
     lua_rawgeti(L, idx, (int)i);
-    if (encode_lua_value(L, -1, rb) != 0) {
-      lua_pop(L, 1);
-      return -1;
-    }
+    int rc = encode_value(L, -1, rb, depth + 1);
     lua_pop(L, 1);
+    if (rc != 0) {
+      return rc;
+    }
   }
   return 0;
 }
 
-static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
+/* Lua number -> integer reply, as Redis's `(long long)lua_tonumber(...)` does
+ * on x86-64: the fractional part is truncated (`return 3.7` -> 3), and NaN,
+ * +/-inf and anything outside the int64 range become INT64_MIN (cvttsd2si's
+ * "integer indefinite" value). A plain C cast is undefined for those inputs and
+ * saturates in WASM, so the out-of-range case is spelled out. */
+static int64_t lua_number_to_reply_int(lua_Number num) {
+  if (num >= -9223372036854775808.0 && num < 9223372036854775808.0) {
+    return (int64_t)num;
+  }
+  return INT64_MIN;
+}
+
+static int encode_value(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
+  // Like Redis's luaReplyToRedisReply: make room for the (at most 4) slots a
+  // table conversion pushes before recursing, instead of writing past the end
+  // of the Lua stack. Deep or cyclic tables hit this (or the depth cap, see
+  // REDIS_REPLY_MAX_DEPTH) and fail with "reached lua stack limit" rather than
+  // hanging the host.
+  if (depth > REDIS_REPLY_MAX_DEPTH || !lua_checkstack(L, 4)) {
+    return ENCODE_STACK_LIMIT;
+  }
   int type = lua_type(L, idx);
   switch (type) {
     case LUA_TNIL:
       return rb_write_header(rb, REPLY_NULL, 0);
     case LUA_TNUMBER: {
-      // Real Redis converts a Lua number return value to an integer reply,
-      // truncating any fractional part (e.g. `return 3.7` -> 3).
       lua_Number num = lua_tonumber(L, idx);
       if (rb_write_header(rb, REPLY_INT, 8) != 0) {
-        return -1;
+        return ENCODE_FAILED;
       }
       uint8_t payload[8];
-      write_i64_le(payload, (int64_t)num);
+      write_i64_le(payload, lua_number_to_reply_int(num));
       return rb_append(rb, payload, sizeof(payload));
     }
     case LUA_TBOOLEAN:
@@ -444,10 +472,31 @@ static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
       return rb_append(rb, str, len);
     }
     case LUA_TTABLE:
-      return encode_table(L, idx, rb);
+      return encode_table(L, idx, rb, depth);
     default:
-      return -1;
+      return ENCODE_FAILED;
   }
+}
+
+/* Encodes the script's return value. Returns 0 on success and non-zero when the
+ * value cannot be converted. A reply nested beyond the Lua stack limit (deep or
+ * cyclic tables) is not a conversion failure: like Redis, it replies with a
+ * "reached lua stack limit" error. Redis writes that error in place of the
+ * too-deep element, which here would hand the host a reply thousands of levels
+ * deep, so the whole reply is replaced with the error instead. */
+static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb) {
+  static const char stack_limit_msg[] = "ERR reached lua stack limit";
+  if (idx < 0) {
+    idx = lua_gettop(L) + idx + 1;
+  }
+  int top = lua_gettop(L);
+  int rc = encode_value(L, idx, rb, 0);
+  lua_settop(L, top);
+  if (rc != ENCODE_STACK_LIMIT) {
+    return rc;
+  }
+  rb->len = 0;
+  return rb_write_single_line(rb, REPLY_ERROR, stack_limit_msg, sizeof(stack_limit_msg) - 1);
 }
 
 static void remove_global(lua_State *L, const char *name) {
