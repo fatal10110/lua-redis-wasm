@@ -256,6 +256,10 @@ lets the host render. When a script aborts, the reply carries:
   globals tree, so the VM itself raises "Attempt to modify a readonly table".
 - `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
   runtime / `redis.call` errors, the original message, passed through untouched.
+  An error object that is a table (`error({err='MY custom'})`,
+  `error(redis.error_reply('boom'))`, a `redis.call` error) is reported by its `err`
+  field, like Redis (`ERR unknown error` when `err` is not a string); other
+  non-string values as Lua's `tostring` renders them (`error(nil)` → `nil`).
 
 The host owns wording: map `kind` to the Redis message (version-specific if you care)
 and decorate with `line`/`sha` as needed
@@ -263,6 +267,19 @@ and decorate with `line`/`sha` as needed
 returns (e.g. `return redis.pcall(...)`) is passed through untouched.
 
 Hosts should return plain, undecorated error messages.
+
+### Error objects inside the script
+
+By default, and with every `profile` except `redis-6.2`, scripts see the Redis 7.0+
+error model: `redis.call` (and `redis.log`, `redis.setresp`, ...) raise an `{err=...}`
+table, and the global `pcall` returns the `err` string of a caught error table, so
+`pcall(redis.call, ...)` still yields a string while an `xpcall` handler receives the
+table. A host command error becomes the same table `redis.pcall` returns:
+`{err='CODE message', ignore_error_stats_update=true}`, with the generic `ERR` code
+added to a message that has no space and trailing CR/LF trimmed, as in Redis. With
+`profile: "redis-6.2"` errors are plain strings and a host error reaches the script
+verbatim. The `compat.tableErrors` option overrides the profile. What the host
+receives when the error aborts the script is the same in both models.
 
 ### log
 
@@ -434,6 +451,18 @@ crosses the limit. It covers the script's return value (including returned
 `{err=}` / `{ok=}` tables), not script errors or `redis.call` replies.
 `maxArgBytes` counts the ABI encoding: 4 bytes, plus 4 bytes and the data of
 each key and argument.
+
+`maxFuel` (default 10,000,000) is a deterministic budget of Lua VM instructions,
+charged in steps of 1000, not Redis's wall-clock `lua-time-limit` /
+`busy-reply-threshold`. The engine runs one script synchronously, so there is no
+`BUSY` reply, `SCRIPT KILL` or `SHUTDOWN NOSAVE`, and time spent in host callbacks
+or inside C functions such as `string.rep` is not charged. A script that spends the
+budget aborts with `{ err: "Script killed by fuel limit", code: "ERR" }` plus the
+usual `meta` (`line`, `sha`), where a killed Redis script reports
+`ERR Script killed by user with SCRIPT KILL...`. As in Redis after `SCRIPT KILL`,
+the kill cannot be caught: once raised it is raised again at every instruction, so
+it escapes any `pcall` or `xpcall` (including their message handlers) and reaches
+the host. Each evaluation starts with the full budget.
 
 The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
 `not enough memory` error and the engine stays usable. Because Lua 5.1 has no

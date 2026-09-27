@@ -61,6 +61,16 @@ through `redisProps`.
 - No other randomness unless explicitly injected by the host.
 - No native extensions beyond the supported Redis modules.
 
+## Errors
+- Redis 7.0+ error model (every profile except `redis-6.2`): `redis.call` and
+  the other `redis.*` functions raise `{err=...}` tables, and the global `pcall`
+  returns the `err` string of a caught error table. `redis-6.2` raises plain
+  strings. Override with `compat.tableErrors`.
+- An uncaught table error is reported by its `err` field, like Redis's
+  `luaExtractErrorInformation`.
+- Script timeouts are an instruction budget (`maxFuel`), not a wall-clock
+  `lua-time-limit`; see [limits](limits.md).
+
 ## Compatibility Criteria
 - Return values and errors match Redis 7 behavior for the supported surface.
 - All input and output are binary-safe (no UTF-16 string assumptions).

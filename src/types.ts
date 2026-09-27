@@ -283,9 +283,9 @@ export type EngineLimits = {
 };
 
 /**
- * Named Redis/Valkey compatibility profile. Selects which of the four Lua
- * sandbox behaviors that differ across versions are emulated. Aliases collapse
- * to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
+ * Named Redis/Valkey compatibility profile. Selects which of the Lua behaviors
+ * that differ across versions (see {@link CompatOverrides}) are emulated.
+ * Aliases collapse to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
  * valkey-8.0 == valkey-9.0). Use {@link CompatOverrides} to tweak a single flag.
  */
 export type CompatProfile =
@@ -299,8 +299,8 @@ export type CompatProfile =
 
 /**
  * Fine-grained overrides for the compatibility profile, merged over the
- * selected {@link CompatProfile} (or the default). These are the only four Lua
- * sandbox behaviors that actually differ across Redis 6.2-8.x and Valkey.
+ * selected {@link CompatProfile} (or the default). These are the Lua behaviors
+ * that differ across Redis 6.2-8.x and Valkey.
  */
 export type CompatOverrides = {
   /** Keep the Lua `print` global. Only Redis 6.2 did. Default: false. */
@@ -316,6 +316,13 @@ export type CompatOverrides = {
    * `math.randomseed` changes it for the scripts that follow. Default: false.
    */
   reseedRandom?: boolean;
+  /**
+   * Redis 7 error model: `redis.call` and the other `redis.*` functions raise
+   * errors as `{err=...}` tables, and the global `pcall` returns the `err`
+   * string of a caught error table (`xpcall` handlers see the table). Off, errors
+   * are plain strings, as in Redis 6.2. Redis 7.0+ / Valkey. Default: true.
+   */
+  tableErrors?: boolean;
 };
 
 /**

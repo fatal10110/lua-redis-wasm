@@ -590,19 +590,20 @@ const COMPAT_PRINT = 0x1;
 const COMPAT_OS = 0x2;
 const COMPAT_SERVER_ALIAS = 0x4;
 const COMPAT_RESEED_RANDOM = 0x8;
+const COMPAT_TABLE_ERRORS = 0x10;
 
 /**
- * Profile presets -> the four Lua sandbox behavior flags. Mirrors the
+ * Profile presets -> the Lua behavior flags. Mirrors the
  * Redis/Valkey version matrix (see redis-version-lua-behavior-matrix).
  */
 const COMPAT_PROFILES: Record<CompatProfile, Required<CompatOverrides>> = {
-  "redis-6.2": { print: true, os: false, serverAlias: false, reseedRandom: true },
-  "redis-7.0": { print: false, os: false, serverAlias: false, reseedRandom: false },
-  "redis-7.2": { print: false, os: false, serverAlias: false, reseedRandom: false },
-  "redis-7.4": { print: false, os: true, serverAlias: false, reseedRandom: false },
-  "redis-8.0": { print: false, os: true, serverAlias: false, reseedRandom: false },
-  "valkey-8.0": { print: false, os: true, serverAlias: true, reseedRandom: false },
-  "valkey-9.0": { print: false, os: true, serverAlias: true, reseedRandom: false },
+  "redis-6.2": { print: true, os: false, serverAlias: false, reseedRandom: true, tableErrors: false },
+  "redis-7.0": { print: false, os: false, serverAlias: false, reseedRandom: false, tableErrors: true },
+  "redis-7.2": { print: false, os: false, serverAlias: false, reseedRandom: false, tableErrors: true },
+  "redis-7.4": { print: false, os: true, serverAlias: false, reseedRandom: false, tableErrors: true },
+  "redis-8.0": { print: false, os: true, serverAlias: false, reseedRandom: false, tableErrors: true },
+  "valkey-8.0": { print: false, os: true, serverAlias: true, reseedRandom: false, tableErrors: true },
+  "valkey-9.0": { print: false, os: true, serverAlias: true, reseedRandom: false, tableErrors: true },
 };
 
 // Default when no profile is given: preserve the historical behavior (≈ valkey-8.0).
@@ -621,7 +622,8 @@ function resolveCompatFlags(
     (merged.print ? COMPAT_PRINT : 0) |
     (merged.os ? COMPAT_OS : 0) |
     (merged.serverAlias ? COMPAT_SERVER_ALIAS : 0) |
-    (merged.reseedRandom ? COMPAT_RESEED_RANDOM : 0)
+    (merged.reseedRandom ? COMPAT_RESEED_RANDOM : 0) |
+    (merged.tableErrors ? COMPAT_TABLE_ERRORS : 0)
   );
 }
 

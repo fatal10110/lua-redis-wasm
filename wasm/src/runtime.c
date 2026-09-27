@@ -2,6 +2,7 @@
 #include "redis_api.h"
 #include "redis_math.h"
 #include <lauxlib.h>
+#include <lstate.h> /* lua_State internals: allowhook, see fuel_hook */
 #include <lua.h>
 #include <lualib.h>
 #include <setjmp.h>
@@ -239,8 +240,18 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
 /* lua_pcall message handler, run at the error point before the stack unwinds.
  * Mirrors Redis's `__redis__err__handler` (src/eval.c): it records the script
  * line where the error occurred, skipping C frames (e.g. the redis.call binding)
- * so the reported line is the script's call site, not the C boundary. The error
- * object itself is returned unchanged. */
+ * so the reported line is the script's call site, not the C boundary.
+ *
+ * It also turns the error object into the message run_script replies with, in
+ * protected mode (a conversion may allocate):
+ * - a table is a Redis 7 error object ({err=...}, as raised by redis.call or
+ *   error(redis.error_reply(...))): its `err` field, like
+ *   luaExtractErrorInformation, or "ERR unknown error" when that is not a
+ *   string. Its `source`/`line` fields are not read: Redis's handler overwrites
+ *   both with the error point, which is the line recorded here (#37);
+ * - a number becomes its string form;
+ * - anything else becomes what Lua's tostring gives ("nil", "true", ...), which
+ *   Redis's handler turns into "ERR <tostring(err)>" (the host adds the code). */
 static int script_error_handler(lua_State *L) {
   lua_Debug ar;
   g_error_line = 0;
@@ -249,6 +260,29 @@ static int script_error_handler(lua_State *L) {
       g_error_line = (uint32_t)ar.currentline;
       break;
     }
+  }
+  switch (lua_type(L, 1)) {
+    case LUA_TSTRING:
+      break;
+    case LUA_TNUMBER:
+      lua_tostring(L, 1); /* converts in place */
+      break;
+    case LUA_TTABLE:
+      lua_getfield(L, 1, "err");
+      if (!lua_isstring(L, -1)) {
+        lua_pushliteral(L, "ERR unknown error");
+      }
+      lua_tostring(L, -1); /* a numeric err converts in place */
+      break;
+    case LUA_TNIL:
+      lua_pushliteral(L, "nil");
+      break;
+    case LUA_TBOOLEAN:
+      lua_pushstring(L, lua_toboolean(L, 1) ? "true" : "false");
+      break;
+    default:
+      lua_pushfstring(L, "%s: %p", luaL_typename(L, 1), lua_topointer(L, 1));
+      break;
   }
   return 1;
 }
@@ -563,7 +597,7 @@ static void remove_package_entry(lua_State *L, const char *name) {
 }
 
 // Compatibility profile flags (set via set_compat() before init/reset). Each
-// flag toggles one of the four behaviors that actually differ across Redis
+// flag toggles one of the behaviors that actually differ across Redis
 // 6.2-8.x and Valkey; everything else is constant. Default reproduces the
 // historical behavior (os loaded, `server` alias present, print stripped),
 // which matches Valkey 8.0/8.1.
@@ -571,9 +605,12 @@ static void remove_package_entry(lua_State *L, const char *name) {
 #define COMPAT_OS 0x2u           // expose `os` lib (Redis 7.4+, Valkey 8.0+)
 #define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
 #define COMPAT_RESEED_RANDOM 0x8u // reseed math.random with 0 per script (Redis 6.2 only)
-static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS;
+#define COMPAT_TABLE_ERRORS 0x10u // {err=...} error tables + unwrapping pcall (Redis 7.0+)
+static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS | COMPAT_TABLE_ERRORS;
 
 void set_compat(uint32_t flags) { g_compat_flags = flags; }
+
+int compat_table_errors(void) { return (g_compat_flags & COMPAT_TABLE_ERRORS) != 0; }
 
 // Mirror Redis's allow/deny arrays (src/script_lua.c) rather than a hand-rolled
 // deny set. Redis exposes loadstring/load/collectgarbage/gcinfo (lua_builtins_
@@ -748,16 +785,42 @@ static void open_allowed_libs(lua_State *L, uint32_t flags) {
   load_redis_modules(L);
 }
 
+#define FUEL_KILL_MASK (LUA_MASKLINE | LUA_MASKCOUNT)
+
+/* Charges FUEL_HOOK_STEP instructions per call and kills the script once the
+ * budget is spent. Like Redis's luaMaskCountHook after SCRIPT KILL, the kill
+ * then re-hooks the thread to fire on every instruction and line, so the error
+ * is raised again right after any pcall that catches it and keeps propagating
+ * until it escapes every pcall. Raised only every FUEL_HOOK_STEP instructions,
+ * it would always land inside a pcall'd loop and be caught there forever
+ * (#38). A coroutine keeps the hook it was created with, so each thread is
+ * switched the first time it runs out. reset_fuel restores the counting hook
+ * before the next script. */
 static void fuel_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
-  g_fuel_remaining -= FUEL_HOOK_STEP;
-  if (g_fuel_remaining <= 0) {
-    luaL_error(L, "Script killed by fuel limit");
+  if (g_fuel_remaining > 0) {
+    g_fuel_remaining -= FUEL_HOOK_STEP;
+    if (g_fuel_remaining > 0) {
+      return;
+    }
   }
+  if (lua_gethookmask(L) != FUEL_KILL_MASK || lua_gethookcount(L) != 1) {
+    lua_sethook(L, fuel_hook, FUEL_KILL_MASK, 1);
+  }
+  /* Hooks run with hooks disabled, and an error raised from one leaves them
+   * disabled until it reaches a pcall boundary. An xpcall message handler runs
+   * before that, so it could loop forever unhooked. Re-enable them: the
+   * handler is killed too (and a handler that keeps failing ends in "error in
+   * error handling"). Redis has the same gap. */
+  L->allowhook = 1;
+  redis_raise_error(L, "ERR Script killed by fuel limit");
 }
 
 static void reset_fuel(void) {
   g_fuel_remaining = g_fuel_limit;
+  if (g_state) {
+    lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
+  }
 }
 
 void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes) {

@@ -21,6 +21,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `reseedRandom` compat override: reseed `math.random` with 0 before every
   script. Set by the `redis-6.2` profile only (#45).
+- `compat.tableErrors` option (WASM compat flag `0x10`) selecting the Redis 7
+  error model described below; on for every profile except `redis-6.2` (#48).
 
 ### Changed
 
@@ -51,6 +53,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2^32 - 1 saturate instead of wrapping around in the WASM call.
 - The script's SHA1 is computed only when a script error is built, not on every
   `eval` / `evalWithArgs` (#57).
+- Redis 7 error model for the `redis-7.x`, `redis-8.0` and `valkey-*` profiles
+  and the default (#48): `redis.call` raises an `{err=...}` table instead of a
+  string (the same table `redis.pcall` returns, with
+  `ignore_error_stats_update=true`; a host error with no space in it gets the
+  `ERR` code and trailing CR/LF is trimmed, like Redis's `luaPushErrorBuff`), as
+  do `redis.log`, `redis.setresp` and the other `redis.*` errors, and the global
+  `pcall` returns the `err` string of a caught error table, like Redis's
+  `luaRedisPcall`. `pcall(redis.call, ...)` still yields a string; `xpcall`
+  handlers now receive the table. `redis-6.2` keeps string errors. The error the
+  host receives when a script aborts is unchanged.
+- The fuel-limit kill is raised as `ERR Script killed by fuel limit` (code `ERR`,
+  message `Script killed by fuel limit`) without a `user_script:N:` position
+  prefix, and `redis.setresp` / `ERR empty reply from host` errors lose that
+  prefix too. The fuel budget is documented as a deterministic instruction
+  budget, not Redis's wall-clock `lua-time-limit` (#14).
 
 ### Removed
 
@@ -146,6 +163,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is running now replies `ERR nested eval is not supported: a script is
   already running` instead of running on (and possibly closing) the VM under
   the outer script.
+- `error({err='MY custom'})` and `error(redis.error_reply('boom'))` report the
+  table's `err` field (`MY custom`, `ERR boom`) instead of
+  `ERR script execution failed`, like Redis's `luaExtractErrorInformation`
+  (`ERR unknown error` when `err` is not a string); other non-string error values
+  are reported as Lua's `tostring` renders them (`nil`, `true`, ...) (#37).
+- The fuel limit can no longer be bypassed with `pcall` (#38): like Redis after
+  `SCRIPT KILL`, a spent budget switches the hook to fire on every instruction
+  and line, so the kill is raised again after any `pcall` / `xpcall` catches it
+  (including inside coroutines and `xpcall` message handlers) until it escapes
+  the script. The counting hook is restored before the next evaluation.
 
 ## [1.3.0] - 2026-06-08
 
