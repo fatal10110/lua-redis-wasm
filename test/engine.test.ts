@@ -525,10 +525,11 @@ test("redis.error_reply: derives the code like Redis (luaPushErrorBuff)", async 
     assert.equal(got.toString("utf8"), expected, `redis.error_reply(${arg})`);
   }
 
-  // Returned to the host, the leading token is split out as the code.
+  // Returned to the host, only an uppercase code is split out. A mixed-case
+  // leading token stays in `err` with no `code`; the wire bytes are the same.
   const mixed = engine.eval("return redis.error_reply('My Error')") as Err;
-  assert.equal(mixed.code?.toString("utf8"), "My");
-  assert.equal(mixed.err.toString("utf8"), "Error");
+  assert.equal(mixed.code, undefined);
+  assert.equal(mixed.err.toString("utf8"), "My Error");
 
   const word = engine.eval("return redis.error_reply('foo')") as Err;
   assert.equal(word.code?.toString("utf8"), "ERR");
@@ -552,6 +553,38 @@ test("redis.error_reply: wrong number or type of arguments returns an error tabl
       `redis.error_reply(${args})`,
     );
   }
+});
+
+test("returned error values without an uppercase code keep the whole message", async () => {
+  await resolveWasmPath();
+  type Err = { err: Buffer; code?: Buffer };
+  const host = createTestHost({
+    redisCall(args) {
+      const cmd = args[0]?.toString("utf8");
+      if (cmd === "NOCODE") return { err: Buffer.from("no such key") };
+      throw new Error("connection lost");
+    },
+    redisPcall(args) {
+      return this.redisCall(args);
+    },
+  });
+  const module = await load();
+  const engine = module.create(host);
+
+  // Codeless host error reply through redis.pcall.
+  const codeless = engine.eval("return redis.pcall('NOCODE')") as Err;
+  assert.equal(codeless.code, undefined);
+  assert.equal(codeless.err.toString("utf8"), "no such key");
+
+  // Host handler that throws a plain Error.
+  const thrown = engine.eval("return redis.pcall('BOOM')") as Err;
+  assert.equal(thrown.code, undefined);
+  assert.equal(thrown.err.toString("utf8"), "connection lost");
+
+  // Hand-built error table.
+  const literal = engine.eval("return {err='hello world'}") as Err;
+  assert.equal(literal.code, undefined);
+  assert.equal(literal.err.toString("utf8"), "hello world");
 });
 
 test("redis.setresp: RESP2 is accepted and returns no value", async () => {
@@ -1134,8 +1167,9 @@ test("redis.log: rejects invalid levels and too few arguments like Redis", async
   const module = await load();
   const engine = module.create(host);
 
-  // Raised like Redis's luaError: the bare "ERR ..." message, no
-  // "user_script:N:" prefix; the line travels in meta for the host.
+  // Raised as a plain "ERR ..." string with no "user_script:N:" prefix, like
+  // this engine's redis.call errors (Redis 7 raises a table; see #48). The
+  // line travels in meta for the host.
   const expectError = (script: string, message: string) => {
     const result = engine.eval(`\n${script}`) as {
       err: Buffer;

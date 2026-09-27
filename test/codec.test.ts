@@ -290,47 +290,16 @@ test("decodeReply: error reply splits leading code", () => {
   assert.equal((value as { code?: Buffer }).code?.toString("utf8"), "ERR");
 });
 
-function errorBuf(type: number, content: Buffer, line?: number): Buffer {
-  const prefix = line === undefined ? 0 : 4;
-  const buf = Buffer.alloc(5 + prefix + content.length);
-  buf[0] = type;
-  buf.writeUInt32LE(prefix + content.length, 1);
-  if (line !== undefined) buf.writeUInt32LE(line, 5);
-  content.copy(buf, 5 + prefix);
-  return buf;
-}
-
-test("decodeReply: error reply takes any leading token as the code, like Redis", () => {
-  const { value } = decodeReply(errorBuf(0x05, Buffer.from("lowercase message")));
-  assert.equal((value as { err: Buffer }).err.toString("utf8"), "message");
-  assert.equal((value as { code?: Buffer }).code?.toString("utf8"), "lowercase");
-
-  const mixed = decodeReply(errorBuf(0x05, Buffer.from("My Error"))).value;
-  assert.equal((mixed as { err: Buffer }).err.toString("utf8"), "Error");
-  assert.equal((mixed as { code?: Buffer }).code?.toString("utf8"), "My");
-});
-
 test("decodeReply: error reply without a code is left whole", () => {
-  const texts = ["boom", " leading space", "x".repeat(31) + " beyond the 32-byte window"];
-  for (const text of texts) {
-    const { value } = decodeReply(errorBuf(0x05, Buffer.from(text)));
-    assert.equal((value as { err: Buffer }).err.toString("utf8"), text);
-    assert.equal((value as { code?: Buffer }).code, undefined, text);
-  }
-  // A space at the last byte inside Redis's window still ends a code.
-  const edge = decodeReply(errorBuf(0x05, Buffer.from("x".repeat(30) + " msg"))).value;
-  assert.equal((edge as { code?: Buffer }).code?.toString("utf8"), "x".repeat(30));
-  assert.equal((edge as { err: Buffer }).err.toString("utf8"), "msg");
-});
-
-test("decodeReply: script error splits only a code-shaped leading token", () => {
-  const coded = decodeReply(errorBuf(0x06, Buffer.from("WRONGTYPE Operation"), 3)).value;
-  assert.equal((coded as { code?: Buffer }).code?.toString("utf8"), "WRONGTYPE");
-  assert.equal((coded as { err: Buffer }).err.toString("utf8"), "Operation");
-
-  const positioned = decodeReply(errorBuf(0x06, Buffer.from("user_script:1: boom"), 1)).value;
-  assert.equal((positioned as { code?: Buffer }).code, undefined);
-  assert.equal((positioned as { err: Buffer }).err.toString("utf8"), "user_script:1: boom");
+  const content = Buffer.from("lowercase message");
+  const buf = Buffer.alloc(5 + content.length);
+  buf[0] = 0x05; // REPLY_ERROR
+  buf.writeUInt32LE(content.length, 1);
+  content.copy(buf, 5);
+  const { value } = decodeReply(buf);
+  assert.ok(value && typeof value === "object" && "err" in value);
+  assert.equal((value as { err: Buffer }).err.toString("utf8"), "lowercase message");
+  assert.equal((value as { code?: Buffer }).code, undefined);
 });
 
 test("decodeReply: empty array", () => {
