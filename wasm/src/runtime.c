@@ -87,18 +87,29 @@ static int rb_write_header(ReplyBuffer *rb, uint8_t type, uint32_t count_or_len)
   return rb_append(rb, header, sizeof(header));
 }
 
+// Hands the encoded reply to the caller (released with free_mem) and leaves rb
+// empty. The buffer itself is handed over rather than copied, so a large reply
+// never needs twice its size on the fixed heap; spare capacity is given back
+// with a shrinking realloc. With nothing encoded, any buffer is freed and
+// {0, 0} is returned.
 static PtrLen rb_finalize(ReplyBuffer *rb) {
   PtrLen out = {0, 0};
-  if (!rb->data || rb->len == 0) {
+  uint8_t *mem = rb->data;
+  size_t len = rb->len;
+  size_t cap = rb->cap;
+  rb_init(rb);
+  if (!mem || len == 0) {
+    free(mem);
     return out;
   }
-  void *mem = malloc(rb->len);
-  if (!mem) {
-    return out;
+  if (len < cap) {
+    uint8_t *shrunk = (uint8_t *)realloc(mem, len);
+    if (shrunk) {
+      mem = shrunk;
+    }
   }
-  memcpy(mem, rb->data, rb->len);
   out.ptr = (uint32_t)(uintptr_t)mem;
-  out.len = (uint32_t)rb->len;
+  out.len = (uint32_t)len;
   return out;
 }
 
@@ -144,10 +155,11 @@ static PtrLen reply_error(const char *msg, size_t len) {
     free(rb.data);
     return (PtrLen){0, 0};
   }
-  PtrLen out = rb_finalize(&rb);
-  free(rb.data);
-  return out;
+  return rb_finalize(&rb);
 }
+
+// reply_error for a string literal; the length excludes the NUL terminator.
+#define REPLY_ERROR_LIT(lit) reply_error((lit), sizeof(lit) - 1)
 
 /* Like reply_error, but tags the reply as a script-aborting error so the host
  * decorates it with the script sha / source context. Used for load and runtime
@@ -181,9 +193,7 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
     free(rb.data);
     return (PtrLen){0, 0};
   }
-  PtrLen out = rb_finalize(&rb);
-  free(rb.data);
-  return out;
+  return rb_finalize(&rb);
 }
 
 /* lua_pcall message handler, run at the error point before the stack unwinds.
@@ -201,32 +211,6 @@ static int script_error_handler(lua_State *L) {
     }
   }
   return 1;
-}
-
-static PtrLen reply_null(void) {
-  ReplyBuffer rb;
-  rb_init(&rb);
-  if (rb_write_header(&rb, REPLY_NULL, 0) != 0) {
-    return (PtrLen){0, 0};
-  }
-  PtrLen out = rb_finalize(&rb);
-  free(rb.data);
-  return out;
-}
-
-static PtrLen reply_status(const char *msg, size_t len) {
-  ReplyBuffer rb;
-  rb_init(&rb);
-  if (rb_write_header(&rb, REPLY_STATUS, (uint32_t)len) != 0) {
-    return (PtrLen){0, 0};
-  }
-  if (rb_append(&rb, msg, len) != 0) {
-    free(rb.data);
-    return (PtrLen){0, 0};
-  }
-  PtrLen out = rb_finalize(&rb);
-  free(rb.data);
-  return out;
 }
 
 static int encode_lua_value(lua_State *L, int idx, ReplyBuffer *rb);
@@ -784,112 +768,71 @@ int32_t reset(void) {
   return setup_state();
 }
 
-PtrLen eval(uint32_t ptr, uint32_t len) {
+// Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
+// decoded from `args` (see set_keys_argv) after the maxArgBytes check;
+// otherwise both are set to empty tables.
+static PtrLen run_script(const char *script, size_t script_len, int has_args,
+                         const uint8_t *args, size_t args_len, uint32_t keys_count) {
   if (!g_state) {
-    return reply_error("ERR Lua VM not initialized", 26);
+    return REPLY_ERROR_LIT("ERR Lua VM not initialized");
   }
   reset_fuel();
   redis_reset_resp_version();
-  set_empty_keys_argv(g_state);
-  const char *script = (const char *)(uintptr_t)ptr;
+  if (has_args) {
+    if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
+      return REPLY_ERROR_LIT("ERR KEYS/ARGV exceeds configured limit");
+    }
+    if (set_keys_argv(g_state, args, args_len, keys_count) != 0) {
+      lua_settop(g_state, 0);
+      return REPLY_ERROR_LIT("ERR invalid KEYS/ARGV encoding");
+    }
+  } else {
+    set_empty_keys_argv(g_state);
+  }
   lua_pushcfunction(g_state, script_error_handler);
   int errfunc = lua_gettop(g_state);
-  if (luaL_loadbuffer(g_state, script, (size_t)len, "@user_script") != 0) {
+  if (luaL_loadbuffer(g_state, script, script_len, "@user_script") != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0);
     lua_settop(g_state, 0);
     return out;
   }
   g_error_line = 0;
-  if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
+  // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
+  // value of a multi-value return, or nil when the script returns nothing.
+  if (lua_pcall(g_state, 0, 1, errfunc) != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);
     return out;
   }
-  lua_remove(g_state, errfunc);
-  int top = lua_gettop(g_state);
-  if (top == 0) {
-    // A script with no return value replies with nil, matching real Redis.
-    return reply_null();
-  }
   ReplyBuffer rb;
   rb_init(&rb);
-  if (encode_lua_value(g_state, -1, &rb) != 0) {
-    lua_settop(g_state, 0);
+  int rc = encode_lua_value(g_state, -1, &rb);
+  lua_settop(g_state, 0);
+  if (rc != 0) {
     free(rb.data);
-    return reply_error("ERR unsupported Lua return type", 32);
+    return REPLY_ERROR_LIT("ERR unsupported Lua return type");
   }
   if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
-    lua_settop(g_state, 0);
     free(rb.data);
-    return reply_error("ERR reply exceeds configured limit", 34);
+    return REPLY_ERROR_LIT("ERR reply exceeds configured limit");
   }
-  lua_settop(g_state, 0);
   PtrLen out = rb_finalize(&rb);
-  free(rb.data);
   if (out.ptr == 0) {
-    return reply_error("ERR reply encoding failed", 26);
+    return REPLY_ERROR_LIT("ERR reply encoding failed");
   }
   return out;
 }
 
+PtrLen eval(uint32_t ptr, uint32_t len) {
+  return run_script((const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0);
+}
+
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count) {
-  if (!g_state) {
-    return reply_error("ERR Lua VM not initialized", 26);
-  }
-  reset_fuel();
-  redis_reset_resp_version();
-  if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
-    return reply_error("ERR KEYS/ARGV exceeds configured limit", 40);
-  }
-  const uint8_t *args = (const uint8_t *)(uintptr_t)args_ptr;
-  if (set_keys_argv(g_state, args, (size_t)args_len, keys_count) != 0) {
-    lua_settop(g_state, 0);
-    return reply_error("ERR invalid KEYS/ARGV encoding", 31);
-  }
-  const char *script = (const char *)(uintptr_t)script_ptr;
-  lua_pushcfunction(g_state, script_error_handler);
-  int errfunc = lua_gettop(g_state);
-  if (luaL_loadbuffer(g_state, script, (size_t)script_len, "@user_script") != 0) {
-    const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0);
-    lua_settop(g_state, 0);
-    return out;
-  }
-  g_error_line = 0;
-  if (lua_pcall(g_state, 0, LUA_MULTRET, errfunc) != 0) {
-    const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
-    lua_settop(g_state, 0);
-    return out;
-  }
-  lua_remove(g_state, errfunc);
-  int top = lua_gettop(g_state);
-  if (top == 0) {
-    // A script with no return value replies with nil, matching real Redis.
-    return reply_null();
-  }
-  ReplyBuffer rb;
-  rb_init(&rb);
-  if (encode_lua_value(g_state, -1, &rb) != 0) {
-    lua_settop(g_state, 0);
-    free(rb.data);
-    return reply_error("ERR unsupported Lua return type", 32);
-  }
-  if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
-    lua_settop(g_state, 0);
-    free(rb.data);
-    return reply_error("ERR reply exceeds configured limit", 34);
-  }
-  lua_settop(g_state, 0);
-  PtrLen out = rb_finalize(&rb);
-  free(rb.data);
-  if (out.ptr == 0) {
-    return reply_error("ERR reply encoding failed", 26);
-  }
-  return out;
+  return run_script((const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
+                    (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count);
 }
 
 uint32_t alloc(uint32_t size) {

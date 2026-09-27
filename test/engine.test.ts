@@ -422,6 +422,56 @@ test("eval: script with no return value replies with nil", async () => {
   assert.equal(engine.eval("return"), null);
 });
 
+test("eval: multi-value return replies with the first value (issue #36)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // Redis runs scripts with lua_pcall(lua, 0, 1, ...): extra values are dropped.
+  assert.equal(engine.eval("return 1, 2"), 1);
+  assert.equal((engine.eval("return 'a', 'b', 'c'") as Buffer).toString(), "a");
+  assert.equal(engine.eval("return nil, 2"), null);
+  assert.deepEqual(engine.eval("return {1, 2}, 3"), [1, 2]);
+  assert.equal(engine.eval("local function f() return 7, 8 end return f()"), 7);
+  // A dropped trailing value is never encoded, even if it is not encodable.
+  assert.equal(engine.eval("return 5, function() end"), 5);
+});
+
+test("eval: unsupported return type error has no trailing NUL byte", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.eval("return function() end") as { err: Buffer; code?: Buffer };
+  assert.ok(result && typeof result === "object" && "err" in result);
+  assert.equal(result.code?.toString("latin1"), "ERR");
+  assert.equal(result.err.toString("latin1"), "unsupported Lua return type");
+});
+
+test("eval: large replies are returned intact and released (issue #42)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  // ~8 MB bulk string.
+  const size = 8 * 1024 * 1024;
+  const big = engine.eval(`return string.rep('ab', ${size / 2})`) as Buffer;
+  assert.ok(Buffer.isBuffer(big));
+  assert.equal(big.length, size);
+  assert.equal(big.subarray(0, 4).toString(), "abab");
+  assert.equal(big.subarray(size - 2).toString(), "ab");
+  // ~8 MB array reply of distinct elements. Repeated so that a leaked or
+  // double-held reply buffer would exhaust the fixed 64 MB heap.
+  const script =
+    "local base = string.rep('x', 1016) local t = {} " +
+    "for i = 1, 8000 do t[i] = base .. string.format('%08d', i) end return t";
+  for (let round = 0; round < 10; round++) {
+    const arr = engine.eval(script) as Buffer[];
+    assert.ok(Array.isArray(arr));
+    assert.equal(arr.length, 8000);
+    assert.equal(arr[0].length, 1024);
+    assert.equal(arr[0].subarray(1016).toString(), "00000001");
+    assert.equal(arr[7999].subarray(1016).toString(), "00008000");
+  }
+});
+
 test("eval: table with both ok and err is an error (err wins)", async () => {
   await resolveWasmPath();
   const module = await load();
@@ -733,6 +783,17 @@ test("evalWithArgs: KEYS injection", async () => {
   );
   assert.ok(Buffer.isBuffer(result));
   assert.equal((result as Buffer).toString(), "mykey");
+});
+
+test("evalWithArgs: multi-value return replies with the first value (issue #36)", async () => {
+  await resolveWasmPath();
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const result = engine.evalWithArgs("return KEYS[1], ARGV[1]", ["k1"], ["a1"]);
+  assert.ok(Buffer.isBuffer(result));
+  assert.equal((result as Buffer).toString(), "k1");
+  assert.equal(engine.evalWithArgs("return #KEYS, #ARGV", ["k1", "k2"], ["a1"]), 2);
+  assert.equal(engine.evalWithArgs("local x = KEYS[1]", ["k1"], []), null);
 });
 
 test("evalWithArgs: ARGV injection", async () => {
