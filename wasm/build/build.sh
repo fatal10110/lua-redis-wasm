@@ -36,6 +36,7 @@ MODULE_FILES=""
 for file in $REDIS_LUA_MODULES; do
   MODULE_FILES="$MODULE_FILES $REDIS_LUA_DEPS/$file"
 done
+MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/redis/deps/fpconv/fpconv_dtoa.c" # redis.call number args
 
 emcc -O2 -DENABLE_CJSON_GLOBAL \
   --js-library "$SRC_DIR/library_host.js" \

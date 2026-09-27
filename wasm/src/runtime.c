@@ -474,12 +474,16 @@ static int encode_value(lua_State *L, int idx, ReplyBuffer *rb, int depth) {
     case LUA_TTABLE:
       return encode_table(L, idx, rb, depth);
     default:
-      return ENCODE_FAILED;
+      // Functions, coroutines and (light) userdata such as cjson.null have no
+      // reply mapping: like Redis (luaReplyToRedisReply's addReplyNull), they
+      // reply nil in place, at any depth, and the rest of the reply is kept.
+      return rb_write_header(rb, REPLY_NULL, 0);
   }
 }
 
-/* Encodes the script's return value. Returns 0 on success and non-zero when the
- * value cannot be converted. A reply nested beyond the Lua stack limit (deep or
+/* Encodes the script's return value. Every Lua value converts (unsupported
+ * types reply nil), so a non-zero return only means the reply buffer could not
+ * be allocated. A reply nested beyond the Lua stack limit (deep or
  * cyclic tables) is not a conversion failure: like Redis, it replies with a
  * "reached lua stack limit" error. Redis writes that error in place of the
  * too-deep element, which here would hand the host a reply thousands of levels
@@ -886,7 +890,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   lua_settop(g_state, 0);
   if (rc != 0) {
     free(rb.data);
-    return REPLY_ERROR_LIT("ERR unsupported Lua return type");
+    return REPLY_ERROR_LIT("ERR reply encoding failed");
   }
   if (g_max_reply_bytes > 0 && rb.len > g_max_reply_bytes) {
     free(rb.data);

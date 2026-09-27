@@ -1,8 +1,11 @@
 #include "../include/abi.h"
 #include "redis_api.h"
+#include "../../vendor/redis/deps/fpconv/fpconv_dtoa.h"
 #include <lauxlib.h>
+#include <limits.h>
 #include <lua.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -122,17 +125,48 @@ static int ab_append_string(ArgBuffer *ab, const char *str, size_t len) {
   return ab_append(ab, str, len);
 }
 
-static int arg_to_bytes(lua_State *L, int idx, const char **out, size_t *len) {
+/* Redis's double2ll (src/util.c): integral values with |d| <= LLONG_MAX/2 are
+ * safe to print as integers. -0.0 passes (and prints as "0"); NaN fails. */
+static int double2ll(double d, long long *out) {
+  if (d < (double)(-LLONG_MAX / 2) || d > (double)(LLONG_MAX / 2)) {
+    return 0;
+  }
+  long long ll = (long long)d;
+  if (ll == d) {
+    *out = ll;
+    return 1;
+  }
+  return 0;
+}
+
+#define NUMBER_ARG_BUF 32 /* > fpconv_dtoa's 24 bytes and any %lld */
+
+/* Number argument -> string like luaArgsToRedisArgv in Redis 7.4+, not
+ * lua_tolstring (whose "%.14g" loses precision): integral values print as
+ * integers (1e15 -> "1000000000000000"), anything else in the shortest
+ * round-trip form (fpconv_dtoa: 0.1+0.2 -> "0.30000000000000004",
+ * 1e300 -> "1e+300", 1/0 -> "inf"). */
+static size_t number_to_arg(lua_Number num, char buf[NUMBER_ARG_BUF]) {
+  long long lvalue;
+  if (double2ll((double)num, &lvalue)) {
+    return (size_t)snprintf(buf, NUMBER_ARG_BUF, "%lld", lvalue);
+  }
+  return (size_t)fpconv_dtoa((double)num, buf);
+}
+
+static int arg_to_bytes(lua_State *L, int idx, char numbuf[NUMBER_ARG_BUF], const char **out,
+                        size_t *len) {
   int type = lua_type(L, idx);
   switch (type) {
+    case LUA_TNUMBER:
+      *len = number_to_arg(lua_tonumber(L, idx), numbuf);
+      *out = numbuf;
+      return 0;
     case LUA_TSTRING:
-    case LUA_TNUMBER: {
-      // Real Redis accepts only strings and numbers as command arguments;
-      // numbers are stringified (e.g. 3.3 -> "3.3"). Booleans, nil and tables
-      // are rejected by the caller.
+      // Real Redis accepts only strings and numbers as command arguments.
+      // Booleans, nil and tables are rejected by the caller.
       *out = lua_tolstring(L, idx, len);
       return 0;
-    }
     default:
       return -1;
   }
@@ -144,9 +178,10 @@ static int encode_args(lua_State *L, int start, int argc, ArgBuffer *ab) {
     return -1;
   }
   for (int i = 0; i < argc; i++) {
+    char numbuf[NUMBER_ARG_BUF];
     const char *data = NULL;
     size_t len = 0;
-    if (arg_to_bytes(L, start + i, &data, &len) != 0) {
+    if (arg_to_bytes(L, start + i, numbuf, &data, &len) != 0) {
       return -1;
     }
     if (ab_append_string(ab, data, len) != 0) {

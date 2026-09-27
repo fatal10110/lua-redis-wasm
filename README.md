@@ -165,6 +165,15 @@ type RedisHost = {
 Called when Lua executes `redis.call(...)`. Arguments arrive as `Buffer[]`. Return a
 `ReplyValue`, or signal an error by returning `{ err, code? }` (or throwing).
 
+Number arguments are formatted like Redis 7.4+ (`luaArgsToRedisArgv`), not with
+Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as plain integers
+(`1e15` → `1000000000000000`, `-0.0` → `0`), everything else in the shortest
+round-trip form (`0.1+0.2` → `0.30000000000000004`, `1e300` → `1e+300`, `1/0` →
+`inf`, `0/0` → `nan` or `-nan`). This applies whatever the `profile` compat
+option. Older versions differ: Redis 7.2 always used the shortest form
+(`1e15` → `1e+15`), and Redis 7.0 and earlier used `%.17g`
+(`3.3` → `3.2999999999999998`).
+
 A zero-argument `redis.call()` / `redis.pcall()` is delegated to the host with an
 empty `args` array — the host decides the error — rather than being short-circuited
 by the engine.
@@ -371,6 +380,11 @@ engine.eval("return 'hello'"); // Buffer.from("hello")
 engine.eval("return {1, 2, 3}"); // [1, 2, 3]
 engine.eval("return {'a', 'b'}"); // [Buffer, Buffer]
 
+// Values with no reply type (functions, coroutines, userdata such as
+// cjson.null) → null, at any depth
+engine.eval("return function() end"); // null
+engine.eval("return {1, function() end, 3}"); // [1, null, 3]
+
 // Status reply: commands like SET, PING return {ok: "..."}
 // In Lua: local resp = redis.call('SET', 'k', 'v') → resp.ok == "OK"
 engine.eval("return redis.call('SET', 'k', 'v')"); // { ok: Buffer.from("OK") }
@@ -505,13 +519,17 @@ This package is licensed under the **MIT License**. See [LICENSE](LICENSE) for d
 
 ### Third-Party Licenses
 
-This project includes third-party code, all under the MIT License:
+This project includes third-party code under the MIT License:
 
 - **Lua 5.1** - Copyright (C) 1994-2012 Lua.org, PUC-Rio
 - **lua_cjson** - Copyright (C) 2010-2012 Mark Pulford
 - **lua_cmsgpack** - Copyright (C) 2012 Salvatore Sanfilippo
 - **lua_struct** - Copyright (C) 2010-2018 Lua.org, PUC-Rio
 - **lua_bit** - Copyright (C) 2008-2012 Mike Pall
+
+and under the Boost Software License 1.0:
+
+- **fpconv_dtoa** - Copyright (C) 2013-2019 night-shift, (C) 2009 Florian Loitsch
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full license texts.
 
