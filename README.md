@@ -200,8 +200,11 @@ try {
 } catch (err) {
   if (err instanceof RangeError) {
     // The script or KEYS/ARGV did not fit in the WASM heap; the engine is fine.
+  } else if (err instanceof WasmFault) {
+    // _alloc threw inside the module: the engine is now unusable, recreate it.
   } else {
-    // WasmFault, a WASM trap/abort, or "LuaEngine is unusable": recreate it.
+    // A WASM trap/abort, or "LuaEngine is unusable" from an earlier fault:
+    // recreate the engine too.
   }
 }
 ```

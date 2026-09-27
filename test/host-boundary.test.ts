@@ -189,39 +189,76 @@ for (const [label, script, check] of heapHeavyScripts) {
   });
 }
 
-test("host boundary: cmsgpack.pack running out of heap never returns corrupted bytes", async () => {
-  // cmsgpack grows its buffer through the raw Lua allocator without a NULL
-  // check; an allocation failure there must abort (engine unusable), not
-  // write through a NULL buffer.
-  const roundTrip = (n: number) => `
+// cmsgpack grows its pack buffer through the raw Lua allocator without a NULL
+// check; an allocation failure there must abort (engine unusable), never write
+// through a NULL buffer and hand back corrupted bytes. `n` comes from ARGV[1].
+const CMSGPACK_SHAPES: Record<string, string> = {
+  // Pack straight after building the input: the unchecked build traps.
+  grow: `
+    local n = tonumber(ARGV[1])
     local t = {}
-    for i = 1, ${n} do t[i] = string.rep(string.char(i % 256), 1023) .. i end
+    for i = 1, n do t[i] = string.rep(string.char(i % 256), 1023) .. i end
     local u = cmsgpack.unpack(cmsgpack.pack(t))
     if #u ~= #t then return 'length mismatch' end
     for i = 1, #t do if u[i] ~= t[i] then return 'mismatch at ' .. i end end
-    return 'ok'`;
-  let faults = 0;
-  for (const n of [2000, 18000, 21000, 24000]) {
+    return 'ok'`,
+  // Collect first so the pack buffer lands in freed space: the unchecked
+  // build silently returns wrong bytes here.
+  silent: `
+    local n = tonumber(ARGV[1])
+    local t = {}
+    for i = 1, n do t[i] = string.rep('x', 1024) end
+    collectgarbage()
+    local ok, p = pcall(cmsgpack.pack, t)
+    if not ok then error(p, 0) end
+    local u = cmsgpack.unpack(p)
+    if #u ~= #t then return 'length mismatch' end
+    for i = 1, #t do if u[i] ~= t[i] then return 'mismatch at ' .. i end end
+    return 'ok'`,
+};
+
+const cmsgpackCases: Array<[shape: string, n: number, via: "eval" | "evalWithArgs"]> = [
+  ["grow", 2000, "eval"],
+  ["grow", 18000, "eval"],
+  ["grow", 21000, "evalWithArgs"],
+  ["grow", 24000, "eval"],
+  ["silent", 2000, "evalWithArgs"],
+  ["silent", 18000, "eval"],
+  ["silent", 18000, "evalWithArgs"],
+  ["silent", 20000, "eval"],
+  ["silent", 20000, "evalWithArgs"],
+  ["silent", 24000, "eval"],
+  ["silent", 24000, "evalWithArgs"],
+];
+
+for (const [shape, n, via] of cmsgpackCases) {
+  test(`host boundary: cmsgpack round trip (${shape}, n=${n}, ${via}) never returns corrupted bytes`, async () => {
     const engine = (await load()).createStandalone();
+    const script = CMSGPACK_SHAPES[shape];
     let result: ReplyValue;
     try {
-      result = engine.eval(roundTrip(n));
+      result =
+        via === "eval"
+          ? engine.eval(script.replace("tonumber(ARGV[1])", String(n)))
+          : engine.evalWithArgs(script, [], [String(n)]);
     } catch (err) {
-      faults++;
+      // Only cmsgpack's deliberate abort is acceptable, not e.g. an
+      // out-of-bounds trap from writing through a NULL buffer.
+      assert.ok(
+        err instanceof WebAssembly.RuntimeError && /Aborted\(\)/.test(err.message),
+        `expected the OOM abort, got ${String(err)}`,
+      );
       assert.throws(() => engine.eval("return 1"), /LuaEngine is unusable/);
-      continue;
+      return;
     }
-    if (Buffer.isBuffer(result)) {
-      assert.equal(result.toString(), "ok", `n=${n}`);
+    if (n === 2000 || Buffer.isBuffer(result)) {
+      assert.deepEqual(result, Buffer.from("ok"));
     } else {
       assertErr(result, /not enough memory/);
+      assertUsable(engine);
     }
-    if (n === 2000) {
-      assert.equal(result?.toString(), "ok");
-    }
-  }
-  assert.ok(faults > 0, "expected at least one pack to exhaust the heap");
-});
+  });
+}
 
 test("host boundary: eval/evalWithArgs throw RangeError when _alloc returns 0", async () => {
   const engine = (await load()).createStandalone();
