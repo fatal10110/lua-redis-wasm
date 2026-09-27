@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { load } from "../src/index.js";
-import type { CompatProfile, ReplyValue } from "../src/types.js";
+import type { CompatProfile, RedisHost, ReplyValue } from "../src/types.js";
 
 type ErrReply = { err: Buffer; code?: Buffer };
 
@@ -93,6 +93,34 @@ test("vm robustness: a heap the collector cannot free is recovered by rebuilding
   }
   assertUsable(engine);
   assert.equal(engine.eval("return #string.rep('y', 16 * 1024 * 1024)"), 16 * 1024 * 1024);
+});
+
+test("vm robustness: an eval from inside a host callback is refused", async () => {
+  const nested: ReplyValue[] = [];
+  let engine!: ReturnType<Awaited<ReturnType<typeof load>>["create"]>;
+  const host: RedisHost = {
+    redisCall() {
+      nested.push(engine.eval("return 7"));
+      nested.push(engine.evalWithArgs("return KEYS[1]", ["inner"], []));
+      // Scripts that would make the inner eval rebuild the VM (see above)
+      // under the outer script if nesting were allowed.
+      nested.push(engine.eval("local t = {} pcall(function() for i = 1, 1e9 do t[i] = tostring(i) end end) return #t"));
+      nested.push(engine.eval("local t = {} pcall(function() for i = 1, 1e9 do t[i] = {} end end) return #t"));
+      return { ok: Buffer.from("OK") };
+    },
+    redisPcall: () => null,
+    log() {},
+  };
+  engine = (await load()).create(host);
+
+  const outer = engine.evalWithArgs("local r = redis.call('ping') return {r, KEYS[1], ARGV[1]}", ["outer"], ["arg"]);
+  assert.deepEqual(outer, [{ ok: Buffer.from("OK") }, Buffer.from("outer"), Buffer.from("arg")]);
+  assert.equal(nested.length, 4);
+  for (const reply of nested) {
+    assertErr(reply, "nested eval is not supported: a script is already running");
+  }
+  assert.equal(engine.eval("return 1 + 1"), 2);
+  assert.deepEqual(engine.evalWithArgs("return KEYS[1]", ["after"], []), Buffer.from("after"));
 });
 
 // =============================================================================

@@ -124,6 +124,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of memory (Lua 5.1 shrinks the string table by allocating first, which can
   keep failing on a full heap), and an eval whose reply could not be allocated
   now replies `ERR not enough memory for the script reply` instead of `null`.
+  An `eval` / `evalWithArgs` called from inside a host callback while a script
+  is running now replies `ERR nested eval is not supported: a script is
+  already running` instead of running on (and possibly closing) the VM under
+  the outer script.
 
 ## [1.3.0] - 2026-06-08
 

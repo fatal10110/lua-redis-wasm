@@ -863,6 +863,16 @@ static char g_panic_msg[128];
 static jmp_buf g_panic_jmp;
 static int g_panic_armed = 0;
 
+/* Set while an eval runs. A host callback (redis.call) may call back into the
+ * module; a nested eval, init or reset would then replace KEYS/ARGV, clear the
+ * Lua stack or even close the VM under the running script, so they are
+ * refused. */
+static int g_eval_active = 0;
+
+/* Status of the collection run_script ran after the script (see
+ * collect_if_heap_high), or -1 if it returned before running one. */
+static int g_script_gc_status = -1;
+
 /* lua_atpanic handler. Lua calls it for an error raised outside any protected
  * call, then calls exit() if it returns. Every Lua call on the eval path runs
  * protected (setup, KEYS/ARGV, script, reply encoding, collection), so this is
@@ -956,6 +966,9 @@ static int32_t setup_state(void) {
 }
 
 int32_t init(void) {
+  if (g_eval_active) {
+    return -1;
+  }
   if (g_state) {
     lua_close(g_state);
     g_state = NULL;
@@ -964,7 +977,7 @@ int32_t init(void) {
 }
 
 int32_t reset(void) {
-  if (!g_state) {
+  if (g_eval_active || !g_state) {
     return -1;
   }
   lua_close(g_state);
@@ -1038,7 +1051,8 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   int status = lua_pcall(g_state, 0, 1, errfunc);
   // Free the script's garbage before allocating the reply: a script that
   // filled the heap and caught the error would otherwise leave no room for it.
-  collect_if_heap_high();
+  // run_guarded acts on the result once the reply is built.
+  g_script_gc_status = collect_if_heap_high();
   if (status != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
@@ -1079,21 +1093,31 @@ static int32_t rebuild_vm(void) {
 /* Runs fn with the panic handler armed (see vm_panic). After a panic the VM is
  * rebuilt and the reply is an error naming the Lua error. The VM is also
  * rebuilt when its garbage cannot be collected (see collect_if_heap_high):
- * nothing but KEYS/ARGV outlives a script, so a fresh VM behaves the same. */
+ * nothing but KEYS/ARGV outlives a script, so a fresh VM behaves the same.
+ * Refuses to run while another eval is active (see g_eval_active). */
 static PtrLen run_guarded(GuardedFn fn, void *arg) {
+  if (g_eval_active) {
+    return REPLY_ERROR_LIT("ERR nested eval is not supported: a script is already running");
+  }
+  g_eval_active = 1;
+  g_script_gc_status = -1;
   PtrLen out;
+  int gc_status;
   if (setjmp(g_panic_jmp) == 0) {
     g_panic_armed = 1;
     out = fn(arg);
     g_panic_armed = 0;
+    // Collect here only if run_script returned before its own collection.
+    gc_status = g_script_gc_status >= 0 ? g_script_gc_status : collect_if_heap_high();
   } else {
     int32_t rc = rebuild_vm();
     char msg[sizeof(g_panic_msg) + 96];
     snprintf(msg, sizeof(msg), "ERR unprotected Lua error (%s); %s", g_panic_msg,
              rc == 0 ? "the Lua VM was reset" : "the Lua VM could not be re-created");
     out = reply_error(msg, strlen(msg));
+    gc_status = 0; /* fresh VM */
   }
-  if (collect_if_heap_high() != 0) {
+  if (gc_status != 0) {
     rebuild_vm();
   }
   // Every reply run_script builds is non-empty, so {0, 0} means even the error
@@ -1101,6 +1125,7 @@ static PtrLen run_guarded(GuardedFn fn, void *arg) {
   if (out.ptr == 0) {
     out = REPLY_ERROR_LIT("ERR not enough memory for the script reply");
   }
+  g_eval_active = 0;
   return out;
 }
 

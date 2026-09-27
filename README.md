@@ -236,6 +236,11 @@ Read `ctx.source` inside the handler; a first read after the handler has returne
 throws. When delegating between handlers, pass `ctx` along
 (`this.redisCall(args, ctx)`).
 
+A handler must not evaluate another script on the same engine: while a script is
+running, `eval` / `evalWithArgs` reply
+`ERR nested eval is not supported: a script is already running` (Redis likewise
+refuses `EVAL` from inside a script).
+
 ### Error metadata
 
 The engine composes **no** user-facing error wording — it classifies the error and
