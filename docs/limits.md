@@ -26,9 +26,10 @@ Reply nesting:
   (`encodeReplyValue`), though, and that can overflow the JS stack before the
   WASM limit is reached: from about 3000 levels for arrays, and at lower depths
   for `{map=}` replies or when `redis.call` runs under many nested Lua `pcall`
-  frames, because WASM frames share the JS stack. That failure surfaces as a
-  `RangeError` from the host call, not as `ERR reached lua stack limit`. Keep
-  host replies shallow.
+  frames, because WASM frames share the JS stack. That failure surfaces as an
+  error reply carrying `Maximum call stack size exceeded` (raised by
+  `redis.call`, returned by `redis.pcall`), not as `ERR reached lua stack
+  limit`. Keep host replies shallow.
 
 ## Safety Notes
 - Limits are enforced consistently across all entrypoints.

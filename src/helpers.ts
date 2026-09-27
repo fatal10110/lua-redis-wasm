@@ -4,7 +4,7 @@
  */
 
 import { sha1Hex } from "./sha1.js";
-import { encodeReplyValue, packPtrLen } from "./codec.js";
+import { encodeReplyValue } from "./codec.js";
 import type { ReplyValue } from "./types.js";
 import type { WasmExports } from "./loader.js";
 
@@ -27,12 +27,55 @@ function writeBytes(heap: Uint8Array, ptr: number, data: Buffer): void {
   heap.set(data, ptr);
 }
 
+/** A `{ ptr, len }` pair as laid out by the C `PtrLen` struct. */
+export type PtrLen = { ptr: number; len: number };
+
+/**
+ * An exception thrown from inside the WASM module (e.g. an Emscripten abort or
+ * a trap) while the host called into it. The throw unwound WASM frames without
+ * running their cleanup (the shadow stack pointer, allocator bookkeeping), so
+ * the module can no longer be trusted: the engine becomes unusable.
+ */
+export class WasmFault extends Error {
+  constructor(message: string, options: { cause: unknown }) {
+    super(message, options);
+    this.name = "WasmFault";
+  }
+}
+
+/**
+ * Allocates `size` bytes in WASM linear memory.
+ *
+ * The heap is fixed-size and the module is linked with `ABORTING_MALLOC=0`,
+ * so an exhausted heap makes `malloc` return 0: that becomes a recoverable
+ * RangeError instead of letting the caller write over address 0. A *throwing*
+ * `_alloc` is not recoverable (see WasmFault). Zero-byte requests allocate one
+ * byte so an empty payload still gets a real pointer.
+ *
+ * @throws RangeError if the heap cannot satisfy the allocation
+ * @throws WasmFault if `_alloc` threw
+ */
+export function alloc(exports: WasmExports, size: number): number {
+  let ptr: number;
+  try {
+    ptr = exports._alloc(Math.max(size, 1));
+  } catch (cause) {
+    throw new WasmFault(`WASM _alloc(${size}) threw`, { cause });
+  }
+  if (!ptr) {
+    throw new RangeError(`WASM heap exhausted: failed to allocate ${size} bytes`);
+  }
+  return ptr;
+}
+
 /**
  * Allocates memory and writes data in one operation.
  * Returns the pointer to the allocated memory.
+ * @throws RangeError if the heap cannot satisfy the allocation
+ * @throws WasmFault if `_alloc` threw
  */
 export function allocAndWrite(exports: WasmExports, data: Buffer): number {
-  const ptr = exports._alloc(data.length);
+  const ptr = alloc(exports, data.length);
   writeBytes(exports.HEAPU8, ptr, data);
   return ptr;
 }
@@ -41,17 +84,26 @@ export function allocAndWrite(exports: WasmExports, data: Buffer): number {
  * Encodes a ReplyValue and writes it to WASM memory.
  * Returns the pointer and length for passing back to WASM.
  */
-export function encodeReplyToPtrLen(exports: WasmExports, value: ReplyValue): { ptr: number; len: number } {
+export function encodeReplyToPtrLen(exports: WasmExports, value: ReplyValue): PtrLen {
   const encoded = encodeReplyValue(value);
   const ptr = allocAndWrite(exports, encoded);
   return { ptr, len: encoded.length };
 }
 
+// =============================================================================
+// ABI Helpers
+// =============================================================================
+//
+// clang's wasm32 C ABI returns the two-field PtrLen struct through a hidden
+// struct-return pointer: every PtrLen-returning export takes it as its first
+// argument, and every PtrLen-returning host import receives it as its first
+// argument and writes the result there.
+
 /**
  * Writes a PtrLen struct to WASM memory for sret-style returns.
  * Layout: [ptr: u32le][len: u32le] = 8 bytes total
  */
-function writePtrLen(heap: Uint8Array, retPtr: number, ptrLen: { ptr: number; len: number }): void {
+export function writePtrLen(heap: Uint8Array, retPtr: number, ptrLen: PtrLen): void {
   heap[retPtr] = ptrLen.ptr & 0xff;
   heap[retPtr + 1] = (ptrLen.ptr >> 8) & 0xff;
   heap[retPtr + 2] = (ptrLen.ptr >> 16) & 0xff;
@@ -62,53 +114,15 @@ function writePtrLen(heap: Uint8Array, retPtr: number, ptrLen: { ptr: number; le
   heap[retPtr + 7] = (ptrLen.len >> 24) & 0xff;
 }
 
-// =============================================================================
-// ABI Helpers
-// =============================================================================
-
 /**
- * Parsed ABI arguments from a host import call.
+ * Reads a PtrLen struct written by WASM at `base`.
  */
-export interface AbiArgs {
-  /** Whether the call uses sret (struct return) ABI */
-  hasRet: boolean;
-  /** Return pointer for sret ABI (0 if direct return) */
-  retPtr: number;
-  /** Pointer to input data */
-  ptr: number;
-  /** Length of input data */
-  len: number;
-}
-
-/**
- * Parses ABI arguments to extract return pointer, data pointer, and length.
- * Handles both sret (3+ args) and direct return (2 args) ABI conventions.
- */
-export function parseAbiArgs(args: number[]): AbiArgs {
-  const hasRet = args.length >= 3;
-  return {
-    hasRet,
-    retPtr: hasRet ? args[0] : 0,
-    ptr: hasRet ? args[1] : args[0],
-    len: hasRet ? args[2] : args[1]
-  };
-}
-
-/**
- * Returns PtrLen result using the appropriate ABI convention.
- * For sret: writes to retPtr and returns void.
- * For direct: returns packed bigint.
- */
-export function returnPtrLen(
-  heap: Uint8Array,
-  abiArgs: AbiArgs,
-  ptrLen: { ptr: number; len: number }
-): bigint | void {
-  if (abiArgs.hasRet) {
-    writePtrLen(heap, abiArgs.retPtr, ptrLen);
-    return;
-  }
-  return packPtrLen(ptrLen.ptr, ptrLen.len);
+export function readPtrLen(heap: Uint8Array, base: number): PtrLen {
+  const ptr =
+    (heap[base] | (heap[base + 1] << 8) | (heap[base + 2] << 16) | (heap[base + 3] << 24)) >>> 0;
+  const len =
+    (heap[base + 4] | (heap[base + 5] << 8) | (heap[base + 6] << 16) | (heap[base + 7] << 24)) >>> 0;
+  return { ptr, len };
 }
 
 // =============================================================================

@@ -51,23 +51,47 @@ Encoding details:
 - Arrays, sets, and maps are encoded as concatenated Reply entries.
 - All string-like payloads are raw bytes and may include null bytes.
 
+## Calling Convention
+`ptr_len` is the C struct `PtrLen { uint32_t ptr; uint32_t len; }`. clang's
+wasm32 C ABI returns it through a hidden struct-return pointer, so at the WASM
+level every `-> ptr_len` function takes an extra leading `ret_ptr` argument and
+returns nothing: `eval(ptr, len)` is `eval(ret_ptr, ptr, len)`, and the host
+import `host_redis_call(ptr, len)` is called as `host_redis_call(ret_ptr, ptr, len)`
+and must write the 8-byte result (`ptr` then `len`, little-endian) at `ret_ptr`.
+
 ## Host Imports
-The WASM module imports the following functions from the host:
+The WASM module imports the following functions from the host. A host import
+must never throw: an exception would unwind through the running Lua VM's WASM
+frames and corrupt it. Failures are reported through the return value instead,
+and the C side raises them as ordinary Lua errors.
 
 - `host_redis_call(ptr, len) -> ptr_len`
   - Input: encoded argument array buffer.
-  - Output: encoded Reply buffer.
+  - Output: encoded Reply buffer. An error reply is raised as a Lua error.
+    `{0,0}` raises `ERR empty reply from host`.
 
 - `host_redis_pcall(ptr, len) -> ptr_len`
   - Input: encoded argument array buffer.
   - Output: encoded Reply buffer; errors are returned as error replies.
 
-- `host_redis_log(level, ptr, len) -> void`
+- `host_redis_log(level, ptr, len) -> ptr_len`
   - Input: log level and message bytes.
+  - Output: `{0,0}` on success. On failure `len != 0` and `ptr` is an
+    `alloc`'d error message (or 0 when none could be allocated); WASM frees it
+    and raises it as a Lua error.
+
+- `host_redis_setresp(version) -> ptr_len`
+  - Input: the RESP version the script switched to (2 or 3).
+  - Output: as `host_redis_log`. On failure the protocol is not switched.
 
 - `host_sha1hex(ptr, len) -> ptr_len`
   - Input: raw bytes.
-  - Output: 40-byte lowercase hex string as bytes.
+  - Output: 40-byte lowercase hex string as bytes. `{0,0}` raises
+    `ERR sha1hex failed`.
+
+- `host_redis_props() -> ptr_len`
+  - Output: encoded redisProps blob applied to the `redis` table at `init`/
+    `reset`, or `{0,0}` for none.
 
 ## WASM Exports
 The WASM module exports the following functions:
@@ -85,7 +109,17 @@ The WASM module exports the following functions:
   - Evaluates a Lua script buffer with binary-safe KEYS/ARGV provided by the host.
 
 - `alloc(size) -> ptr`
-  - Allocates `size` bytes in linear memory.
+  - Allocates `size` bytes in linear memory. The heap is fixed-size (64 MB)
+    and the module is linked with `-sABORTING_MALLOC=0`, so an exhausted heap
+    returns 0, which callers must treat as an allocation failure (the engine
+    throws a recoverable `RangeError`). A Lua script exhausting the heap gets
+    an ordinary `not enough memory` error; the runtime runs a full garbage
+    collection after any `eval` that leaves more than 16 MB of Lua memory in
+    use. `cmsgpack` allocates without NULL checks, so it is compiled
+    (`wasm/src/lua_cmsgpack_checked.c`) against an allocator that aborts on
+    OOM, like Redis's. An exception thrown *from* `alloc` (or any other
+    export) unwound WASM frames without their cleanup, so the engine treats it
+    as fatal and refuses further evaluations.
 
 - `free_mem(ptr)`
   - Frees memory allocated by `alloc` or reply buffers.
@@ -119,5 +153,5 @@ struct ArgEntry {
 - Host-side failures must map to `error` replies with Redis-like error strings.
 
 ## Versioning
-- ABI version: 0
+- ABI version: 1 (1: `host_redis_log`/`host_redis_setresp` return a failure `ptr_len`)
 - Breaking changes require incrementing ABI version and updating `abi.h`.

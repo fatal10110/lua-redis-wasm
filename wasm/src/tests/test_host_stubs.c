@@ -19,10 +19,16 @@ PtrLen host_redis_pcall(uint32_t ptr, uint32_t len) {
   return (PtrLen){0, 0};
 }
 
-void host_redis_log(uint32_t level, uint32_t ptr, uint32_t len) {
+PtrLen host_redis_log(uint32_t level, uint32_t ptr, uint32_t len) {
   (void)level;
   (void)ptr;
   (void)len;
+  return (PtrLen){0, 0};
+}
+
+PtrLen host_redis_setresp(uint32_t version) {
+  (void)version;
+  return (PtrLen){0, 0};
 }
 
 PtrLen host_sha1hex(uint32_t ptr, uint32_t len) {
@@ -32,5 +38,3 @@ PtrLen host_sha1hex(uint32_t ptr, uint32_t len) {
 }
 
 PtrLen host_redis_props(void) { return (PtrLen){0, 0}; }
-
-void host_redis_setresp(uint32_t version) { (void)version; }

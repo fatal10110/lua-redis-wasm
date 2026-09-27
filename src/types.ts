@@ -196,19 +196,30 @@ export type RedisLogHandler = (level: number, message: Buffer) => void;
  * ```
  */
 export type RedisHost = {
-  /** Handler for redis.call() - throws on error. */
+  /**
+   * Handler for redis.call() - throws on error. A throw, or a malformed
+   * ReplyValue, is raised in the script as a Lua error carrying its message.
+   */
   redisCall: RedisCallHandler;
 
-  /** Handler for redis.pcall() - returns error reply instead of throwing. */
+  /**
+   * Handler for redis.pcall() - returns error reply instead of throwing. A
+   * throw, or a malformed ReplyValue, is returned to the script as an error
+   * reply carrying its message.
+   */
   redisPcall: RedisCallHandler;
 
-  /** Handler for redis.log() messages. */
+  /**
+   * Handler for redis.log() messages. A throw is raised in the script as a Lua
+   * error carrying its message.
+   */
   log: RedisLogHandler;
 
   /**
    * Optional: notified when the script calls `redis.setresp(n)`. The WASM
    * encoder still flips its own RESP mode; this hook lets the host match the
    * reply shapes it returns from `redisCall`/`redisPcall` to the new protocol.
+   * A throw rejects the switch and is raised in the script as a Lua error.
    */
   onSetResp?: (version: 2 | 3) => void;
 };

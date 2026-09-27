@@ -69,7 +69,6 @@ import {
   encodeRedisProps,
   ensureBuffer,
   REPLY_SCRIPT_ERROR,
-  unpackPtrLen,
 } from "./codec.js";
 import {
   loadModule,
@@ -80,12 +79,15 @@ import {
 } from "./loader.js";
 import {
   readBytes,
+  alloc,
   allocAndWrite,
   encodeReplyToPtrLen,
-  parseAbiArgs,
-  returnPtrLen,
+  writePtrLen,
+  readPtrLen,
   decodeArgs,
   computeSha1Hex,
+  WasmFault,
+  type PtrLen,
 } from "./helpers.js";
 
 /**
@@ -109,6 +111,15 @@ import {
  * ```
  */
 export class LuaEngine {
+  /**
+   * Set when an exception escaped the WASM module (mid-evaluation, or from
+   * `_alloc`). The unwind skipped the C cleanup (Lua call frames, error
+   * handlers, the shadow stack, allocator bookkeeping), so the module can no
+   * longer be trusted and every later call is refused.
+   */
+  private fault: unknown = undefined;
+  private faulted = false;
+
   /**
    * @internal
    */
@@ -137,6 +148,10 @@ export class LuaEngine {
    *
    * @param script - Lua source code as string, Buffer, or Uint8Array
    * @returns The script's return value as a ReplyValue
+   * @throws RangeError if the WASM heap cannot hold the script (the engine
+   *   stays usable)
+   * @throws Error if an exception escaped the WASM module, now or in a
+   *   previous call; the engine is then unusable
    *
    * @example
    * ```typescript
@@ -147,13 +162,17 @@ export class LuaEngine {
    * ```
    */
   eval(script: Buffer | Uint8Array | string): ReplyValue {
+    this.assertUsable();
     const scriptBuf = ensureBuffer(script, "script");
     const sha = computeSha1Hex(scriptBuf).toString("utf8");
-    const ptr = this.exports._alloc(scriptBuf.length);
-    this.exports.HEAPU8.set(scriptBuf, ptr);
-    const result = this.callEval(ptr, scriptBuf.length);
-    this.exports._free_mem(ptr);
-    return this.decodeResult(result, sha);
+    const scriptPtr = this.write(scriptBuf);
+    try {
+      return this.run(sha, (retPtr) =>
+        this.exports._eval(retPtr, scriptPtr, scriptBuf.length),
+      );
+    } finally {
+      this.release(scriptPtr);
+    }
   }
 
   /**
@@ -166,6 +185,10 @@ export class LuaEngine {
    * @param keys - Array of KEYS values (typically key names)
    * @param args - Array of ARGV values (additional arguments)
    * @returns The script's return value as a ReplyValue
+   * @throws RangeError if the WASM heap cannot hold the script or KEYS/ARGV
+   *   (the engine stays usable)
+   * @throws Error if an exception escaped the WASM module, now or in a
+   *   previous call; the engine is then unusable
    *
    * @example
    * ```typescript
@@ -182,6 +205,7 @@ export class LuaEngine {
     keys: Array<Buffer | Uint8Array | string> = [],
     args: Array<Buffer | Uint8Array | string> = [],
   ): ReplyValue {
+    this.assertUsable();
     const scriptBuf = ensureBuffer(script, "script");
     const sha = computeSha1Hex(scriptBuf).toString("utf8");
     const argBuf = encodeArgArray([...keys, ...args]);
@@ -193,132 +217,117 @@ export class LuaEngine {
       };
     }
 
-    const scriptPtr = this.exports._alloc(scriptBuf.length);
-    const argsPtr = this.exports._alloc(argBuf.length);
-    this.exports.HEAPU8.set(scriptBuf, scriptPtr);
-    this.exports.HEAPU8.set(argBuf, argsPtr);
+    const scriptPtr = this.write(scriptBuf);
+    try {
+      const argsPtr = this.write(argBuf);
+      try {
+        return this.run(sha, (retPtr) =>
+          this.exports._eval_with_args(
+            retPtr,
+            scriptPtr,
+            scriptBuf.length,
+            argsPtr,
+            argBuf.length,
+            keys.length,
+          ),
+        );
+      } finally {
+        this.release(argsPtr);
+      }
+    } finally {
+      this.release(scriptPtr);
+    }
+  }
 
-    const result = this.callEvalWithArgs(
-      scriptPtr,
-      scriptBuf.length,
-      argsPtr,
-      argBuf.length,
-      keys.length,
-    );
-
-    this.exports._free_mem(scriptPtr);
-    this.exports._free_mem(argsPtr);
+  /**
+   * Runs one WASM evaluation export. PtrLen-returning exports take a hidden
+   * struct-return pointer as their first argument (clang's wasm32 C ABI), so
+   * `invoke` receives an 8-byte scratch slot to pass through.
+   *
+   * Host imports only throw a WasmFault (see `load()`), so an exception here
+   * means the WASM frames were unwound past their C cleanup: the engine is
+   * marked unusable before the exception is rethrown.
+   * @private
+   */
+  private run(sha: string, invoke: (retPtr: number) => void): ReplyValue {
+    const retPtr = this.guardAlloc(() => alloc(this.exports, 8));
+    let result: PtrLen;
+    try {
+      try {
+        invoke(retPtr);
+      } catch (err) {
+        this.markFaulted(err);
+        throw err;
+      }
+      result = readPtrLen(this.exports.HEAPU8, retPtr);
+    } finally {
+      this.release(retPtr);
+    }
     return this.decodeResult(result, sha);
   }
 
   /**
-   * Calls the WASM _eval function, handling different ABI conventions.
+   * Copies `data` into a fresh WASM allocation.
+   * @throws RangeError if the heap cannot hold it (the engine stays usable)
+   * @throws WasmFault if `_alloc` threw (the engine becomes unusable)
    * @private
    */
-  private callEval(
-    ptr: number,
-    len: number,
-  ): bigint | number[] | { ptr: number; len: number } | number {
-    if (this.exports._eval.length >= 3) {
-      const retPtr = this.exports._alloc(8);
-      this.exports._eval(retPtr, ptr, len);
-      const ptrLen = this.readPtrLen(retPtr);
-      this.exports._free_mem(retPtr);
-      return ptrLen;
-    }
-    const result = this.exports._eval(ptr, len);
-    if (result === undefined) {
-      throw new Error("Unexpected PtrLen return type");
-    }
-    return result;
+  private write(data: Buffer): number {
+    return this.guardAlloc(() => allocAndWrite(this.exports, data));
   }
 
   /**
-   * Calls the WASM _eval_with_args function with KEYS/ARGV.
    * @private
    */
-  private callEvalWithArgs(
-    scriptPtr: number,
-    scriptLen: number,
-    argsPtr: number,
-    argsLen: number,
-    keysCount: number,
-  ): bigint | number[] | { ptr: number; len: number } | number {
-    if (this.exports._eval_with_args.length >= 6) {
-      const retPtr = this.exports._alloc(8);
-      this.exports._eval_with_args(
-        retPtr,
-        scriptPtr,
-        scriptLen,
-        argsPtr,
-        argsLen,
-        keysCount,
+  private guardAlloc(allocate: () => number): number {
+    try {
+      return allocate();
+    } catch (err) {
+      if (err instanceof WasmFault) {
+        this.markFaulted(err);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * @private
+   */
+  private markFaulted(err: unknown): void {
+    this.faulted = true;
+    this.fault = err;
+  }
+
+  /**
+   * Frees a buffer passed to WASM. After a fault the heap is abandoned along
+   * with the VM, so nothing is freed (the allocator state is not trusted).
+   * @private
+   */
+  private release(ptr: number): void {
+    if (!this.faulted) {
+      this.exports._free_mem(ptr);
+    }
+  }
+
+  /**
+   * @private
+   */
+  private assertUsable(): void {
+    if (this.faulted) {
+      const reason =
+        this.fault instanceof Error ? this.fault.message : String(this.fault);
+      throw new Error(
+        `LuaEngine is unusable: a previous evaluation was aborted by an exception; create a new engine. Cause: ${reason}`,
+        { cause: this.fault },
       );
-      const ptrLen = this.readPtrLen(retPtr);
-      this.exports._free_mem(retPtr);
-      return ptrLen;
     }
-    const result = this.exports._eval_with_args(
-      scriptPtr,
-      scriptLen,
-      argsPtr,
-      argsLen,
-      keysCount,
-    );
-    if (result === undefined) {
-      throw new Error("Unexpected PtrLen return type");
-    }
-    return result;
-  }
-
-  /**
-   * Reads a PtrLen struct from WASM memory.
-   * @private
-   */
-  private readPtrLen(base: number): { ptr: number; len: number } {
-    const heap = this.exports.HEAPU8;
-    if (base + 8 > heap.length) {
-      throw new Error("Unexpected PtrLen return type");
-    }
-    const ptr =
-      heap[base] |
-      (heap[base + 1] << 8) |
-      (heap[base + 2] << 16) |
-      (heap[base + 3] << 24);
-    const len =
-      heap[base + 4] |
-      (heap[base + 5] << 8) |
-      (heap[base + 6] << 16) |
-      (heap[base + 7] << 24);
-    return { ptr, len };
   }
 
   /**
    * Decodes a PtrLen result from WASM into a ReplyValue.
    * @private
    */
-  private decodeResult(
-    result: bigint | number[] | { ptr: number; len: number } | number,
-    sha: string,
-  ): ReplyValue {
-    let ptrLen: { ptr: number; len: number };
-
-    if (typeof result === "number") {
-      if (this.exports.getTempRet0) {
-        const len = this.exports.getTempRet0();
-        if (!len) {
-          throw new Error("Unexpected PtrLen return type");
-        }
-        ptrLen = { ptr: result >>> 0, len };
-      } else {
-        ptrLen = this.readPtrLen(result >>> 0);
-      }
-    } else {
-      ptrLen = unpackPtrLen(result);
-    }
-
-    const { ptr, len } = ptrLen;
-
+  private decodeResult({ ptr, len }: PtrLen, sha: string): ReplyValue {
     if (!ptr || !len) {
       return null;
     }
@@ -328,7 +337,7 @@ export class LuaEngine {
       return { err: Buffer.from("ERR reply exceeds configured limit", "utf8") };
     }
 
-    const buffer = Buffer.from(this.exports.HEAPU8.subarray(ptr, ptr + len));
+    const buffer = readBytes(this.exports.HEAPU8, ptr, len);
     this.exports._free_mem(ptr);
     const topTag = len > 0 ? buffer.readUInt8(0) : -1;
     const value = decodeReply(buffer).value;
@@ -397,29 +406,133 @@ function buildScriptError(
 }
 
 /**
- * Builds the `host_redis_props` handler. The import takes no input args and
- * returns a PtrLen blob (the encoded redisProps). A `count == 0` blob (length 4)
- * is treated as "no props" and returns a zero PtrLen so C skips application.
- *
- * ABI: under sret the runtime passes a single retPtr arg; under direct return it
- * passes none. We detect via arg count, mirroring parseAbiArgs but with no input
- * pointer.
+ * Builds the `host_redis_props` handler. The import takes only the struct-return
+ * pointer and writes the encoded redisProps blob's PtrLen there. A `count == 0`
+ * blob (length 4) is treated as "no props" and yields a zero PtrLen so C skips
+ * application.
  *
  * @internal exported for testing.
  */
 export function makePropsHandler(
   exports: WasmExports,
   blob: Buffer,
-): (...args: number[]) => bigint | void {
+): (retPtr: number) => void {
   const empty = blob.length <= 4; // only the u32 count, zero entries
-  return (...args: number[]): bigint | void => {
-    const hasRet = args.length >= 1;
-    const abiArgs = { hasRet, retPtr: hasRet ? args[0] : 0, ptr: 0, len: 0 };
+  return (retPtr: number): void => {
     const ptrLen = empty
-      ? { ptr: 0, len: 0 }
+      ? NULL_PTR_LEN
       : { ptr: allocAndWrite(exports, blob), len: blob.length };
-    return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
+    writePtrLen(exports.HEAPU8, retPtr, ptrLen);
   };
+}
+
+// =============================================================================
+// Host import guards
+// =============================================================================
+//
+// A JS exception must never unwind out of a host import: it would tear through
+// the WASM frames of the running lua_pcall, skipping every C cleanup and leaving
+// the Lua VM corrupted. Each import therefore catches everything and reports the
+// failure through its return value, which C turns into an ordinary Lua error.
+// The one exception is a WasmFault (a throwing `_alloc`): the module is already
+// untrusted, so it propagates and the running eval marks the engine unusable.
+
+/** Rethrows a WasmFault; every other error is for the caller to report. */
+function rethrowFault(err: unknown): void {
+  if (err instanceof WasmFault) {
+    throw err;
+  }
+}
+
+const NULL_PTR_LEN: PtrLen = { ptr: 0, len: 0 };
+
+/** The message of a thrown value, without letting a hostile value throw again. */
+function errorMessage(err: unknown): string {
+  try {
+    return err instanceof Error ? String(err.message) : String(err);
+  } catch {
+    return "host callback threw";
+  }
+}
+
+/**
+ * Completes a redis.call/redis.pcall import by writing the encoded reply to
+ * `retPtr`. A throw anywhere (argument decoding, the host handler, encoding a
+ * malformed ReplyValue, heap exhaustion) becomes an error reply carrying the
+ * exception message, which C raises (call) or returns as an error table
+ * (pcall). If even that cannot be allocated, the zero PtrLen makes C raise
+ * "ERR empty reply from host".
+ */
+function writeReplyImport(
+  exports: WasmExports,
+  retPtr: number,
+  produce: () => ReplyValue,
+): void {
+  let out: PtrLen;
+  try {
+    out = encodeReplyToPtrLen(exports, produce());
+  } catch (err) {
+    rethrowFault(err);
+    try {
+      out = encodeReplyToPtrLen(exports, {
+        err: Buffer.from(errorMessage(err), "utf8"),
+      });
+    } catch (fallbackErr) {
+      rethrowFault(fallbackErr);
+      out = NULL_PTR_LEN;
+    }
+  }
+  writePtrLen(exports.HEAPU8, retPtr, out);
+}
+
+/**
+ * Completes a void host import (redis.log, redis.setresp): a zero PtrLen on
+ * success; on failure `len != 0` with `ptr` holding the exception message (or 0
+ * when it could not be allocated), which C raises as a Lua error (see abi.h).
+ */
+function writeStatusImport(
+  exports: WasmExports,
+  retPtr: number,
+  run: () => void,
+): void {
+  let out = NULL_PTR_LEN;
+  try {
+    run();
+  } catch (err) {
+    rethrowFault(err);
+    out = { ptr: 0, len: 1 };
+    try {
+      const message = Buffer.from(errorMessage(err), "utf8");
+      if (message.length > 0) {
+        out = { ptr: allocAndWrite(exports, message), len: message.length };
+      }
+    } catch (fallbackErr) {
+      // Keep the message-less failure; C substitutes a generic one.
+      rethrowFault(fallbackErr);
+    }
+  }
+  writePtrLen(exports.HEAPU8, retPtr, out);
+}
+
+/**
+ * Completes the redis.sha1hex import. On failure (heap exhaustion) the zero
+ * PtrLen makes C raise "ERR sha1hex failed".
+ */
+function writeSha1Import(
+  exports: WasmExports,
+  retPtr: number,
+  ptr: number,
+  len: number,
+): void {
+  let out = NULL_PTR_LEN;
+  try {
+    const digest = computeSha1Hex(readBytes(exports.HEAPU8, ptr, len));
+    out = { ptr: allocAndWrite(exports, digest), len: digest.length };
+  } catch (err) {
+    rethrowFault(err);
+    // Otherwise report the zero PtrLen.
+  }
+  writePtrLen(exports.HEAPU8, retPtr, out);
 }
 
 const ERROR_MARKER = "__RLUA_E__:";
@@ -446,16 +559,18 @@ function parseErrorMarker(
 }
 
 /**
- * Mutable handlers that can be swapped after WASM instantiation.
- * The WASM imports capture wrapper functions that delegate to these.
+ * Mutable handlers that can be swapped after WASM instantiation. The WASM
+ * imports built in `load()` own the memory marshalling and exception
+ * containment and delegate the host-facing work to these, which may throw.
  */
 type MutableHandlers = {
-  log: (level: number, ptr: number, len: number) => void;
-  sha1hex: (...args: number[]) => bigint | void;
-  call: (...args: number[]) => bigint | void;
-  pcall: (...args: number[]) => bigint | void;
-  props: (...args: number[]) => bigint | void;
+  log: (level: number, message: Buffer) => void;
   setresp: (version: number) => void;
+  call: (args: Buffer[]) => ReplyValue;
+  pcall: (args: Buffer[]) => ReplyValue;
+  props: (retPtr: number) => void;
+  /** Set when the props import failed during `_init`; rethrown by create(). */
+  propsFault?: { error: unknown };
 };
 
 /**
@@ -631,6 +746,10 @@ export class LuaWasmModule {
     }
 
     const initResult = this.exports._init();
+    const propsFault = this.handlers.propsFault;
+    if (propsFault) {
+      throw propsFault.error;
+    }
     if (typeof initResult === "number" && initResult !== 0) {
       throw new Error("Failed to initialize Lua WASM engine");
     }
@@ -659,57 +778,29 @@ export class LuaWasmModule {
             : Buffer.alloc(0));
         },
       };
+      // A throw becomes an error reply in the import guard (writeReplyImport).
       try {
         return isPcall
           ? host.redisPcall.call(host, args, ctx)
           : host.redisCall.call(host, args, ctx);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { err: Buffer.from(message, "utf8") };
       } finally {
         done = true;
       }
     };
 
-    this.handlers.log = (level: number, ptr: number, len: number): void => {
-      const msg = readBytes(exports.HEAPU8, ptr, len);
-      host.log(level, msg);
+    this.handlers.log = (level: number, message: Buffer): void => {
+      host.log(level, message);
     };
 
     this.handlers.setresp = (version: number): void => {
       host.onSetResp?.call(host, version as 2 | 3);
     };
 
-    this.handlers.sha1hex = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
-      const bytes = computeSha1Hex(data);
-      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    this.handlers.call = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const decoded = decodeArgs(
-        readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len),
-      );
-      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, false));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    this.handlers.pcall = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const decoded = decodeArgs(
-        readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len),
-      );
-      const ptrLen = encodeReplyToPtrLen(exports, callHandler(decoded, true));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
+    this.handlers.call = (args: Buffer[]): ReplyValue => callHandler(args, false);
+    this.handlers.pcall = (args: Buffer[]): ReplyValue => callHandler(args, true);
   }
 
   private wireStandaloneCallbacks(): void {
-    const exports = this.exports;
-
     const notSupported = (action: string): ReplyValue => ({
       err: Buffer.from(
         `ERR ${action} is not available in standalone mode`,
@@ -718,26 +809,8 @@ export class LuaWasmModule {
     });
 
     this.handlers.log = (): void => {};
-
-    this.handlers.sha1hex = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const data = readBytes(exports.HEAPU8, abiArgs.ptr, abiArgs.len);
-      const bytes = computeSha1Hex(data);
-      const ptrLen = { ptr: allocAndWrite(exports, bytes), len: bytes.length };
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    this.handlers.call = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.call"));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
-
-    this.handlers.pcall = (...args: number[]): bigint | void => {
-      const abiArgs = parseAbiArgs(args);
-      const ptrLen = encodeReplyToPtrLen(exports, notSupported("redis.pcall"));
-      return returnPtrLen(exports.HEAPU8, abiArgs, ptrLen);
-    };
+    this.handlers.call = (): ReplyValue => notSupported("redis.call");
+    this.handlers.pcall = (): ReplyValue => notSupported("redis.pcall");
   }
 }
 
@@ -767,26 +840,46 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
   // Mutable handlers - these will be set by wireHostCallbacks/wireStandaloneCallbacks
   const handlers: MutableHandlers = {
     log: () => {},
-    sha1hex: () => BigInt(0),
-    call: () => BigInt(0),
-    pcall: () => BigInt(0),
-    props: () => BigInt(0),
     setresp: () => {},
+    call: () => null,
+    pcall: () => null,
+    props: () => {},
   };
 
-  // Create wrapper imports that delegate to mutable handlers
-  // These wrappers are captured by WASM at instantiation, but they call handlers which can be swapped
+  // Assigned once instantiated; WASM only calls the imports after that.
+  let exports: WasmExports;
+
+  // Imports captured by WASM at instantiation. They delegate to the swappable
+  // handlers and never throw (see "Host import guards"). Every PtrLen-returning
+  // import receives the struct-return pointer as its first argument.
   const hostImports: Record<string, HostImport> = {
-    host_redis_log: (level: number, ptr: number, len: number) =>
-      handlers.log(level, ptr, len),
-    host_sha1hex: (...args: number[]) => handlers.sha1hex(...args),
-    host_redis_call: (...args: number[]) => handlers.call(...args),
-    host_redis_pcall: (...args: number[]) => handlers.pcall(...args),
-    host_redis_props: (...args: number[]) => handlers.props(...args),
-    host_redis_setresp: (version: number) => handlers.setresp(version),
+    host_redis_log: (retPtr: number, level: number, ptr: number, len: number) =>
+      writeStatusImport(exports, retPtr, () =>
+        handlers.log(level, readBytes(exports.HEAPU8, ptr, len)),
+      ),
+    host_redis_setresp: (retPtr: number, version: number) =>
+      writeStatusImport(exports, retPtr, () => handlers.setresp(version)),
+    host_sha1hex: (retPtr: number, ptr: number, len: number) =>
+      writeSha1Import(exports, retPtr, ptr, len),
+    host_redis_call: (retPtr: number, ptr: number, len: number) =>
+      writeReplyImport(exports, retPtr, () =>
+        handlers.call(decodeArgs(readBytes(exports.HEAPU8, ptr, len))),
+      ),
+    host_redis_pcall: (retPtr: number, ptr: number, len: number) =>
+      writeReplyImport(exports, retPtr, () =>
+        handlers.pcall(decodeArgs(readBytes(exports.HEAPU8, ptr, len))),
+      ),
+    host_redis_props: (retPtr: number) => {
+      try {
+        handlers.props(retPtr);
+      } catch (error) {
+        handlers.propsFault ??= { error };
+        writePtrLen(exports.HEAPU8, retPtr, NULL_PTR_LEN);
+      }
+    },
   };
 
-  const { exports } = await loadModule(options, hostImports);
+  ({ exports } = await loadModule(options, hostImports));
 
   // Wire the props handler now that we have real exports + the encoded blob.
   handlers.props = makePropsHandler(exports, encodeRedisProps(options.redisProps));

@@ -174,6 +174,41 @@ by the engine.
 Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
 instead of throwing to match Redis behavior.
 
+### Host callback failures
+
+A host callback never breaks the engine. A throw from `redisCall`, or a malformed
+`ReplyValue` it returns (e.g. `{ map: "x" }`, a non-Buffer `ok`, or a reply nested
+too deeply to encode), becomes an error reply carrying the exception message:
+`redis.call` raises it, `redis.pcall` returns it as an error table. A throw from
+`log` or `onSetResp` is raised in the script as an ordinary Lua error with the
+exception message (a script can catch it with `pcall`); this differs from Redis,
+where `redis.log` cannot fail. A throwing `onSetResp` also leaves the protocol
+unchanged.
+
+If an exception still escapes the WASM module, the VM can no longer be trusted:
+that call throws, and every later `eval` / `evalWithArgs` throws
+`LuaEngine is unusable: ...` (with the original error as `cause`). Create a new
+engine to continue. This covers a WASM trap or abort (e.g. `cmsgpack.pack`
+running out of heap aborts, as in Redis) and a throwing `_alloc`, which is
+reported as the exported `WasmFault` error class:
+
+```typescript
+import { WasmFault } from "lua-redis-wasm";
+
+try {
+  engine.eval(script);
+} catch (err) {
+  if (err instanceof RangeError) {
+    // The script or KEYS/ARGV did not fit in the WASM heap; the engine is fine.
+  } else if (err instanceof WasmFault) {
+    // _alloc threw inside the module: the engine is now unusable, recreate it.
+  } else {
+    // A WASM trap/abort, or "LuaEngine is unusable" from an earlier fault:
+    // recreate the engine too.
+  }
+}
+```
+
 ### Call context
 
 Both handlers receive `ctx: { source, line }`, the caller of `redis.call`/`redis.pcall`
@@ -371,6 +406,15 @@ const engine = module.create(host);
 | `maxMemoryBytes` | Memory growth cap            | Host-coordinated |
 | `maxReplyBytes`  | Maximum reply payload size   | WASM runtime     |
 | `maxArgBytes`    | Maximum single argument size | WASM runtime     |
+
+The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
+`not enough memory` error and the engine stays usable. Because Lua 5.1 has no
+emergency garbage collection, the engine runs a full collection after any
+evaluation that leaves more than 16 MB of Lua memory in use, so a heavy script's
+garbage (whether it succeeded, failed, or caught and rethrew an out-of-memory
+error) does not make the next script run out of memory. A script, KEYS or ARGV
+too large to copy into the heap makes `eval` / `evalWithArgs` throw a
+`RangeError`; the engine stays usable.
 
 ## Included Lua Libraries
 

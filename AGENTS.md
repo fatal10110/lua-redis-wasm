@@ -77,7 +77,8 @@ type RedisHost = {
 
 - **Module is one-time use**: After `create()` or `createStandalone()`, the module cannot create another engine
 - **Binary-safe throughout**: All data flows as Buffers, never strings (except intentional UTF-8 for commands)
-- **ABI dual support**: Engine handles both direct returns and sret calling conventions
+- **sret ABI**: `PtrLen`-returning exports/imports take a leading struct-return pointer; the engine writes/reads the 8-byte result there
+- **Host imports never throw**: each import catches everything and reports failure via its return value, which C raises as a Lua error; an exception that still escapes WASM marks the engine unusable
 - **Host callbacks mutable**: Handlers can be updated dynamically via `handlers` object
 - **Standalone mode**: No redis.call/pcall available, for pure Lua computations
 

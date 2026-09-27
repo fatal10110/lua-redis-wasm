@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define REDIS_LUA_WASM_ABI_VERSION 0
+#define REDIS_LUA_WASM_ABI_VERSION 1
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,8 +65,12 @@ typedef struct PtrLen {
 
 HOST_IMPORT(host_redis_call) PtrLen host_redis_call(uint32_t ptr, uint32_t len);
 HOST_IMPORT(host_redis_pcall) PtrLen host_redis_pcall(uint32_t ptr, uint32_t len);
-HOST_IMPORT(host_redis_log) void host_redis_log(uint32_t level, uint32_t ptr, uint32_t len);
-HOST_IMPORT(host_redis_setresp) void host_redis_setresp(uint32_t version);
+/* host_redis_log and host_redis_setresp return {0,0} when the host callback
+ * succeeded. When it failed, len != 0 and ptr is a malloc'd error message (or
+ * 0 if the host could not allocate one); the caller frees it and raises it as
+ * a Lua error, so a host exception never unwinds through WASM frames. */
+HOST_IMPORT(host_redis_log) PtrLen host_redis_log(uint32_t level, uint32_t ptr, uint32_t len);
+HOST_IMPORT(host_redis_setresp) PtrLen host_redis_setresp(uint32_t version);
 HOST_IMPORT(host_sha1hex) PtrLen host_sha1hex(uint32_t ptr, uint32_t len);
 HOST_IMPORT(host_redis_props) PtrLen host_redis_props(void);
 

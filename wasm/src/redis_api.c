@@ -395,6 +395,49 @@ static int l_redis_pcall(lua_State *L) {
   return redis_call_common(L, 0);
 }
 
+/* Registry slot (keyed by this variable's address) that carries a host failure
+ * message out of stash_host_failure's protected call. */
+static char g_host_failure_key;
+
+typedef struct {
+  const char *msg;
+  size_t len;
+} HostFailure;
+
+/* lua_cpcall body: interns the host's message into the registry slot. */
+static int stash_host_failure(lua_State *L) {
+  HostFailure *failure = (HostFailure *)lua_touserdata(L, 1);
+  lua_pushlightuserdata(L, &g_host_failure_key);
+  lua_pushlstring(L, failure->msg, failure->len);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  return 0;
+}
+
+/* Raises the failure returned by a void-result host import (log, setresp) as
+ * a normal Lua error. See the host import contract in abi.h. The message is
+ * copied into Lua in protected mode so a memory error cannot skip freeing the
+ * host's buffer; if the copy fails, that memory error is raised instead. */
+static int raise_host_failure(lua_State *L, PtrLen failure) {
+  if (failure.ptr == 0) {
+    lua_pushliteral(L, "ERR host callback failed");
+    return lua_error(L);
+  }
+  HostFailure copy = {(const char *)(uintptr_t)failure.ptr, failure.len};
+  int status = lua_cpcall(L, stash_host_failure, &copy);
+  free_mem(failure.ptr);
+  if (status != 0) {
+    return lua_error(L); /* the memory error is on the stack */
+  }
+  /* Move the message from the registry slot to the stack; neither step
+   * allocates (the slot's key already exists). */
+  lua_pushlightuserdata(L, &g_host_failure_key);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  lua_pushlightuserdata(L, &g_host_failure_key);
+  lua_pushnil(L);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  return lua_error(L);
+}
+
 /* Raises `msg` as a plain string, without luaL_error's "user_script:N:"
  * position prefix, the same way this engine currently raises redis.call errors;
  * the script line reaches the host through the error handler instead. Redis 7
@@ -445,7 +488,10 @@ static int l_redis_log(lua_State *L) {
   luaL_pushresult(&b);
   size_t len = 0;
   const char *msg = lua_tolstring(L, -1, &len);
-  host_redis_log((uint32_t)level, (uint32_t)(uintptr_t)msg, (uint32_t)len);
+  PtrLen failure = host_redis_log((uint32_t)level, (uint32_t)(uintptr_t)msg, (uint32_t)len);
+  if (failure.len != 0) {
+    return raise_host_failure(L, failure);
+  }
   return 0;
 }
 
@@ -527,8 +573,12 @@ static int l_redis_setresp(lua_State *L) {
   if (next != 2 && next != 3) {
     return luaL_error(L, "ERR RESP version must be 2 or 3.");
   }
+  /* Notify the host so it can match reply shapes; switch only if it accepted. */
+  PtrLen failure = host_redis_setresp(next);
+  if (failure.len != 0) {
+    return raise_host_failure(L, failure);
+  }
   g_resp_version = next;
-  host_redis_setresp(next); /* notify host so it can match reply shapes */
   return 0;
 }
 

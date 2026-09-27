@@ -8,9 +8,7 @@ import {
   encodeReplyValue,
   decodeReply,
   encodeArgArray,
-  encodeRedisProps,
-  packPtrLen,
-  unpackPtrLen
+  encodeRedisProps
 } from "../src/codec.js";
 import type { RedisProps, ReplyValue } from "../src/types.js";
 
@@ -408,57 +406,6 @@ test("encodeArgArray: binary-safe with null bytes", () => {
   assert.equal(encoded.readUInt32LE(0), 1);
   assert.equal(encoded.readUInt32LE(4), 3);
   assert.deepEqual([...encoded.subarray(8)], [0x00, 0x01, 0x00]);
-});
-
-// -----------------------------------------------------------------------------
-// packPtrLen / unpackPtrLen tests
-// -----------------------------------------------------------------------------
-
-test("packPtrLen: packs ptr and len into bigint", () => {
-  const packed = packPtrLen(0x12345678, 0x9abcdef0);
-  // len in upper 32 bits, ptr in lower 32 bits
-  assert.equal(packed & 0xffffffffn, 0x12345678n);
-  assert.equal(packed >> 32n, 0x9abcdef0n);
-});
-
-test("packPtrLen: handles zero values", () => {
-  const packed = packPtrLen(0, 0);
-  assert.equal(packed, 0n);
-});
-
-test("unpackPtrLen: unpacks bigint", () => {
-  const packed = packPtrLen(100, 200);
-  const { ptr, len } = unpackPtrLen(packed);
-  assert.equal(ptr, 100);
-  assert.equal(len, 200);
-});
-
-test("unpackPtrLen: unpacks array", () => {
-  const { ptr, len } = unpackPtrLen([1000, 2000]);
-  assert.equal(ptr, 1000);
-  assert.equal(len, 2000);
-});
-
-test("unpackPtrLen: unpacks object", () => {
-  const { ptr, len } = unpackPtrLen({ ptr: 500, len: 600 });
-  assert.equal(ptr, 500);
-  assert.equal(len, 600);
-});
-
-test("unpackPtrLen: throws on invalid input", () => {
-  assert.throws(
-    () => unpackPtrLen("invalid" as unknown as bigint),
-    { message: "Unexpected PtrLen return type" }
-  );
-});
-
-test("unpackPtrLen: roundtrip", () => {
-  const originalPtr = 0xaabbccdd;
-  const originalLen = 0x11223344;
-  const packed = packPtrLen(originalPtr, originalLen);
-  const { ptr, len } = unpackPtrLen(packed);
-  assert.equal(ptr, originalPtr);
-  assert.equal(len, originalLen);
 });
 
 // -----------------------------------------------------------------------------
