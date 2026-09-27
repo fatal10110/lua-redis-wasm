@@ -29,7 +29,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The vendored C sources (Lua 5.1 with cjson/cmsgpack/struct/bit, `fpconv`,
   `rand.c`) now come from Valkey 8.0.11 (BSD-3-Clause, `vendor/valkey` submodule)
   instead of the Redis 8.4 tree (`vendor/redis`), whose newer files are licensed
-  under RSALv2/SSPLv1/AGPLv3. Valkey 8.0.11's Lua is the same code as Redis 8.4's
+  under RSALv2/SSPLv1/AGPLv3. This removes the two such files the build used:
+  the `rand.h` and `solarisfixes.h` headers (included by `redis_math.c` and
+  `lua_cjson.c`), which now come from Valkey under BSD-3-Clause.
+  Valkey 8.0.11's Lua is the same code as Redis 8.4's
   apart from `cjson.decode_array_with_array_mt` (see Removed): it carries the same
   security fixes (CVE-2024-31449, CVE-2025-46817, CVE-2025-46818, CVE-2025-46819,
   CVE-2025-49844) and the same string hashing, so table iteration order is

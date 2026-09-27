@@ -696,7 +696,7 @@ static void protect_table_recursively(lua_State *L) {
 // Lock the metatables of basic types so a script cannot escape the sandbox by
 // mutating e.g. the shared string metatable. Mirrors
 // luaSetTableProtectionForBasicTypes in Valkey 8.0's src/script_lua.c
-// (BSD-licensed in Valkey 7.2.11+ / 8.0.x+ and Redis 7.2.11).
+// (BSD-licensed in Valkey 7.2.11+ / 8.0.6+ and Redis 7.2.11+).
 static void protect_basic_type_metatables(lua_State *L) {
   static const int types[] = {LUA_TSTRING,   LUA_TNUMBER, LUA_TBOOLEAN, LUA_TNIL,
                               LUA_TFUNCTION,  LUA_TTHREAD, LUA_TLIGHTUSERDATA};

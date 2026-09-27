@@ -3,8 +3,8 @@
 The WASM module shipped in this package is compiled from this project's own sources
 (`wasm/src`) together with C sources taken from [Valkey](https://github.com/valkey-io/valkey),
 vendored as the `vendor/valkey` git submodule pinned to a Valkey release tag. Only the
-files listed below are compiled into the module; nothing else from Valkey is built or
-distributed. Parts of `wasm/src` are derived from Valkey / Redis 7.2.4. The licenses of
+files listed below are compiled into the module or included by those files; nothing else
+from Valkey is built or distributed. Parts of `wasm/src` are derived from Valkey / Redis 7.2.4. The licenses of
 all of this third-party code are reproduced below.
 
 ## Valkey / Redis 7.2.4
@@ -19,6 +19,9 @@ all of this third-party code are reproduced below.
   - Redis and Valkey modifications to the Lua 5.1 core in `vendor/valkey/deps/lua/src`
     (readonly tables, string hashing, security fixes).
   - `vendor/valkey/src/rand.c` (see [rand.c](#randc) below).
+  - Headers included by the compiled files: `vendor/valkey/src/rand.h` (included by
+    `wasm/src/redis_math.c`) and `vendor/valkey/src/solarisfixes.h` (included by
+    `lua_cjson.c`), both Copyright (c) 2009-2012, Redis Ltd., BSD 3-Clause.
 - Copyright: Redis Ltd. (2006–2020); Valkey contributors (2024–present)
 - License: BSD 3-Clause (text from `vendor/valkey/COPYING`)
 
