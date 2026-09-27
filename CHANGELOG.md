@@ -50,6 +50,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declared explicitly (`import_module("env")` in `abi.h` plus an Emscripten JS
   library), and the loader no longer aliases the `wasi_snapshot_preview1` import
   namespace to `env` (#56).
+- Returning a deeply nested or cyclic table no longer hangs the host: the reply
+  encoder grows the Lua stack with `lua_checkstack` like Redis and caps nesting
+  at 1000 levels, replying `ERR reached lua stack limit` instead (#35). Redis
+  places that error at the too-deep element; here it replaces the whole reply.
+- A host reply nested deeper than 1000 levels now raises
+  `ERR reached lua stack limit` from `redis.call`/`redis.pcall` instead of
+  overrunning the Lua stack (#50).
+- Lua numbers outside the int64 range (including NaN and `±math.huge`) now
+  convert to the integer reply `-9223372036854775808`, matching Redis on x86-64,
+  instead of saturating (#46).
 
 ## [1.3.0] - 2026-06-08
 

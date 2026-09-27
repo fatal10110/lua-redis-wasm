@@ -12,6 +12,9 @@
 ## Stack Limits
 - Max Lua stack depth: 1024 slots.
 - Max recursion depth: 128 calls.
+- Max reply nesting depth: 1000 levels, for both script return values and host
+  replies decoded by `redis.call`/`redis.pcall`. Deeper (or cyclic) tables fail
+  with `ERR reached lua stack limit`.
 
 ## Safety Notes
 - Limits are enforced consistently across all entrypoints.

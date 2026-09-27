@@ -171,7 +171,15 @@ static int push_error_table(lua_State *L, const uint8_t *data, uint32_t len) {
 }
 
 static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *offset,
-                        int raise_on_error) {
+                        int raise_on_error, int depth) {
+  /* Each level pushes up to 3 slots (a map's wrapper table, inner table and
+   * key) before recursing: grow the Lua stack like redisProtocolToLuaType
+   * instead of writing past its end, and cap the recursion depth. Redis panics
+   * here; this runs under decode_reply_protected, so it surfaces as a normal
+   * script error instead. */
+  if (depth > REDIS_REPLY_MAX_DEPTH || !lua_checkstack(L, 3)) {
+    return luaL_error(L, "ERR reached lua stack limit");
+  }
   if (*offset + 5 > len) {
     return luaL_error(L, "ERR reply decoding failed");
   }
@@ -236,7 +244,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
         lua_createtable(L, (int)count_or_len, 0);
       }
       for (uint32_t i = 1; i <= count_or_len; i++) {
-        if (decode_reply(L, buf, len, offset, raise_on_error) != 1) {
+        if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
           return luaL_error(L, "ERR reply decoding failed");
         }
         lua_rawseti(L, -2, (int)i);
@@ -297,8 +305,8 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       lua_createtable(L, 0, 1);
       lua_createtable(L, 0, (int)count_or_len);
       for (uint32_t i = 0; i < count_or_len; i++) {
-        if (decode_reply(L, buf, len, offset, raise_on_error) != 1 ||
-            decode_reply(L, buf, len, offset, raise_on_error) != 1) {
+        if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1 ||
+            decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
           return luaL_error(L, "ERR reply decoding failed");
         }
         lua_settable(L, -3);
@@ -309,7 +317,7 @@ static int decode_reply(lua_State *L, const uint8_t *buf, size_t len, size_t *of
       lua_createtable(L, 0, 1);
       lua_createtable(L, 0, (int)count_or_len);
       for (uint32_t i = 0; i < count_or_len; i++) {
-        if (decode_reply(L, buf, len, offset, raise_on_error) != 1) {
+        if (decode_reply(L, buf, len, offset, raise_on_error, depth + 1) != 1) {
           return luaL_error(L, "ERR reply decoding failed");
         }
         lua_pushboolean(L, 1);
@@ -331,7 +339,7 @@ typedef struct {
 static int decode_reply_protected(lua_State *L) {
   DecodeCtx *ctx = (DecodeCtx *)lua_touserdata(L, 1);
   size_t offset = 0;
-  return decode_reply(L, ctx->buf, ctx->len, &offset, ctx->raise_on_error);
+  return decode_reply(L, ctx->buf, ctx->len, &offset, ctx->raise_on_error, 0);
 }
 
 static int redis_call_common(lua_State *L, int raise_on_error) {
