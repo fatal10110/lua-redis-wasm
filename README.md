@@ -177,7 +177,8 @@ instead of throwing to match Redis behavior.
 ### Call context
 
 Both handlers receive `ctx: { source, line }`, the caller of `redis.call`/`redis.pcall`
-exactly as Redis 6.2's `luaPushError` sees it (stack level 1): `source` is
+exactly as Redis 6.2's `luaPushError` sees it (stack level 1): `source` (a `Buffer`,
+read it inside the handler) is
 `"@user_script"` for the script, the chunk for `loadstring` code, or `"=[C]"` (line
 `-1`) for a C caller such as `pcall(redis.pcall, ...)`. `source` is empty when unknown.
 Use it to emit Redis 6.2's `${source}: ${line}: ...` pcall error prefix. When

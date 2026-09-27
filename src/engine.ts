@@ -54,6 +54,7 @@ import type {
   ReplyErrorMeta,
   RedisHost,
   RedisCallHandler,
+  RedisCallContext,
   RedisLogHandler,
   EngineOptions,
   StandaloneOptions,
@@ -639,12 +640,18 @@ export class LuaWasmModule {
     const exports = this.exports;
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
+      // source is copied lazily: for loadstring code it is the whole chunk, and
+      // most handlers never read it. The pointer is valid during the handler.
       const sourcePtr = exports._current_call_source?.() ?? 0;
-      const ctx = {
-        source: sourcePtr
-          ? readBytes(exports.HEAPU8, sourcePtr, exports.HEAPU8.indexOf(0, sourcePtr) - sourcePtr).toString("utf8")
-          : "",
+      let source: Buffer | undefined;
+      const ctx: RedisCallContext = {
         line: exports._current_call_line?.() ?? 0,
+        get source() {
+          const heap = exports.HEAPU8;
+          return (source ??= sourcePtr
+            ? readBytes(heap, sourcePtr, heap.indexOf(0, sourcePtr) - sourcePtr)
+            : Buffer.alloc(0));
+        },
       };
       try {
         return isPcall

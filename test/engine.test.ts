@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { load, LuaWasmModule, LuaEngine } from "../src/index.js";
 import { LuaWasmEngine, makePropsHandler } from "../src/engine.js";
 import { encodeRedisProps } from "../src/codec.js";
-import type { ReplyValue, RedisHost } from "../src/types.js";
+import type { ReplyValue, RedisHost, RedisCallContext } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
 
 // Helper to resolve WASM path (checks dist/ first, then wasm/build/)
@@ -1564,8 +1564,8 @@ test("compat: default (no profile) keeps historical behavior", async () => {
 
 test("redis.call/pcall: handler receives the caller's source and line", async () => {
   const calls: Array<[string, string | undefined, number | undefined]> = [];
-  const record = (kind: string) => (args: Buffer[], ctx?: { source: string; line: number }) => {
-    calls.push([`${kind} ${args[0].toString()}`, ctx?.source, ctx?.line]);
+  const record = (kind: string) => (args: Buffer[], ctx?: RedisCallContext) => {
+    calls.push([`${kind} ${args[0].toString()}`, ctx?.source.toString("latin1"), ctx?.line]);
     return { err: Buffer.from("ERR nope") };
   };
   const module = await load();
@@ -1582,7 +1582,8 @@ test("redis.call/pcall: handler receives the caller's source and line", async ()
       "  redis.call('c')",
       "end)",
       "pcall(redis.pcall, 'd')",
-      "loadstring(\"return redis.pcall('e')\")()"
+      "loadstring(\"return redis.pcall('e')\")()",
+      "loadstring(\"return redis.pcall('\\255')\")()"
     ].join("\n")
   );
   // Stack level 1 as-is, like Redis 6.2's luaPushError: no C-frame skipping.
@@ -1591,6 +1592,7 @@ test("redis.call/pcall: handler receives the caller's source and line", async ()
     ["pcall b", "@user_script", 4],
     ["call c", "@user_script", 8],
     ["pcall d", "=[C]", -1],
-    ["pcall e", "return redis.pcall('e')", 1]
+    ["pcall e", "return redis.pcall('e')", 1],
+    ["pcall \ufffd", "return redis.pcall('\u00ff')", 1] // source is raw chunk text
   ]);
 });

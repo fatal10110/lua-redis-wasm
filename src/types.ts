@@ -129,12 +129,13 @@ export type RedisCallHandler = (args: Buffer[], ctx?: RedisCallContext) => Reply
  */
 export type RedisCallContext = {
   /**
-   * Chunk source of the caller: `"@user_script"` for the script itself, the
-   * chunk string/name for `loadstring` code, `"=[C]"` when called from a C
-   * function (e.g. `pcall(redis.pcall, ...)`). Empty when unknown, in which
-   * case Redis omits the prefix.
+   * Chunk source of the caller, raw bytes: `"@user_script"` for the script
+   * itself, the chunk string/name for `loadstring` code, `"=[C]"` when called
+   * from a C function (e.g. `pcall(redis.pcall, ...)`). Empty when unknown, in
+   * which case Redis omits the prefix. Read it inside the handler: it is copied
+   * lazily from WASM memory on first access.
    */
-  source: string;
+  readonly source: Buffer;
   /** Line of the call within `source`; -1 for a C caller, 0 when unknown. */
   line: number;
 };
