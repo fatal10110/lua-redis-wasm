@@ -144,7 +144,16 @@ export async function instantiate(
   wasmBinary: Uint8Array,
   hostImports: Record<string, HostImport>
 ): Promise<{ module: WasmExports; exports: WasmExports }> {
-  const module = await moduleFactory({
+  // The Emscripten glue wraps `instantiateWasm` in a promise that only ever
+  // resolves (via successCallback) — it has no failure path. If instantiation
+  // fails (corrupt bytes, import mismatch) the factory promise would never
+  // settle, so surface the failure through a separate promise and race them.
+  let failInstantiation!: (reason: unknown) => void;
+  const instantiationFailed = new Promise<never>((_, reject) => {
+    failInstantiation = reject;
+  });
+
+  const modulePromise = moduleFactory({
     // wasmBinary + the custom instantiateWasm below fully drive instantiation,
     // so locateFile is never consulted for the .wasm — pass other files through.
     locateFile: (file) => file,
@@ -152,21 +161,29 @@ export async function instantiate(
 
     // Custom instantiation to inject host imports.
     instantiateWasm(imports, successCallback) {
+      // Host callbacks live in `env` (declared with import_module("env") in
+      // wasm/include/abi.h). The WASI namespace (fd_write, clock_time_get, ...)
+      // is left exactly as the glue provides it.
       const env = (imports.env as Record<string, WebAssembly.ImportValue>) || {};
       imports.env = { ...env, ...hostImports } as WebAssembly.ModuleImports;
 
-      // Also add to WASI namespace for compatibility.
-      imports.wasi_snapshot_preview1 = imports.env;
-
-      WebAssembly.instantiate(wasmBinary, imports).then((result) => {
-        const instantiated = result as unknown as WebAssembly.WebAssemblyInstantiatedSource;
-        successCallback(instantiated.instance, instantiated.module);
-      });
+      WebAssembly.instantiate(wasmBinary, imports)
+        .then((result) => {
+          const instantiated = result as unknown as WebAssembly.WebAssemblyInstantiatedSource;
+          successCallback(instantiated.instance, instantiated.module);
+        })
+        .catch((err: unknown) => {
+          const detail = err instanceof Error ? err.message : String(err);
+          failInstantiation(
+            new Error(`Failed to instantiate redis_lua.wasm: ${detail}`, { cause: err })
+          );
+        });
 
       // Return empty object to signal async instantiation.
       return {};
     }
   });
 
+  const module = await Promise.race([modulePromise, instantiationFailed]);
   return { module, exports: module };
 }

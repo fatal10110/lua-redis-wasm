@@ -4,7 +4,7 @@
 // native smoke tests have no JS host, so they must define them. init()/reset()
 // call host_redis_props() unconditionally, so it MUST return {0,0} (no props).
 // The rest are not exercised by the current smoke scripts, but are stubbed too so
-// the test binaries don't rely on -sERROR_ON_UNDEFINED_SYMBOLS for them.
+// the test binaries link with undefined-symbol errors enabled.
 #include "../../include/abi.h"
 
 PtrLen host_redis_call(uint32_t ptr, uint32_t len) {
@@ -32,3 +32,5 @@ PtrLen host_sha1hex(uint32_t ptr, uint32_t len) {
 }
 
 PtrLen host_redis_props(void) { return (PtrLen){0, 0}; }
+
+void host_redis_setresp(uint32_t version) { (void)version; }

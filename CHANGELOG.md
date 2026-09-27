@@ -43,6 +43,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `{ok=1}` are no longer converted, `__index` metamethods are ignored),
   `\r`/`\n` in `big_number` are replaced with spaces, and `verbatim_string`
   formats are truncated or space-padded to exactly 3 bytes.
+- `load()` (and `LuaWasmEngine.create`) now rejects with
+  `Failed to instantiate redis_lua.wasm: ...` when WebAssembly instantiation fails
+  (truncated/corrupt `.wasm`, unresolvable import) instead of hanging forever (#44).
+- The WASM build links with undefined-symbol errors enabled: host imports are
+  declared explicitly (`import_module("env")` in `abi.h` plus an Emscripten JS
+  library), and the loader no longer aliases the `wasi_snapshot_preview1` import
+  namespace to `env` (#56).
 
 ## [1.3.0] - 2026-06-08
 

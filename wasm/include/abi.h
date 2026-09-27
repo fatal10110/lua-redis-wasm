@@ -48,13 +48,27 @@ typedef struct PtrLen {
   uint32_t len;
 } PtrLen;
 
-/* Host imports */
-PtrLen host_redis_call(uint32_t ptr, uint32_t len);
-PtrLen host_redis_pcall(uint32_t ptr, uint32_t len);
-void host_redis_log(uint32_t level, uint32_t ptr, uint32_t len);
-void host_redis_setresp(uint32_t version);
-PtrLen host_sha1hex(uint32_t ptr, uint32_t len);
-PtrLen host_redis_props(void);
+/* Host imports.
+ *
+ * Supplied by the JS loader at instantiation time (merged into the `env`
+ * import namespace), so they are declared as explicit `env` wasm imports.
+ * Emscripten additionally needs them listed in a JS library
+ * (wasm/src/library_host.js) to accept them as JS-provided; together this
+ * lets the build keep undefined-symbol errors enabled, so any other
+ * unresolved symbol is still a link error. A C definition (e.g. the
+ * smoke-test stubs) takes precedence over the import when linked in. */
+#if defined(__wasm__)
+#define HOST_IMPORT(name) __attribute__((import_module("env"), import_name(#name)))
+#else
+#define HOST_IMPORT(name)
+#endif
+
+HOST_IMPORT(host_redis_call) PtrLen host_redis_call(uint32_t ptr, uint32_t len);
+HOST_IMPORT(host_redis_pcall) PtrLen host_redis_pcall(uint32_t ptr, uint32_t len);
+HOST_IMPORT(host_redis_log) void host_redis_log(uint32_t level, uint32_t ptr, uint32_t len);
+HOST_IMPORT(host_redis_setresp) void host_redis_setresp(uint32_t version);
+HOST_IMPORT(host_sha1hex) PtrLen host_sha1hex(uint32_t ptr, uint32_t len);
+HOST_IMPORT(host_redis_props) PtrLen host_redis_props(void);
 
 /* WASM exports */
 int32_t init(void);

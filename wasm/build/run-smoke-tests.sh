@@ -33,7 +33,6 @@ mkdir -p "$OUT_DIR"
 
 for test in runtime_smoke runtime_eval_smoke runtime_eval_args_smoke modules_smoke; do
   emcc -O2 -DENABLE_CJSON_GLOBAL -sENVIRONMENT=node -sEXIT_RUNTIME=1 \
-    -sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=0 \
     -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
     "$ROOT_DIR/wasm/src/tests/$test.c" $COMMON_SRC \
     -o "$OUT_DIR/$test.js"
