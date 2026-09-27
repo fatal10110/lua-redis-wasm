@@ -124,8 +124,6 @@ function readEngineError(payload: Buffer): {
  */
 export const SCRIPT_ERROR_FROM_TABLE = 0x02;
 
-const ERR_PREFIX = Buffer.from("ERR ", "utf8");
-
 /**
  * An uncaught string (non-table) script error, or any script error in the
  * Redis 6.2 error model: Redis sends it with the `ERR` code in front (Redis 7's
@@ -136,9 +134,12 @@ const ERR_PREFIX = Buffer.from("ERR ", "utf8");
  * reported as `ERR ERR ...` (a script's `error('ERR x', 0)` thus reports `x`).
  */
 function stringScriptError(payload: Buffer): { err: Buffer; code: Buffer } {
-  const hasErr = payload.subarray(0, ERR_PREFIX.length).equals(ERR_PREFIX);
+  // Built per call, not at module scope: importing the module must not touch
+  // the global `Buffer`, which browsers only have once a polyfill is installed.
+  const errPrefix = Buffer.from("ERR ", "utf8");
+  const hasErr = payload.subarray(0, errPrefix.length).equals(errPrefix);
   return {
-    err: Buffer.from(hasErr ? payload.subarray(ERR_PREFIX.length) : payload),
+    err: Buffer.from(hasErr ? payload.subarray(errPrefix.length) : payload),
     code: Buffer.from("ERR", "utf8"),
   };
 }

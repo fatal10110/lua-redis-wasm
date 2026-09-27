@@ -33,6 +33,10 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      # The browser-bundle test imports dist/index.browser.mjs.
+      - name: Build TypeScript
+        run: npm run build:ts
+
       # WASM is already built above, so skip the docker rebuild inside `test`.
       - name: Tests
         run: npm run test:skip-wasm
