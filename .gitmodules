@@ -1,3 +1,3 @@
-[submodule "vendor/redis"]
-	path = vendor/redis
-	url = https://github.com/redis/redis.git
+[submodule "vendor/valkey"]
+	path = vendor/valkey
+	url = https://github.com/valkey-io/valkey.git

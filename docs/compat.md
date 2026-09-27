@@ -48,8 +48,8 @@ through `redisProps`.
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.
 - No clock or time APIs available in Lua.
-- `math.random` and `math.randomseed` use Redis's PRNG (`redisLrand48` from
-  `vendor/redis/src/rand.c`), so a given seed yields the same numbers as a real
+- `math.random` and `math.randomseed` use Redis's PRNG (the rand48 generator, `serverLrand48` in
+  `vendor/valkey/src/rand.c`), so a given seed yields the same numbers as a real
   server. As in Redis 7.0+ and Valkey, one sequence runs across scripts: a new
   engine starts where a freshly started server does (the first
   `math.random(1,1000000)` is `396465`), `reset()` does not restart it, and

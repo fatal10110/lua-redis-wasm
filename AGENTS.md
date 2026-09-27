@@ -86,4 +86,4 @@ type RedisHost = {
 
 - Node.js >= 22
 - Docker (for WASM build only)
-- Clone with submodules: `git clone --recursive` (Lua 5.1 sources in vendor/redis/deps/lua, from the `vendor/redis` submodule)
+- Clone with submodules: `git clone --recursive` (Lua 5.1 sources in vendor/valkey/deps/lua, from the `vendor/valkey` submodule, pinned to a Valkey release tag)

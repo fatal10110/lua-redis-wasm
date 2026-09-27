@@ -1,6 +1,11 @@
+/* redis.* bindings (redis.call/pcall/log/sha1hex/...) for lua-redis-wasm.
+ *
+ * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
+ * THIRD_PARTY_NOTICES.md), mainly src/script_lua.c (Valkey 9.x:
+ * src/modules/lua/script_lua.c) and double2ll from src/util.c. */
 #include "../include/abi.h"
 #include "redis_api.h"
-#include "../../vendor/redis/deps/fpconv/fpconv_dtoa.h"
+#include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
 #include <lauxlib.h>
 #include <limits.h>
 #include <lua.h>
@@ -163,7 +168,8 @@ static int double2ll(double d, long long *out) {
 
 #define NUMBER_ARG_BUF 32 /* > fpconv_dtoa's 24 bytes and any %lld */
 
-/* Number argument -> string like luaArgsToRedisArgv in Redis 7.4+, not
+/* Number argument -> string like luaArgsToRedisArgv in Valkey 8.0's
+ * src/script_lua.c (luaArgsToServerArgv in Valkey 9.x), not
  * lua_tolstring (whose "%.14g" loses precision): integral values print as
  * integers (1e15 -> "1000000000000000"), anything else in the shortest
  * round-trip form (fpconv_dtoa: 0.1+0.2 -> "0.30000000000000004",
