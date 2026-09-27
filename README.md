@@ -559,8 +559,7 @@ For general security considerations when using lua-redis-wasm, see the [Security
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/fatal10110/lua-redis-wasm/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/fatal10110/lua-redis-wasm/discussions)
+- **Issues and questions**: [GitHub Issues](https://github.com/fatal10110/lua-redis-wasm/issues)
 - **Documentation**: [docs/](docs/)
 
 ## Changelog
