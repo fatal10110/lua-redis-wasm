@@ -143,7 +143,11 @@ for (const profile of TABLE_PROFILES) {
     // The rest of the redis.* errors are tables too, and still reach the host
     // the same way.
     assert.equal((engine.eval("return select(2, xpcall(function() redis.log(9, 'x') end, function(e) return type(e) end))") as Buffer).toString(), "table");
-    assert.equal((engine.eval("local ok, e = pcall(redis.log, 9, 'x') return e") as Buffer).toString(), "ERR Invalid log level.");
+    // Redis 7.0/7.2 word it "debug level" (#67).
+    assert.equal(
+      (engine.eval("local ok, e = pcall(redis.log, 9, 'x') return e") as Buffer).toString(),
+      profile === "redis-7.0" ? "ERR Invalid debug level." : "ERR Invalid log level.",
+    );
     assertErr(engine.eval("redis.setresp(4)"), "ERR", "RESP version must be 2 or 3.", 1);
     const argType = assertErr(engine.eval("redis.call({})"), "ERR", "command-arg-type", 1);
     assert.equal(argType.meta?.kind, "command-arg-type");

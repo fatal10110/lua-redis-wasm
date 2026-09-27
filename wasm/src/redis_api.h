@@ -24,8 +24,16 @@ void redis_reset_resp_version(void);
  * 6.2). register_redis_api snapshots it when a state is set up. */
 int compat_table_errors(void);
 
-/* Raises `msg` ("CODE message") as a script error in the error model of the
- * current state: {err=msg} with table errors, the string itself otherwise.
+/* redis.log error wording of the selected profile (COMPAT_LOG_DEBUG_LEVEL /
+ * COMPAT_SERVER_LOG_NAME, defined in runtime.c): Redis 6.2-7.2 say
+ * "Invalid debug level.", Valkey 8.0+ names "server.log()" in the arity error.
+ * Snapshot by register_redis_api like compat_table_errors. */
+int compat_log_debug_level(void);
+int compat_server_log_name(void);
+
+/* Raises `msg` as a script error in the error model of the current state:
+ * {err=msg} with table errors, the string itself otherwise. With table errors
+ * `msg` should be "CODE message"; a Redis 6.2 (string) error may have no code.
  * Never returns. */
 int redis_raise_error(lua_State *L, const char *msg);
 

@@ -83,6 +83,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefix, and `redis.setresp` / `ERR empty reply from host` errors lose that
   prefix too. The fuel budget is documented as a deterministic instruction
   budget, not Redis's wall-clock `lua-time-limit` (#14).
+- `redis.error_reply` and `redis.log` follow the compat profile instead of Redis
+  7.4+ / Valkey semantics everywhere (#67). Without table errors (`redis-6.2`,
+  or `compat.tableErrors: false`) `redis.error_reply` returns its argument
+  unchanged (`'foo'` → `{err='foo'}`), a bad call returns
+  `{err='@user_script: <line>: wrong number or type of arguments'}`, and
+  `redis.log` and `redis.setresp` argument errors have no `ERR` code, as in
+  Redis 6.2. An invalid
+  `redis.log` level is `Invalid debug level.` on `redis-6.2` / `redis-7.0` /
+  `redis-7.2`, and the Valkey profiles say `server.log() requires two arguments
+  or more.`. With no profile the wording is unchanged. The wording is selected
+  by two profile-only WASM compat flags, `0x20` and `0x40`.
 
 ### Removed
 
