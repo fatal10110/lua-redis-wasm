@@ -11,6 +11,7 @@ import { LuaWasmEngine, makePropsHandler } from "../src/engine.js";
 import { encodeRedisProps } from "../src/codec.js";
 import type { ReplyValue, RedisHost, RedisCallContext } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
+import { readPtrLen } from "../src/helpers.js";
 
 // Helper to resolve WASM path (checks dist/ first, then wasm/build/)
 async function resolveWasmPath(): Promise<string> {
@@ -1644,9 +1645,9 @@ test("redis.pcall error value returned by the script is not decorated", async ()
 // redisProps handler (Task 2: host_redis_props wiring)
 // =============================================================================
 
-test("redisProps handler: allocates the encoded blob and returns a PtrLen (direct ABI)", () => {
+test("redisProps handler: allocates the encoded blob and writes its PtrLen to the sret slot", () => {
   const heap = new Uint8Array(1024);
-  let next = 8;
+  let next = 16;
   const exports = {
     HEAPU8: heap,
     _alloc: (n: number) => {
@@ -1658,18 +1659,21 @@ test("redisProps handler: allocates the encoded blob and returns a PtrLen (direc
 
   const blob = encodeRedisProps({ V: { value: "7.4.0" } });
   const handler = makePropsHandler(exports, blob);
-  const packed = handler() as bigint;
-  const ptr = Number(packed & 0xffffffffn);
-  const len = Number(packed >> 32n);
+  handler(0);
+  const { ptr, len } = readPtrLen(heap, 0);
   assert.equal(len, blob.length);
   assert.deepEqual([...heap.subarray(ptr, ptr + len)], [...blob]);
 });
 
-test("redisProps handler: returns a zero PtrLen when there are no props", () => {
-  const handler = makePropsHandler({} as never, Buffer.alloc(4));
+test("redisProps handler: writes a zero PtrLen when there are no props", () => {
+  const heap = new Uint8Array(8).fill(0xff);
+  const exports = {
+    HEAPU8: heap,
+    _alloc: () => assert.fail("must not allocate"),
+  } as unknown as WasmExports;
   // count==0 blob is treated as "no props": ptr 0, len 0.
-  const packed = handler() as bigint;
-  assert.equal(packed, 0n);
+  makePropsHandler(exports, Buffer.alloc(4))(0);
+  assert.deepEqual(readPtrLen(heap, 0), { ptr: 0, len: 0 });
 });
 
 // =============================================================================
