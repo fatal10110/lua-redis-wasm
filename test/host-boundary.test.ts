@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { load, LuaEngine, LuaWasmModule } from "../src/index.js";
 import type { RedisHost, ReplyValue } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
+import { WasmFault } from "../src/helpers.js";
 
 type ErrReply = { err: Buffer; code?: Buffer; meta?: { line: number } };
 
@@ -150,6 +151,28 @@ for (const [label, reply, message] of malformedReplies) {
 // Heap exhaustion
 // =============================================================================
 
+test("host boundary: KEYS/ARGV larger than the WASM heap throw RangeError", async () => {
+  const engine = (await load()).createStandalone();
+  const huge = Buffer.alloc(70 * 1024 * 1024, 0x61); // the heap is 64 MB
+
+  assert.throws(() => engine.evalWithArgs("return #ARGV[1]", [], [huge]), RangeError);
+  assertUsable(engine);
+  // Still room for a large (but fitting) argument afterwards.
+  assert.equal(engine.evalWithArgs("return #ARGV[1]", [], [huge.subarray(0, 8 * 1024 * 1024)]), 8 * 1024 * 1024);
+});
+
+test("host boundary: a Lua script exhausting the heap gets a normal error", async () => {
+  const engine = (await load()).createStandalone();
+  const hog = "local t = {} for i = 1, 200 do t[i] = string.rep('x', 1024 * 1024) .. i end return #t";
+
+  for (let round = 0; round < 2; round++) {
+    assertErr(engine.eval(hog), /not enough memory/);
+    assertUsable(engine);
+    // The garbage from the failed script is reclaimed.
+    assert.equal(engine.eval("return #string.rep('y', 16 * 1024 * 1024)"), 16 * 1024 * 1024);
+  }
+});
+
 test("host boundary: eval/evalWithArgs throw RangeError when _alloc returns 0", async () => {
   const engine = (await load()).createStandalone();
   const exports = exportsOf(engine);
@@ -163,22 +186,47 @@ test("host boundary: eval/evalWithArgs throw RangeError when _alloc returns 0", 
   assertUsable(engine);
 });
 
-test("host boundary: an aborting _alloc (Emscripten OOM) becomes a RangeError", async () => {
+test("host boundary: a throwing _alloc marks the engine unusable", async () => {
   const engine = (await load()).createStandalone();
   const exports = exportsOf(engine);
-  const realAlloc = exports._alloc;
-  const oom = new Error("Aborted(OOM)");
+  const abort = new Error("Aborted(OOM)");
 
   exports._alloc = () => {
-    throw oom;
+    throw abort;
   };
   assert.throws(
     () => engine.eval("return 1"),
-    (err: unknown) => err instanceof RangeError && err.cause === oom,
+    (err: unknown) => err instanceof WasmFault && err.cause === abort,
   );
+  assert.throws(
+    () => engine.eval("return 1"),
+    (err: unknown) => err instanceof Error && /LuaEngine is unusable/.test(err.message),
+  );
+});
 
+test("host boundary: a throwing _alloc inside a host import marks the engine unusable", async () => {
+  const abort = new Error("Aborted(OOM)");
+  let exports: WasmExports | undefined;
+  let realAlloc: WasmExports["_alloc"] | undefined;
+  const engine = (await load()).create(
+    host({
+      redisCall: () => {
+        exports!._alloc = () => {
+          throw abort;
+        };
+        return Buffer.from("value");
+      },
+    }),
+  );
+  exports = exportsOf(engine);
+  realAlloc = exports._alloc;
+
+  assert.throws(
+    () => engine.eval("return redis.call('GET', 'k')"),
+    (err: unknown) => err instanceof WasmFault && err.cause === abort,
+  );
   exports._alloc = realAlloc;
-  assertUsable(engine);
+  assert.throws(() => engine.eval("return 1"), /LuaEngine is unusable/);
 });
 
 test("host boundary: a failed return-slot allocation frees the script buffers", async () => {

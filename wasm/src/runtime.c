@@ -820,6 +820,12 @@ int32_t reset(void) {
 // Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
 // decoded from `args` (see set_keys_argv) after the maxArgBytes check;
 // otherwise both are set to empty tables.
+/* lua_cpcall body for run_script's post-OOM collection. */
+static int collect_garbage(lua_State *L) {
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  return 0;
+}
+
 static PtrLen run_script(const char *script, size_t script_len, int has_args,
                          const uint8_t *args, size_t args_len, uint32_t keys_count) {
   if (!g_state) {
@@ -849,7 +855,14 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_error_line = 0;
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
-  if (lua_pcall(g_state, 0, 1, errfunc) != 0) {
+  int status = lua_pcall(g_state, 0, 1, errfunc);
+  if (status != 0) {
+    if (status == LUA_ERRMEM) {
+      /* Lua 5.1 has no emergency collection: the failed script's garbage would
+       * keep the fixed-size heap full until a GC cycle that may never trigger.
+       * Collect it now, protected (a collection may resize the string table). */
+      lua_cpcall(g_state, collect_garbage, NULL);
+    }
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);

@@ -86,6 +86,7 @@ import {
   readPtrLen,
   decodeArgs,
   computeSha1Hex,
+  WasmFault,
   type PtrLen,
 } from "./helpers.js";
 
@@ -111,9 +112,10 @@ import {
  */
 export class LuaEngine {
   /**
-   * Set when an exception escaped the WASM module mid-evaluation. The unwind
-   * skipped the C cleanup (Lua call frames, error handlers, the shadow stack),
-   * so the VM can no longer be trusted and every later call is refused.
+   * Set when an exception escaped the WASM module (mid-evaluation, or from
+   * `_alloc`). The unwind skipped the C cleanup (Lua call frames, error
+   * handlers, the shadow stack, allocator bookkeeping), so the module can no
+   * longer be trusted and every later call is refused.
    */
   private fault: unknown = undefined;
   private faulted = false;
@@ -146,8 +148,10 @@ export class LuaEngine {
    *
    * @param script - Lua source code as string, Buffer, or Uint8Array
    * @returns The script's return value as a ReplyValue
-   * @throws RangeError if the WASM heap cannot hold the script
-   * @throws Error if a previous evaluation left the engine unusable
+   * @throws RangeError if the WASM heap cannot hold the script (the engine
+   *   stays usable)
+   * @throws Error if an exception escaped the WASM module, now or in a
+   *   previous call; the engine is then unusable
    *
    * @example
    * ```typescript
@@ -161,7 +165,7 @@ export class LuaEngine {
     this.assertUsable();
     const scriptBuf = ensureBuffer(script, "script");
     const sha = computeSha1Hex(scriptBuf).toString("utf8");
-    const scriptPtr = allocAndWrite(this.exports, scriptBuf);
+    const scriptPtr = this.write(scriptBuf);
     try {
       return this.run(sha, (retPtr) =>
         this.exports._eval(retPtr, scriptPtr, scriptBuf.length),
@@ -182,7 +186,9 @@ export class LuaEngine {
    * @param args - Array of ARGV values (additional arguments)
    * @returns The script's return value as a ReplyValue
    * @throws RangeError if the WASM heap cannot hold the script or KEYS/ARGV
-   * @throws Error if a previous evaluation left the engine unusable
+   *   (the engine stays usable)
+   * @throws Error if an exception escaped the WASM module, now or in a
+   *   previous call; the engine is then unusable
    *
    * @example
    * ```typescript
@@ -211,9 +217,9 @@ export class LuaEngine {
       };
     }
 
-    const scriptPtr = allocAndWrite(this.exports, scriptBuf);
+    const scriptPtr = this.write(scriptBuf);
     try {
-      const argsPtr = allocAndWrite(this.exports, argBuf);
+      const argsPtr = this.write(argBuf);
       try {
         return this.run(sha, (retPtr) =>
           this.exports._eval_with_args(
@@ -238,20 +244,19 @@ export class LuaEngine {
    * struct-return pointer as their first argument (clang's wasm32 C ABI), so
    * `invoke` receives an 8-byte scratch slot to pass through.
    *
-   * Host imports never throw (see `load()`), so an exception here means the
-   * WASM frames were unwound past their C cleanup: the engine is marked
-   * unusable before the exception is rethrown.
+   * Host imports only throw a WasmFault (see `load()`), so an exception here
+   * means the WASM frames were unwound past their C cleanup: the engine is
+   * marked unusable before the exception is rethrown.
    * @private
    */
   private run(sha: string, invoke: (retPtr: number) => void): ReplyValue {
-    const retPtr = alloc(this.exports, 8);
+    const retPtr = this.guardAlloc(() => alloc(this.exports, 8));
     let result: PtrLen;
     try {
       try {
         invoke(retPtr);
       } catch (err) {
-        this.faulted = true;
-        this.fault = err;
+        this.markFaulted(err);
         throw err;
       }
       result = readPtrLen(this.exports.HEAPU8, retPtr);
@@ -259,6 +264,38 @@ export class LuaEngine {
       this.release(retPtr);
     }
     return this.decodeResult(result, sha);
+  }
+
+  /**
+   * Copies `data` into a fresh WASM allocation.
+   * @throws RangeError if the heap cannot hold it (the engine stays usable)
+   * @throws WasmFault if `_alloc` threw (the engine becomes unusable)
+   * @private
+   */
+  private write(data: Buffer): number {
+    return this.guardAlloc(() => allocAndWrite(this.exports, data));
+  }
+
+  /**
+   * @private
+   */
+  private guardAlloc(allocate: () => number): number {
+    try {
+      return allocate();
+    } catch (err) {
+      if (err instanceof WasmFault) {
+        this.markFaulted(err);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * @private
+   */
+  private markFaulted(err: unknown): void {
+    this.faulted = true;
+    this.fault = err;
   }
 
   /**
@@ -397,6 +434,15 @@ export function makePropsHandler(
 // the WASM frames of the running lua_pcall, skipping every C cleanup and leaving
 // the Lua VM corrupted. Each import therefore catches everything and reports the
 // failure through its return value, which C turns into an ordinary Lua error.
+// The one exception is a WasmFault (a throwing `_alloc`): the module is already
+// untrusted, so it propagates and the running eval marks the engine unusable.
+
+/** Rethrows a WasmFault; every other error is for the caller to report. */
+function rethrowFault(err: unknown): void {
+  if (err instanceof WasmFault) {
+    throw err;
+  }
+}
 
 const NULL_PTR_LEN: PtrLen = { ptr: 0, len: 0 };
 
@@ -426,11 +472,13 @@ function writeReplyImport(
   try {
     out = encodeReplyToPtrLen(exports, produce());
   } catch (err) {
+    rethrowFault(err);
     try {
       out = encodeReplyToPtrLen(exports, {
         err: Buffer.from(errorMessage(err), "utf8"),
       });
-    } catch {
+    } catch (fallbackErr) {
+      rethrowFault(fallbackErr);
       out = NULL_PTR_LEN;
     }
   }
@@ -451,14 +499,16 @@ function writeStatusImport(
   try {
     run();
   } catch (err) {
+    rethrowFault(err);
     out = { ptr: 0, len: 1 };
     try {
       const message = Buffer.from(errorMessage(err), "utf8");
       if (message.length > 0) {
         out = { ptr: allocAndWrite(exports, message), len: message.length };
       }
-    } catch {
+    } catch (fallbackErr) {
       // Keep the message-less failure; C substitutes a generic one.
+      rethrowFault(fallbackErr);
     }
   }
   writePtrLen(exports.HEAPU8, retPtr, out);
@@ -478,8 +528,9 @@ function writeSha1Import(
   try {
     const digest = computeSha1Hex(readBytes(exports.HEAPU8, ptr, len));
     out = { ptr: allocAndWrite(exports, digest), len: digest.length };
-  } catch {
-    // Report the zero PtrLen.
+  } catch (err) {
+    rethrowFault(err);
+    // Otherwise report the zero PtrLen.
   }
   writePtrLen(exports.HEAPU8, retPtr, out);
 }

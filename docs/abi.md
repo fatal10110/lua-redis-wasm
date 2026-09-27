@@ -109,9 +109,14 @@ The WASM module exports the following functions:
   - Evaluates a Lua script buffer with binary-safe KEYS/ARGV provided by the host.
 
 - `alloc(size) -> ptr`
-  - Allocates `size` bytes in linear memory. The heap is fixed-size: callers
-    must treat a 0 return (or, with Emscripten's aborting malloc, a thrown
-    `Aborted(OOM)`) as an allocation failure.
+  - Allocates `size` bytes in linear memory. The heap is fixed-size (64 MB)
+    and the module is linked with `-sABORTING_MALLOC=0`, so an exhausted heap
+    returns 0, which callers must treat as an allocation failure (the engine
+    throws a recoverable `RangeError`). A Lua script exhausting the heap gets
+    an ordinary `not enough memory` error, after which the runtime runs a full
+    garbage collection. An exception thrown *from* `alloc` (or any other
+    export) unwound WASM frames without their cleanup, so the engine treats it
+    as fatal and refuses further evaluations.
 
 - `free_mem(ptr)`
   - Frees memory allocated by `alloc` or reply buffers.

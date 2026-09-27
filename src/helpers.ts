@@ -31,21 +31,36 @@ function writeBytes(heap: Uint8Array, ptr: number, data: Buffer): void {
 export type PtrLen = { ptr: number; len: number };
 
 /**
+ * An exception thrown from inside the WASM module (e.g. an Emscripten abort or
+ * a trap) while the host called into it. The throw unwound WASM frames without
+ * running their cleanup (the shadow stack pointer, allocator bookkeeping), so
+ * the module can no longer be trusted: the engine becomes unusable.
+ */
+export class WasmFault extends Error {
+  constructor(message: string, options: { cause: unknown }) {
+    super(message, options);
+    this.name = "WasmFault";
+  }
+}
+
+/**
  * Allocates `size` bytes in WASM linear memory.
  *
- * The heap is fixed-size, so `malloc` can fail: it returns 0, or, with
- * Emscripten's default aborting malloc, throws "Aborted(OOM)". Both become a
- * RangeError instead of letting the caller write over address 0. Zero-byte
- * requests allocate one byte so an empty payload still gets a real pointer.
+ * The heap is fixed-size and the module is linked with `ABORTING_MALLOC=0`,
+ * so an exhausted heap makes `malloc` return 0: that becomes a recoverable
+ * RangeError instead of letting the caller write over address 0. A *throwing*
+ * `_alloc` is not recoverable (see WasmFault). Zero-byte requests allocate one
+ * byte so an empty payload still gets a real pointer.
  *
- * @throws RangeError if the allocation fails
+ * @throws RangeError if the heap cannot satisfy the allocation
+ * @throws WasmFault if `_alloc` threw
  */
 export function alloc(exports: WasmExports, size: number): number {
   let ptr: number;
   try {
     ptr = exports._alloc(Math.max(size, 1));
   } catch (cause) {
-    throw new RangeError(`WASM heap exhausted: failed to allocate ${size} bytes`, { cause });
+    throw new WasmFault(`WASM _alloc(${size}) threw`, { cause });
   }
   if (!ptr) {
     throw new RangeError(`WASM heap exhausted: failed to allocate ${size} bytes`);
@@ -56,7 +71,8 @@ export function alloc(exports: WasmExports, size: number): number {
 /**
  * Allocates memory and writes data in one operation.
  * Returns the pointer to the allocated memory.
- * @throws RangeError if the allocation fails
+ * @throws RangeError if the heap cannot satisfy the allocation
+ * @throws WasmFault if `_alloc` threw
  */
 export function allocAndWrite(exports: WasmExports, data: Buffer): number {
   const ptr = alloc(exports, data.length);
