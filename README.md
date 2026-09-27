@@ -319,10 +319,13 @@ lets the host render. When a script aborts, the reply carries:
   `kind` is an opaque machine tag the host maps to wording;
   `name` is the variable involved, raw (it may contain CR/LF). The engine flags
   these errors itself; error text a script or a host command error produces never
-  gets a `kind`, whatever it contains. A script that catches one of these errors sees
+  gets a `kind`, whatever it contains, with one exception: a string equal to the exact
+  message of an engine error raised earlier in the same eval, which cannot be told apart
+  from rethrowing that error (see `SCRIPT_ERROR_ENGINE` in [docs/abi.md](docs/abi.md)).
+  A script that catches one of these errors sees
   Redis's message, never the `kind` (see
   [Error objects inside the script](#error-objects-inside-the-script)); rethrown
-  unchanged (`error(e, 0)`, or the error table an `xpcall` handler got), it still
+  unchanged (`error(e, 0)`, or the error table an `xpcall` handler got, `err` untouched), it still
   reaches the host with its `kind`, while `error(e)` raises a new, position-prefixed
   error, reported like any other string error (as Redis reports it). Writing a global
   has no `kind`: it is blocked by Lua's native readonly flag (as in real Redis), which

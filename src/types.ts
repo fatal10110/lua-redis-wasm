@@ -66,13 +66,16 @@
  *   by the engine) are always present.
  * - `kind`/`name` are present only for errors the engine itself originates (the
  *   globals protection, a bad redis.call argument), which the engine flags
- *   itself: error text from a script or a host command never gets a `kind`.
- *   `kind` is an opaque machine tag the host maps to wording; `name` is the
- *   variable involved, raw (it may contain CR/LF). The reply's `err` carries
- *   the bare `kind`. A script that catches the error sees Redis's message, not
- *   the kind; rethrown unchanged (`error(e, 0)`, or the error table itself) it
- *   keeps its `kind`, while `error(e)` raises a new, position-prefixed error
- *   with none. Known kinds:
+ *   itself: error text from a script or a host command never gets a `kind`,
+ *   except a string equal to the exact message of an engine error raised
+ *   earlier in the same eval, which cannot be told apart from rethrowing it
+ *   (see `SCRIPT_ERROR_ENGINE` in docs/abi.md). `kind` is an opaque machine
+ *   tag the host maps to wording; `name` is the variable involved, raw (it may
+ *   contain CR/LF or NUL bytes). The reply's `err` carries the bare `kind`. A
+ *   script that catches the error sees Redis's message, not the kind; rethrown
+ *   unchanged (`error(e, 0)`, or the error table itself with its `err`
+ *   untouched) it keeps its `kind`, while `error(e)` raises a new,
+ *   position-prefixed error with none. Known kinds:
  *   - `global-read`: read of a nonexistent global. Redis (6.2 to 8.x):
  *     "Script attempted to access nonexistent global variable '<name>'".
  *   - `command-arg-type`: a redis.call argument was not a string or number

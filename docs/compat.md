@@ -91,7 +91,10 @@ through `redisProps`.
   - a read of a nonexistent global raises
     `user_script:<line>: Script attempted to access nonexistent global variable
     '<name>'` in every profile, which is what a script that catches it sees;
-    uncaught, the host gets the `global-read` engine error.
+    uncaught, the host gets the `global-read` engine error. A key that is not
+    a string or number (`_G[true]`) raises Redis's ordinary
+    `user_script:<line>: Second argument to luaProtectedTableError must be a
+    string or number` instead.
   - an invalid `redis.log` level is `Invalid debug level.` on `redis-6.2`,
     `redis-7.0` and `redis-7.2`, and `Invalid log level.` on `redis-7.4`,
     `redis-8.0` and the Valkey profiles (redis/redis#12636);

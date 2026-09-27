@@ -508,6 +508,47 @@ for (const c of ENGINE_ERROR_CASES) {
     );
     // So is any later error.
     assertNotEngineError(engine.eval("pcall(function() return nope end)\nerror('boom', 0)"), "ERR", "boom", 2);
+    if (c.table) {
+      // The real error table with its `err` changed is the script's own error,
+      // reported with its message as Redis does (-ERR hacked, -ERR unknown
+      // error, -42).
+      const changed = (assignment: string) =>
+        engine.eval(
+          "local e\nxpcall(function() redis.call('set', 'k', {}) end, function(x) e = x end)\n" +
+            `${assignment}\nerror(e, 0)`,
+        );
+      assertNotEngineError(changed("e.err = 'ERR hacked'"), "ERR", "hacked", 4);
+      assertNotEngineError(changed("e.err = nil"), "ERR", "unknown error", 4);
+      assertNotEngineError(changed("e.err = 42"), undefined, "42", 4);
+      // Other fields do not matter: its message is still the engine's.
+      assertEngineError(changed("e.extra = 1"), "command-arg-type", 4);
+    }
+    assertUsable(engine);
+  });
+
+  test(`engine errors (${c.label}): the globals handler checks its arguments like Redis`, async () => {
+    const engine = await engineForCase(c);
+    const badKey = "Second argument to luaProtectedTableError must be a string or number";
+    const badCount = "Wrong number of arguments to luaProtectedTableError";
+    // A key that is neither a string nor a number: Redis's argument error, an
+    // ordinary one, caught or not.
+    assert.equal(bulk(engine.eval("return select(2, pcall(function() return _G[true] end))")), `user_script:1: ${badKey}`);
+    assertNotEngineError(engine.eval("\nreturn _G[true]"), "ERR", `user_script:2: ${badKey}`, 2);
+    // Called directly with the wrong number of arguments.
+    assert.equal(bulk(engine.eval("return select(2, pcall(getmetatable(_G).__index))")), badCount);
+    assertNotEngineError(
+      engine.eval("return getmetatable(_G).__index(_G, 'x', 'y')"),
+      "ERR",
+      `user_script:1: ${badCount}`,
+      1,
+    );
+    // A name with a NUL byte: the message stops there (Redis's %s), the name
+    // the host gets does not.
+    assert.equal(
+      bulk(engine.eval("return select(2, pcall(function() return _G['a\\0b'] end))")),
+      globalReadError(1, "a"),
+    );
+    assertEngineError(engine.eval("return _G['a\\0b']"), "global-read", 1, "a\0b");
     assertUsable(engine);
   });
 

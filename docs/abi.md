@@ -84,10 +84,18 @@ struct ScriptErrorPayload {
     Script attempted to access nonexistent global variable 'x'`, `ERR Lua redis
     lib command arguments must be strings or integers`). Only the error the
     engine raised in the current eval carries the flag: uncaught, or rethrown
-    unchanged (`error(e, 0)`, or the error table itself). `error(e)` raises a
-    new, position-prefixed string, which is an ordinary error; so is a lookalike
-    error table or host command error, and any text a script raises that the
-    engine did not raise earlier in the same eval.
+    unchanged (`error(e, 0)`, or the error table itself with its `err`
+    untouched). `error(e)` raises a new, position-prefixed string, which is an
+    ordinary error; so is an error table whose `err` the script changed, a
+    lookalike error table, a host command error in the Redis 7 error model
+    (a table), and any text that is not the message of an engine error raised
+    earlier in the same eval.
+    Known limit: a *string* equal to that exact message cannot be told apart
+    from rethrowing it with `error(e, 0)`, so it is flagged. A script can raise
+    one, and so can a host command error in the Redis 6.2 error model
+    (`redis-6.2`, or `compat.tableErrors: false`), where `redis.call` raises the
+    host's error text as a plain string. Without a real engine error earlier in
+    the eval, no text is ever flagged.
   - `0x02` `SCRIPT_ERROR_FROM_TABLE`: `message` is the `err` field of an error
     table (`error({err=...})`, a `redis.call` error, the fuel kill). Redis 7
     sends it as-is (`-<err>`), so the host must not add a default error code.

@@ -195,10 +195,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nonexistent global variable '<name>'`. `redis.call` raises that error as an
   `{err=...}` table in the Redis 7 error model, so an `xpcall` handler gets the
   table. Uncaught, or rethrown unchanged (`error(e, 0)`, or the error table
-  itself), it still reaches the host with `meta.kind` / `meta.name`; a
-  lookalike error table or host command error never does. `error(e)` raises a
-  new, position-prefixed error and is reported as an ordinary string error, as
-  Redis reports it (#87).
+  itself with its `err` untouched), it still reaches the host with
+  `meta.kind` / `meta.name`; a changed or lookalike error table never does,
+  nor does a host command error in the Redis 7 error model. A string equal to
+  the exact message of an engine error raised earlier in the same eval (from
+  the script, or a host command error in the `redis-6.2` string model) cannot
+  be told apart from `error(e, 0)` and is flagged, as the marker text was.
+  `error(e)` raises a new, position-prefixed error and is reported as an
+  ordinary string error, as Redis reports it. Indexing the globals with a key
+  that is not a string or number (`_G[true]`) raises Redis's `Second argument
+  to luaProtectedTableError must be a string or number` instead of a
+  `global-read` error named `?`, and `meta.name` keeps a global's name past a
+  NUL byte (#87).
 - `cjson.encode` of a value that expands into a document too large for the heap
   (e.g. a table holding the same subtable many times) raises `not enough memory`
   instead of aborting the module and leaving the engine unusable. cjson's string
