@@ -817,15 +817,34 @@ int32_t reset(void) {
   return setup_state();
 }
 
-// Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
-// decoded from `args` (see set_keys_argv) after the maxArgBytes check;
-// otherwise both are set to empty tables.
-/* lua_cpcall body for run_script's post-OOM collection. */
+/* Lua memory in use (KB) above which a run is followed by a full collection:
+ * a quarter of the fixed 64 MB heap. */
+#define GC_AFTER_RUN_KB (16 * 1024)
+
+/* lua_cpcall body for collect_if_heap_high. */
 static int collect_garbage(lua_State *L) {
   lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
+/* Lua 5.1 has no emergency collection, and its GC pacing (next cycle at 2x the
+ * memory that survived the last one) knows nothing of the fixed-size heap. A
+ * script that allocated heavily, whether it succeeded, hit "not enough memory"
+ * or caught and rethrew it, can leave enough garbage that the next unrelated
+ * script fails to allocate. Collect it once Lua holds more than
+ * GC_AFTER_RUN_KB; below that the regular pacing leaves ample headroom, and
+ * above it the cost is proportional to what the script just allocated.
+ * Protected, as a collection may resize the string table. */
+static void collect_if_heap_high(void) {
+  if (g_state && lua_gc(g_state, LUA_GCCOUNT, 0) > GC_AFTER_RUN_KB) {
+    lua_cpcall(g_state, collect_garbage, NULL);
+    lua_settop(g_state, 0); /* drop the error lua_cpcall pushes on failure */
+  }
+}
+
+// Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
+// decoded from `args` (see set_keys_argv) after the maxArgBytes check;
+// otherwise both are set to empty tables.
 static PtrLen run_script(const char *script, size_t script_len, int has_args,
                          const uint8_t *args, size_t args_len, uint32_t keys_count) {
   if (!g_state) {
@@ -855,14 +874,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_error_line = 0;
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
-  int status = lua_pcall(g_state, 0, 1, errfunc);
-  if (status != 0) {
-    if (status == LUA_ERRMEM) {
-      /* Lua 5.1 has no emergency collection: the failed script's garbage would
-       * keep the fixed-size heap full until a GC cycle that may never trigger.
-       * Collect it now, protected (a collection may resize the string table). */
-      lua_cpcall(g_state, collect_garbage, NULL);
-    }
+  if (lua_pcall(g_state, 0, 1, errfunc) != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);
@@ -888,13 +900,17 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
 }
 
 PtrLen eval(uint32_t ptr, uint32_t len) {
-  return run_script((const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0);
+  PtrLen out = run_script((const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0);
+  collect_if_heap_high();
+  return out;
 }
 
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count) {
-  return run_script((const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
-                    (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count);
+  PtrLen out = run_script((const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
+                          (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count);
+  collect_if_heap_high();
+  return out;
 }
 
 uint32_t alloc(uint32_t size) {

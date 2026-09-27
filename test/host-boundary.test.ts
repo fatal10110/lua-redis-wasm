@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { load, LuaEngine, LuaWasmModule } from "../src/index.js";
 import type { RedisHost, ReplyValue } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
-import { WasmFault } from "../src/helpers.js";
+import { WasmFault } from "../src/index.js";
 
 type ErrReply = { err: Buffer; code?: Buffer; meta?: { line: number } };
 
@@ -161,16 +161,66 @@ test("host boundary: KEYS/ARGV larger than the WASM heap throw RangeError", asyn
   assert.equal(engine.evalWithArgs("return #ARGV[1]", [], [huge.subarray(0, 8 * 1024 * 1024)]), 8 * 1024 * 1024);
 });
 
-test("host boundary: a Lua script exhausting the heap gets a normal error", async () => {
-  const engine = (await load()).createStandalone();
-  const hog = "local t = {} for i = 1, 200 do t[i] = string.rep('x', 1024 * 1024) .. i end return #t";
+const HOG = "local t = {} for i = 1, 200 do t[i] = string.rep('x', 1024 * 1024) .. i end return #t";
 
-  for (let round = 0; round < 2; round++) {
-    assertErr(engine.eval(hog), /not enough memory/);
-    assertUsable(engine);
-    // The garbage from the failed script is reclaimed.
-    assert.equal(engine.eval("return #string.rep('y', 16 * 1024 * 1024)"), 16 * 1024 * 1024);
+const heapHeavyScripts: Array<[string, string, (result: ReplyValue) => void]> = [
+  ["exhausts the heap", HOG, (r) => void assertErr(r, /not enough memory/)],
+  [
+    "catches the out-of-memory error and rethrows it",
+    `local ok, e = pcall(function() ${HOG} end) error(e, 0)`,
+    (r) => void assertErr(r, /not enough memory/),
+  ],
+  [
+    "succeeds after allocating half the heap",
+    "local t = {} for i = 1, 32 do t[i] = string.rep('x', 1024 * 1024) .. i end return #t",
+    (r) => assert.equal(r, 32),
+  ],
+];
+
+for (const [label, script, check] of heapHeavyScripts) {
+  test(`host boundary: a script that ${label} leaves the heap reusable`, async () => {
+    const engine = (await load()).createStandalone();
+    for (let round = 0; round < 2; round++) {
+      check(engine.eval(script));
+      assertUsable(engine);
+      // Its garbage is reclaimed: a large allocation fits right away.
+      assert.equal(engine.eval("return #string.rep('y', 16 * 1024 * 1024)"), 16 * 1024 * 1024);
+    }
+  });
+}
+
+test("host boundary: cmsgpack.pack running out of heap never returns corrupted bytes", async () => {
+  // cmsgpack grows its buffer through the raw Lua allocator without a NULL
+  // check; an allocation failure there must abort (engine unusable), not
+  // write through a NULL buffer.
+  const roundTrip = (n: number) => `
+    local t = {}
+    for i = 1, ${n} do t[i] = string.rep(string.char(i % 256), 1023) .. i end
+    local u = cmsgpack.unpack(cmsgpack.pack(t))
+    if #u ~= #t then return 'length mismatch' end
+    for i = 1, #t do if u[i] ~= t[i] then return 'mismatch at ' .. i end end
+    return 'ok'`;
+  let faults = 0;
+  for (const n of [2000, 18000, 21000, 24000]) {
+    const engine = (await load()).createStandalone();
+    let result: ReplyValue;
+    try {
+      result = engine.eval(roundTrip(n));
+    } catch (err) {
+      faults++;
+      assert.throws(() => engine.eval("return 1"), /LuaEngine is unusable/);
+      continue;
+    }
+    if (Buffer.isBuffer(result)) {
+      assert.equal(result.toString(), "ok", `n=${n}`);
+    } else {
+      assertErr(result, /not enough memory/);
+    }
+    if (n === 2000) {
+      assert.equal(result?.toString(), "ok");
+    }
   }
+  assert.ok(faults > 0, "expected at least one pack to exhaust the heap");
 });
 
 test("host boundary: eval/evalWithArgs throw RangeError when _alloc returns 0", async () => {
