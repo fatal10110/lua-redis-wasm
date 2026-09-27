@@ -179,6 +179,11 @@ test("error model: the tableErrors override is merged over the profile", async (
   assert.equal((off.eval(XPCALL_TYPE) as Buffer).toString(), "string");
   const on = await engineFor("redis-6.2", undefined, { tableErrors: true });
   assert.equal((on.eval(XPCALL_TYPE) as Buffer).toString(), "table");
+  // The flag is independent of reseedRandom (0x8): redis-6.2 still reseeds per
+  // script, redis-7.2 still keeps one sequence running.
+  const random = "return math.random(1, 1000000)";
+  assert.equal(on.eval(random), on.eval(random));
+  assert.notEqual(off.eval(random), off.eval(random));
 });
 
 // =============================================================================
