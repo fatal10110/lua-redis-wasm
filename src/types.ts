@@ -366,7 +366,11 @@ export type EngineOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  /**
+   * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
+   * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
+   * (Redis wording) instead of `server.log()`.
+   */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */
@@ -405,7 +409,11 @@ export type StandaloneOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  /**
+   * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
+   * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
+   * (Redis wording) instead of `server.log()`.
+   */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */
@@ -443,7 +451,11 @@ export type LoadOptions = {
   /** Optional host-injected `redis.*` props (constants and simple stubs). */
   redisProps?: RedisProps;
 
-  /** Redis/Valkey version whose Lua sandbox behavior to emulate. Default: ≈ valkey-8.0. */
+  /**
+   * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
+   * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
+   * (Redis wording) instead of `server.log()`.
+   */
   profile?: CompatProfile;
 
   /** Per-flag compatibility overrides, merged over `profile` (or the default). */

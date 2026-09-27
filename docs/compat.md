@@ -72,7 +72,8 @@ through `redisProps`.
     (`'foo'` → `ERR foo`, `'-ERR x'` → `ERR x`) and `redis.log` errors carry the
     `ERR` code; Redis 6.2 returns the `error_reply` string unchanged, positions a
     bad call as `@user_script: <line>: wrong number or type of arguments`, and
-    raises `redis.log` errors without a code. These follow `compat.tableErrors`.
+    raises `redis.log` and `redis.setresp` argument errors without a code. These
+    follow `compat.tableErrors`.
   - an invalid `redis.log` level is `Invalid debug level.` on `redis-6.2`,
     `redis-7.0` and `redis-7.2`, and `Invalid log level.` on `redis-7.4`,
     `redis-8.0` and the Valkey profiles (redis/redis#12636);

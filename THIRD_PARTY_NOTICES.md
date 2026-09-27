@@ -4,7 +4,8 @@ The WASM module shipped in this package is compiled from this project's own sour
 (`wasm/src`) together with C sources taken from [Valkey](https://github.com/valkey-io/valkey),
 vendored as the `vendor/valkey` git submodule pinned to a Valkey release tag. Only the
 files listed below are compiled into the module or included by those files; nothing else
-from Valkey is built or distributed. Parts of `wasm/src` are derived from Valkey / Redis 7.2.4. The licenses of
+from Valkey is built or distributed. Parts of `wasm/src` are derived from Valkey / Redis 7.2.4 and
+Redis 6.2. The licenses of
 all of this third-party code are reproduced below.
 
 ## Valkey / Redis 7.2.4
@@ -16,13 +17,18 @@ all of this third-party code are reproduced below.
     conversions, the `redis.*` API bindings, the error model (`{err=...}` error
     tables, error reply parsing, `pcall` unwrapping, the script error handler
     and its `ERR unknown error` fallback) and `double2ll`.
+  - Portions of `wasm/src/redis_api.c` derived from Redis 6.2's `src/scripting.c`
+    (BSD 3-Clause): the `redis-6.2` profile's `redis.error_reply`, `redis.log` and
+    `redis.setresp` error behavior (`luaRedisReturnSingleFieldTable`, `luaPushError`,
+    `luaLogCommand`, `luaSetResp`).
   - Redis and Valkey modifications to the Lua 5.1 core in `vendor/valkey/deps/lua/src`
     (readonly tables, string hashing, security fixes).
   - `vendor/valkey/src/rand.c` (see [rand.c](#randc) below).
   - Headers included by the compiled files: `vendor/valkey/src/rand.h` (included by
     `wasm/src/redis_math.c`) and `vendor/valkey/src/solarisfixes.h` (included by
     `lua_cjson.c`), both Copyright (c) 2009-2012, Redis Ltd., BSD 3-Clause.
-- Copyright: Redis Ltd. (2006–2020); Valkey contributors (2024–present)
+- Copyright: Redis Ltd. (2006–2020); Salvatore Sanfilippo (2009–2012, Redis 6.2
+  `src/scripting.c`); Valkey contributors (2024–present)
 - License: BSD 3-Clause (text from `vendor/valkey/COPYING`)
 
 ```

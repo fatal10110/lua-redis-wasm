@@ -4,9 +4,10 @@
  *
  * - Redis 6.2 (src/scripting.c): error_reply returns its argument unchanged,
  *   a bad call returns "<source>: <line>: wrong number or type of arguments"
- *   (luaPushError), and redis.log raises bare strings with no ERR code;
+ *   (luaPushError), and redis.log / redis.setresp raise bare strings with no
+ *   ERR code;
  * - Redis 7.0+ / Valkey (src/script_lua.c): error_reply goes through
- *   luaPushErrorBuff and redis.log errors get the ERR code (both came with the
+ *   luaPushErrorBuff and redis.log / redis.setresp errors get the ERR code (both came with the
  *   Redis 7 error model, so they follow `compat.tableErrors`);
  * - "Invalid debug level." up to Redis 7.2, "Invalid log level." from Redis
  *   7.4 and Valkey 8.0;
@@ -88,6 +89,8 @@ function assertLogErrors(engine: LuaEngine, w: Wording): void {
   assert.equal(caught(", -1, 'msg'"), prefix + m.level);
   assert.equal(caught(", 4, 'msg'"), prefix + m.level);
   assert.equal(caught(", 0/0, 'msg'"), prefix + m.level);
+  // redis.setresp's version error follows the same rule (luaSetResp).
+  assert.equal(text(engine.eval("local ok, e = pcall(redis.setresp, 4) return e")), `${prefix}RESP version must be 2 or 3.`);
 }
 
 function assertErrorReply(engine: LuaEngine, w: Wording): void {
@@ -146,6 +149,14 @@ for (const [profile, w] of PROFILES) {
     assertErr(engine.eval("\nredis.log()"), m.arity, "ERR", 2);
     assertErr(engine.eval("\nredis.log(4, 'msg')"), m.level, "ERR", 2);
     assertErr(engine.eval("\nredis.log('x', 'msg')"), m.type, "ERR", 2);
+    if (w.table) {
+      assertErr(engine.eval("\nredis.setresp(4)"), "RESP version must be 2 or 3.", "ERR", 2);
+    } else {
+      // A code-less string error is split by the uppercase rule on the host
+      // side, so "RESP" reads as the code (the same limitation as
+      // error('MY boom', 0); Redis 6.2 sends "-ERR Error running script ...").
+      assertErr(engine.eval("\nredis.setresp(4)"), "version must be 2 or 3.", "RESP", 2);
+    }
   });
 }
 
@@ -154,6 +165,14 @@ test("profile wording: server.log shares the Valkey wording", async () => {
   assert.equal(
     text(engine.eval("local ok, e = pcall(server.log) return e")),
     "ERR server.log() requires two arguments or more.",
+  );
+});
+
+test("profile wording (redis-6.2): the setresp error is a code-less string", async () => {
+  const engine = await engineFor("redis-6.2");
+  assert.equal(
+    text(engine.eval("return select(2, xpcall(function() redis.setresp(4) end, function(e) return type(e) .. ':' .. e end))")),
+    "string:RESP version must be 2 or 3.",
   );
 });
 

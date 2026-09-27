@@ -2,7 +2,8 @@
  *
  * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
  * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and double2ll
- * from src/util.c. */
+ * from src/util.c, and from Redis 6.2's src/scripting.c (BSD-3-Clause) for the
+ * redis-6.2 profile's error_reply / log / setresp errors. */
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
@@ -53,11 +54,12 @@ void redis_reset_resp_version(void) {
   g_resp_version = 2;
 }
 
-/* Raises `msg` (a complete "CODE message" string) without luaL_error's
- * "user_script:N:" position prefix; the script line reaches the host through
- * the error handler instead. In table-error mode the error object is
- * {err=msg}, like Redis 7's luaPushError + luaError; otherwise it is the plain
- * string, like Redis 6.2.
+/* Raises `msg` without luaL_error's "user_script:N:" position prefix; the
+ * script line reaches the host through the error handler instead. In
+ * table-error mode the error object is {err=msg}, like Redis 7's luaPushError +
+ * luaError; otherwise it is the plain string, like Redis 6.2. `msg` is raised
+ * as given: in table-error mode it should be a complete "CODE message" string,
+ * while a Redis 6.2 error may have no code (see raise_api_error).
  * Derived from luaPushError / luaError in Valkey 8.0's src/script_lua.c
  * (same in Redis 7.2.4), BSD-3-Clause. */
 int redis_raise_error(lua_State *L, const char *msg) {
@@ -564,12 +566,13 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
   return lua_error(L);
 }
 
-/* Raises a redis.log argument error. Redis 7.0+ raises it with luaPushError,
- * which adds the generic ERR code; Redis 6.2 raised the bare message string
- * (lua_pushstring + lua_error), so without table errors there is no code.
- * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c and
- * Redis 6.2 src/scripting.c (luaLogCommand), BSD-3-Clause. */
-static int raise_log_error(lua_State *L, const char *msg) {
+/* Raises a redis.log / redis.setresp argument error given without a code.
+ * Redis 7.0+ raises these with luaPushError, which adds the generic ERR code;
+ * Redis 6.2 raised the bare message string (lua_pushstring + lua_error), so
+ * without table errors there is no code.
+ * Derived from luaLogCommand / luaSetResp in Valkey 8.0's src/script_lua.c
+ * (same in Redis 7.2.4) and Redis 6.2's src/scripting.c, BSD-3-Clause. */
+static int raise_api_error(lua_State *L, const char *msg) {
   return redis_raise_error(L, g_table_errors ? lua_pushfstring(L, "ERR %s", msg) : msg);
 }
 
@@ -587,18 +590,18 @@ static int raise_log_error(lua_State *L, const char *msg) {
 static int l_redis_log(lua_State *L) {
   int argc = lua_gettop(L);
   if (argc < 2) {
-    return raise_log_error(L, g_server_log_name ? "server.log() requires two arguments or more."
+    return raise_api_error(L, g_server_log_name ? "server.log() requires two arguments or more."
                                                 : "redis.log() requires two arguments or more.");
   }
   if (!lua_isnumber(L, 1)) {
-    return raise_log_error(L, "First argument must be a number (log level).");
+    return raise_api_error(L, "First argument must be a number (log level).");
   }
   /* Redis assigns the number to an int (truncation toward zero) and then checks
    * LL_DEBUG..LL_WARNING. Range-check the double first so NaN / huge values
    * never reach the float-to-int conversion (which traps in WASM). */
   lua_Number raw_level = lua_tonumber(L, 1);
   if (!(raw_level > -1 && raw_level < 4)) {
-    return raise_log_error(L, g_log_debug_level ? "Invalid debug level." : "Invalid log level.");
+    return raise_api_error(L, g_log_debug_level ? "Invalid debug level." : "Invalid log level.");
   }
   int level = (int)raw_level;
 
@@ -664,8 +667,9 @@ static int l_redis_error_reply_legacy(lua_State *L) {
 }
 
 /* redis.error_reply(msg). With table errors (Redis 7.0+ / Valkey), mirrors
- * luaRedisErrorReplyCommand + luaPushErrorBuff (src/script_lua.c); both came
- * with the Redis 7 error model (redis/redis#10329):
+ * luaRedisErrorReplyCommand + luaPushErrorBuff in Valkey 8.0's
+ * src/script_lua.c (same in Redis 7.2.4), BSD-3-Clause; both came with the
+ * Redis 7 error model (redis/redis#10329):
  * - anything but exactly one string argument returns (does not raise)
  *   {err="ERR wrong number or type of arguments"};
  * - the message is read as a C string (cut at the first NUL) and one leading
@@ -695,10 +699,13 @@ static int l_redis_status_reply(lua_State *L) {
   return push_status_table(L, (const uint8_t *)msg, (uint32_t)len);
 }
 
+/* redis.setresp(2|3). An unsupported version raises "RESP version must be 2
+ * or 3.", ERR-coded with table errors (Redis 7.0+) and bare as in Redis 6.2
+ * (luaSetResp, see raise_api_error). */
 static int l_redis_setresp(lua_State *L) {
   uint32_t next = (uint32_t)luaL_checkinteger(L, 1);
   if (next != 2 && next != 3) {
-    return redis_raise_error(L, "ERR RESP version must be 2 or 3.");
+    return raise_api_error(L, "RESP version must be 2 or 3.");
   }
   /* Notify the host so it can match reply shapes; switch only if it accepted. */
   PtrLen failure = host_redis_setresp(next);

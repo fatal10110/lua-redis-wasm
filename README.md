@@ -280,9 +280,12 @@ table. A host command error becomes the same table `redis.pcall` returns:
 `{err='CODE message', ignore_error_stats_update=true}`, with the generic `ERR` code
 added to a message that has no space and trailing CR/LF trimmed, as in Redis. With
 `profile: "redis-6.2"` errors are plain strings and a host error reaches the script
-verbatim; the other `redis.*` errors carry no `ERR` code and `redis.error_reply`
-returns its argument unchanged, as in Redis 6.2. The `compat.tableErrors` option
-overrides the profile. What the host
+verbatim; the `redis.log` and `redis.setresp` argument errors carry no `ERR` code
+(`RESP version must be 2 or 3.`), and `redis.error_reply` returns its argument
+unchanged, as in Redis 6.2. The `compat.tableErrors` option overrides the
+profile. Uncaught, they reach the host like any string error: split by the
+uppercase-code rule, so `RESP version must be 2 or 3.` reports code `RESP` (Redis
+6.2 wraps it in `ERR Error running script ...`). Other than that, what the host
 receives when the error aborts the script is the same in both models, except that
 the table model trims CR/LF around the message after the code, as Redis does
 (host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`).

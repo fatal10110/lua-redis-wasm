@@ -88,7 +88,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `compat.tableErrors: false`) `redis.error_reply` returns its argument
   unchanged (`'foo'` → `{err='foo'}`), a bad call returns
   `{err='@user_script: <line>: wrong number or type of arguments'}`, and
-  `redis.log` errors have no `ERR` code, as in Redis 6.2. An invalid
+  `redis.log` and `redis.setresp` argument errors have no `ERR` code, as in
+  Redis 6.2. An invalid
   `redis.log` level is `Invalid debug level.` on `redis-6.2` / `redis-7.0` /
   `redis-7.2`, and the Valkey profiles say `server.log() requires two arguments
   or more.`. With no profile the wording is unchanged. The wording is selected
