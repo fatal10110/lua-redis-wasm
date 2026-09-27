@@ -264,8 +264,10 @@ export type RedisProps = Record<string, RedisProp>;
  * Resource limits for the Lua engine.
  *
  * These limits protect against runaway scripts and resource exhaustion.
- * All limits are optional - unset (or 0) limits are not enforced. All are
- * enforced by the WASM runtime. Values must be non-negative integers (`load()`
+ * All limits are optional and enforced by the WASM runtime. An unset (or 0)
+ * `maxReplyBytes` / `maxArgBytes` is not enforced; an unset (or 0) `maxFuel`
+ * means the default budget of 10,000,000 instructions (the fuel limit cannot
+ * be disabled). Values must be non-negative integers (`load()`
  * throws a RangeError for negative, fractional, non-finite or non-numeric
  * values); values above 2^32 - 1 are capped to it.
  *
@@ -279,7 +281,10 @@ export type RedisProps = Record<string, RedisProp>;
  * ```
  */
 export type EngineLimits = {
-  /** Maximum instruction count (fuel) for script execution. */
+  /**
+   * Maximum instruction count (fuel) for script execution. Unset or 0 means
+   * the default of 10,000,000 instructions.
+   */
   maxFuel?: number;
 
   /**

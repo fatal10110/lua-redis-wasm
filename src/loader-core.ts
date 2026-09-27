@@ -69,7 +69,8 @@ export type WasmExports = {
 
   /**
    * Configure runtime limits.
-   * @param maxFuel - Instruction budget (0 = unlimited)
+   * @param maxFuel - Instruction budget (0 = keep the current budget,
+   *   10,000,000 by default; the fuel limit cannot be disabled)
    * @param maxReplyBytes - Maximum reply size (0 = unlimited)
    * @param maxArgBytes - Maximum argument size (0 = unlimited)
    */

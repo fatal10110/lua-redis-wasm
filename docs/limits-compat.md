@@ -2,14 +2,14 @@
 
 ## Limits
 
-Limits are optional and all enforced by the WASM runtime (see the README's
-"Resource Limits" section for details).
+Limits are optional and all enforced by the WASM runtime (see
+[limits.md](limits.md) for details).
 
-| Limit | Meaning | Enforced |
+| Limit | Meaning | Default |
 | --- | --- | --- |
-| `maxFuel` | Instruction budget for a script | Yes |
-| `maxReplyBytes` | Max encoded reply size, checked while encoding | Yes |
-| `maxArgBytes` | Max encoded KEYS + ARGV size | Yes |
+| `maxFuel` | Instruction budget for a script | 10,000,000 (0 = default) |
+| `maxReplyBytes` | Max encoded reply size, checked while encoding | no limit |
+| `maxArgBytes` | Max encoded KEYS + ARGV size | no limit |
 
 Example:
 
@@ -28,7 +28,7 @@ const engine = await LuaEngine.create({
 
 | Area | Status |
 | --- | --- |
-| Redis target | 7.x |
+| Redis target | 7.x by default; Redis 6.2–8.0 and Valkey 8.0–9.0 via `profile` (see [compat.md](compat.md)) |
 | Lua version | 5.1 |
 | Binary-safe strings | Yes |
 | `redis.call` / `redis.pcall` | Yes |

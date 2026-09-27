@@ -1,9 +1,10 @@
 # Redis 7 Lua Compatibility Scope
 
 ## Target
-- Redis version: 7.x
-- Lua version: 5.1
-- Host: Node.js
+- Redis version: 7.x by default; Redis 6.2–8.0 and Valkey 8.0–9.0 through
+  [compatibility profiles](#compatibility-profiles)
+- Lua version: 5.1 (from the vendored Valkey 8.0.11 sources)
+- Host: Node.js and browsers
 
 ## Supported Redis Lua APIs
 - `redis.call`
@@ -23,14 +24,38 @@
 ## Exclusions
 - Debug helpers: `redis.debug`, `redis.breakpoint`.
 - Redis function library helpers: `redis.register_function` and related APIs.
-- Any OS, IO, or time-dependent Lua libraries.
+- Any OS, IO, or time-dependent Lua libraries (the `os` library, where a
+  profile enables it, is sandboxed to `os.clock` as in Redis).
+
+## Compatibility Profiles
+
+The `profile` option (`load()`, `LuaEngine.create`, `LuaEngine.createStandalone`)
+selects the Lua sandbox behaviors that differ across Redis/Valkey versions, and
+`compat` overrides single flags on top of it. The engine passes them to the WASM
+module as a bitmask (`set_compat`):
+
+| Flag (`compat` key) | WASM bit | `redis-6.2` | `redis-7.0` / `redis-7.2` | `redis-7.4` / `redis-8.0` | `valkey-8.0` / `valkey-9.0` | no profile |
+|---|---|---|---|---|---|---|
+| `print` global (`print`) | `0x01` | on | off | off | off | off |
+| sandboxed `os` library (`os`) | `0x02` | off | off | on | on | on |
+| `server` alias of `redis` (`serverAlias`) | `0x04` | off | off | off | on | on |
+| reseed `math.random` before every script (`reseedRandom`) | `0x08` | on | off | off | off | off |
+| Redis 7 error model (`tableErrors`) | `0x10` | off | on | on | on | on |
+| `Invalid debug level.` wording (profile only) | `0x20` | on | on | off | off | off |
+| Valkey wording (profile only) | `0x40` | off | off | off | on | off |
+
+Profiles in the same column behave identically. With no profile the behavior
+is that of `valkey-8.0`, except for the wording: the `redis.log` arity error
+names `redis.log()` and a bad `redis.call` / `redis.pcall` argument says `Lua
+redis lib command arguments ...`, as in Redis 7.4+. The two wording bits follow
+the profile only and have no `compat` override.
 
 ## Host-Injectable `redis.*` Props
 
 The engine ships **none** of the version-specific `redis.*` members by default (a
 blank slate) — there is no bundled `REDIS_VERSION`, and `redis.replicate_commands()`
 etc. do not exist unless the host adds them. A host that needs them supplies the
-`redisProps` option (see [README](../README.md#injecting-redis-props)):
+`redisProps` option (see [README](../README.md#add-redis-constants-and-stubs)):
 
 - `REDIS_VERSION`, `REDIS_VERSION_NUM` — version constants.
 - `REPL_ALL`, `REPL_AOF`, `REPL_SLAVE`, `REPL_REPLICA`, `REPL_NONE` — replication
@@ -41,9 +66,11 @@ etc. do not exist unless the host adds them. A host that needs them supplies the
 
 `redisProps` supports two shapes per member: `{ value }` for a constant field, or
 `{ returns }` for a stub function that ignores its arguments and returns the given
-constant (`returns: null` makes it return nothing). `server` is created internally
-as an alias of `redis` (same table, same injected props) — it is not configured
-through `redisProps`.
+constant (`returns: null` makes it return nothing). `server`, where the profile
+enables it (`serverAlias`), is an alias of `redis` (same table, same injected
+props) — it is not configured through `redisProps`. Numeric values follow
+Redis's number semantics: a Lua number returned from a script is truncated to
+an integer, so a non-integer numeric prop reads back truncated.
 
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.
@@ -114,6 +141,29 @@ through `redisProps`.
   fails on a table error.
 - Script timeouts are an instruction budget (`maxFuel`), not a wall-clock
   `lua-time-limit`; see [limits](limits.md).
+- What the host receives for each error, and the `meta` it carries, is in
+  [errors.md](errors.md).
+
+### `redis.log` wording
+
+The `redis.log` argument errors follow the `profile`, as in each version's
+source:
+
+| profile | arity error | level error | `ERR` code |
+|---|---|---|---|
+| `redis-6.2` | `redis.log() requires ...` | `Invalid debug level.` | no |
+| `redis-7.0`, `redis-7.2` | `redis.log() requires ...` | `Invalid debug level.` | yes |
+| `redis-7.4`, `redis-8.0`, no profile | `redis.log() requires ...` | `Invalid log level.` | yes |
+| `valkey-8.0`, `valkey-9.0` | `server.log() requires ...` | `Invalid log level.` | yes |
+
+The `ERR` code came with the Redis 7 error model, so it follows
+`compat.tableErrors`; the wording itself follows the profile only.
+
+### Number arguments to `redis.call`
+
+Number arguments are formatted like Redis 7.4+ for every profile; see
+[host-interface.md](host-interface.md#rediscall) for the exact rules and how
+older versions differ.
 
 ## Compatibility Criteria
 - Return values and errors match Redis 7 behavior for the supported surface.

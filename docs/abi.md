@@ -196,7 +196,9 @@ The WASM module exports the following functions:
   - Frees memory allocated by `alloc` or reply buffers.
 
 - `set_limits(max_fuel, max_reply_bytes, max_arg_bytes) -> void`
-  - Sets optional runtime limits. Values of 0 disable the corresponding limit.
+  - Sets optional runtime limits. A `max_reply_bytes` or `max_arg_bytes` of 0
+    disables that limit; a `max_fuel` of 0 keeps the current fuel budget
+    (10,000,000 instructions by default).
 
 ## Argument Encoding
 Arguments to `host_redis_call`, `host_redis_pcall`, and `eval_with_args` are encoded as:

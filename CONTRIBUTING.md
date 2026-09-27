@@ -167,7 +167,7 @@ If you discover a security vulnerability, please follow our [Security Policy](SE
 
 ## Questions?
 
-Feel free to open a discussion or issue for any questions about contributing!
+Feel free to open an issue for any questions about contributing!
 
 ## License
 
