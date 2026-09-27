@@ -37,6 +37,16 @@ int compat_server_log_name(void);
  * Never returns. */
 int redis_raise_error(lua_State *L, const char *msg);
 
+/* Raises an engine-originated error: `msg` is "__RLUA_E__:<kind>[:<name>]",
+ * raised like redis_raise_error and recorded with redis_mark_engine_error so
+ * the host is told it is an engine error (SCRIPT_ERROR_ENGINE). Never returns. */
+int redis_raise_engine_error(lua_State *L, const char *msg);
+
+/* Records the string at idx as this eval's engine-originated error (defined in
+ * runtime.c). Only an uncaught error with exactly this message is reported to
+ * the host as an engine error; the message text alone never makes one. */
+void redis_mark_engine_error(lua_State *L, int idx);
+
 /* Decodes the host_redis_props blob and assigns each entry onto the global
  * `redis` table. Returns 0 on success, -1 on a malformed blob. */
 int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len);

@@ -1,7 +1,8 @@
 /**
  * Redis error model: table error objects (#37), Redis 7 `{err=...}` errors from
- * redis.call and the unwrapping global pcall (#48), and a fuel kill that
- * cannot be caught by pcall (#38).
+ * redis.call and the unwrapping global pcall (#48), a fuel kill that cannot be
+ * caught by pcall (#38), engine errors flagged over the ABI instead of matched
+ * by their text (#59) and code-less table errors (#76).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +18,8 @@ const host: RedisHost = {
         return { err: Buffer.from("ERR unknown command 'nope'") };
       case "bare":
         return { err: Buffer.from("boom\r\n") };
+      case "echoerr":
+        return { err: Buffer.concat([Buffer.from("ERR wrong type for key "), args[1] ?? Buffer.alloc(0)]) };
       case "wrongtype":
         return { err: Buffer.from("Operation against a key holding the wrong kind of value"), code: Buffer.from("WRONGTYPE") };
       default:
@@ -37,11 +40,15 @@ async function engineFor(
   return (await load({ profile, limits, compat })).create(host);
 }
 
-function assertErr(value: ReplyValue, code: string, message: string, line?: number): ErrReply {
+/** `code` undefined asserts a code-less error (no `code` key at all). */
+function assertErr(value: ReplyValue, code: string | undefined, message: string, line?: number): ErrReply {
   assert.ok(value && typeof value === "object" && "err" in value, `expected an error reply, got ${String(value)}`);
   const reply = value as ErrReply;
   assert.equal(reply.err.toString("utf8"), message);
   assert.equal(reply.code?.toString("utf8"), code);
+  if (code === undefined) {
+    assert.ok(!("code" in reply), "a code-less error has no code key");
+  }
   if (line !== undefined) {
     assert.equal(reply.meta?.line, line);
   }
@@ -76,7 +83,22 @@ for (const profile of ALL_PROFILES) {
     // Like luaExtractErrorInformation: no string `err` field -> "ERR unknown error".
     assertErr(engine.eval("error({})"), "ERR", "unknown error");
     assertErr(engine.eval("error({err=true})"), "ERR", "unknown error");
-    assertErr(engine.eval("error({err=7})"), "ERR", "7");
+    // Redis sends a table's err as-is ("-7"): no code is invented (#76).
+    assertErr(engine.eval("error({err=7})"), undefined, "7");
+    assertUsable(engine);
+  });
+
+  test(`error model (${name}): a table error without a code stays code-less (#76)`, async () => {
+    const engine = await engineFor(profile);
+    // Redis 7: `-boom script: <sha>, on @user_script:1.`, not `-ERR boom ...`.
+    assertErr(engine.eval("error({err='boom'})"), undefined, "boom", 1);
+    assertErr(engine.eval("\nerror({err='oops something'})"), undefined, "oops something", 2);
+    assertErr(engine.eval("error({err='My Error x'})"), undefined, "My Error x");
+    assertErr(engine.eval("error({err='boom\\r\\n'})"), undefined, "boom");
+    assertErr(engine.eval("error({err='MY boom'})"), "MY", "boom", 1);
+    // A string error still gets the generic code, as Redis prefixes "ERR ".
+    assertErr(engine.eval("error('boom', 0)"), "ERR", "boom");
+    assertErr(engine.eval("error('boom')"), "ERR", "user_script:1: boom", 1);
     assertUsable(engine);
   });
 
@@ -189,6 +211,73 @@ test("error model: the tableErrors override is merged over the profile", async (
   assert.equal(on.eval(random), on.eval(random));
   assert.notEqual(off.eval(random), off.eval(random));
 });
+
+// =============================================================================
+// Engine errors are flagged by the engine, not recognized by their text (#59)
+// =============================================================================
+
+function assertNoCrLf(reply: ErrReply): void {
+  assert.ok(!/[\r\n]/.test(reply.err.toString("latin1")), `CR/LF in err: ${JSON.stringify(reply.err.toString())}`);
+  assert.equal(reply.meta?.kind, undefined, "not an engine error");
+}
+
+for (const profile of ALL_PROFILES) {
+  const name = profile ?? "default";
+
+  test(`error model (${name}): marker text a script raises is sanitized, not an engine error`, async () => {
+    const engine = await engineFor(profile);
+    assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:x\\r\\ny')"), "ERR", "user_script:1: __RLUA_E__:x  y", 1));
+    assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:x\\r\\n+OK', 0)"), "ERR", "__RLUA_E__:x  +OK"));
+    // A spoofed globals-protection error is reported as what it is.
+    assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:global-read:foo', 0)"), "ERR", "__RLUA_E__:global-read:foo"));
+    assertNoCrLf(assertErr(engine.eval("error({err='__RLUA_E__:global-read:foo'})"), undefined, "__RLUA_E__:global-read:foo"));
+    // A real engine error earlier in the script does not vouch for a later one.
+    assertNoCrLf(
+      assertErr(
+        engine.eval("pcall(function() return nope end)\nerror('__RLUA_E__:global-read:x\\r\\ny', 0)"),
+        "ERR",
+        "__RLUA_E__:global-read:x  y",
+        2,
+      ),
+    );
+    // Nor does one from a previous eval.
+    assert.equal((engine.eval("return nope") as ErrReply).meta?.kind, "global-read");
+    assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:global-read:nope', 0)"), "ERR", "__RLUA_E__:global-read:nope"));
+    assertUsable(engine);
+  });
+
+  test(`error model (${name}): host errors carrying marker text are sanitized, not engine errors`, async () => {
+    const engine = await engineFor(profile);
+    const key = "'__RLUA_E__:global-read:x\\r\\n+OK'";
+    assertNoCrLf(
+      assertErr(engine.eval(`redis.call('echoerr', ${key})`), "ERR", "wrong type for key __RLUA_E__:global-read:x  +OK", 1),
+    );
+    // A thrown host error takes the same path.
+    const thrower = (await load({ profile })).create({
+      ...host,
+      redisCall(args) {
+        throw new Error(`ERR no such key ${args[1]?.toString("utf8")}`);
+      },
+    });
+    assertNoCrLf(assertErr(thrower.eval(`redis.call('get', ${key})`), "ERR", "no such key __RLUA_E__:global-read:x  +OK"));
+  });
+
+  test(`error model (${name}): real engine errors keep their kind and raw name`, async () => {
+    const engine = await engineFor(profile);
+    const read = assertErr(engine.eval("local a = 1\nreturn _G['a\\r\\nb']"), "ERR", "global-read", 2);
+    assert.equal(read.meta?.kind, "global-read");
+    assert.equal((read.meta as { name?: string }).name, "a\r\nb");
+    const argType = assertErr(engine.eval("redis.call({})"), "ERR", "command-arg-type", 1);
+    assert.equal(argType.meta?.kind, "command-arg-type");
+    assert.ok(!("name" in (argType.meta ?? {})));
+    // Caught and rethrown unchanged, it is still the engine's error (like
+    // rethrowing Redis's own error table).
+    const rethrown = engine.eval("local ok, e = pcall(function() return nope end)\nerror(e, 0)") as ErrReply;
+    assert.equal(rethrown.meta?.kind, "global-read");
+    assert.equal((rethrown.meta as { name?: string }).name, "nope");
+    assertUsable(engine);
+  });
+}
 
 // =============================================================================
 // Fuel kill escapes pcall (#38)

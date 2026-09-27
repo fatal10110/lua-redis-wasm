@@ -24,7 +24,10 @@
  * - `{ err: Buffer; code?: Buffer }` - Error reply (Redis -ERR style). `err` is
  *   the message; `code` is the optional leading error code (e.g. `WRONGTYPE`).
  *   On decode the code is split out of the wire payload; on encode it is
- *   prepended back. When `code` is omitted the message is used verbatim.
+ *   prepended back. When `code` is omitted the message is used verbatim. A
+ *   script-aborting error has `code` `ERR` when it was a string error without
+ *   one, and no `code` when it was a table whose `err` has none
+ *   (`error({err='boom'})`), which Redis sends as `-boom`.
  * - `{ double: number }` - RESP3 double reply
  * - `{ big_number: Buffer }` - RESP3 big number reply
  * - `{ verbatim_string: { format: Buffer; string: Buffer } }` - RESP3 verbatim string
@@ -58,9 +61,11 @@
  * - `line` (1-based script line) and `sha` (the script's SHA1, already computed
  *   by the engine) are always present.
  * - `kind`/`name` are present only for errors the engine itself originates (the
- *   globals protection). `kind` is an opaque machine tag the host maps to wording;
- *   `name` is the variable involved. The reply's `err` carries the bare `kind`.
- *   Known kinds:
+ *   globals protection, a bad redis.call argument), which the engine flags
+ *   itself: error text from a script or a host command never gets a `kind`.
+ *   `kind` is an opaque machine tag the host maps to wording; `name` is the
+ *   variable involved, raw (it may contain CR/LF). The reply's `err` carries
+ *   the bare `kind`. Known kinds:
  *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
  *     "Script attempted to access nonexistent global variable '<name>'".
  *   - `command-arg-type`: a redis.call/pcall argument was not a string or number

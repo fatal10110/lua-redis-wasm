@@ -293,12 +293,19 @@ refuses `EVAL` from inside a script).
 The engine composes **no** user-facing error wording — it classifies the error and
 lets the host render. When a script aborts, the reply carries:
 
-- `code` — the RESP error class (e.g. `WRONGTYPE`, default `ERR`); preserved from
-  `redis.call`. See [Reply Types](#reply-types).
+- `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call`.
+  A string error without one (`error('boom')`) gets `ERR`, as Redis prefixes
+  `ERR `. An error table's `err` is what Redis sends as-is, so a table error has
+  a `code` only when its `err` starts with one: `error({err='MY boom'})` → code
+  `MY`, `err` `boom`; `error({err='boom'})` → no `code`, `err` `boom` (Redis:
+  `-boom script: ...`). Write `-<code> <err>`, or `-<err>` when `code` is absent.
+  See [Reply Types](#reply-types).
 - `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
   classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
   `redis.call` argument). `kind` is an opaque machine tag the host maps to wording;
-  `name` is the variable involved. Writing a global has no `kind`: it is blocked by
+  `name` is the variable involved, raw (it may contain CR/LF). The engine flags
+  these errors itself; error text a script or a host command error produces never
+  gets a `kind`, whatever it contains. Writing a global has no `kind`: it is blocked by
   Lua's native readonly flag (as in real Redis), which recursively locks the whole
   globals tree, so the VM itself raises "Attempt to modify a readonly table".
 - `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
@@ -335,7 +342,10 @@ uppercase-code rule, so `RESP version must be 2 or 3.` reports code `RESP` (Redi
 6.2 wraps it in `ERR Error running script ...`). Other than that, what the host
 receives when the error aborts the script is the same in both models, except that
 the table model trims CR/LF around the message after the code, as Redis does
-(host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`).
+(host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`), and that a
+host error whose first word is not an uppercase code (`"oops something"`) stays
+code-less in the table model, as Redis 7 sends it as-is, while with string errors
+it gets the `ERR` code, as Redis 6.2 prefixes `ERR`.
 
 ### log
 

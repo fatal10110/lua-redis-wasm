@@ -69,6 +69,19 @@ const REPLY_ERROR = 0x05;
  */
 export const REPLY_SCRIPT_ERROR = 0x06;
 
+/**
+ * REPLY_SCRIPT_ERROR flag: the engine raised this error itself (globals
+ * protection, a bad redis.call argument). The message is `<kind>[:<name>]`,
+ * unsanitized. Set by the engine only, never inferred from the text (#59).
+ */
+export const SCRIPT_ERROR_ENGINE = 0x01;
+
+/**
+ * REPLY_SCRIPT_ERROR flag: the message is the `err` field of an error table,
+ * which Redis sends as-is, so no default `ERR` code is added (#76).
+ */
+export const SCRIPT_ERROR_FROM_TABLE = 0x02;
+
 const REPLY_BOOL = 0x07;
 const REPLY_DOUBLE = 0x08;
 const REPLY_MAP = 0x09;
@@ -358,15 +371,25 @@ export function decodeReply(
   }
 
   if (type === REPLY_SCRIPT_ERROR) {
-    // Payload is a u32le `line` (0 = unknown, parse from message prefix) followed
-    // by the `CODE message` bytes. See reply_script_error in wasm/src/runtime.c.
+    // Payload (ABI 2) is a u32le `line` (0 = unknown, parse from message
+    // prefix), a u8 `flags` (SCRIPT_ERROR_*) and the message bytes. See
+    // reply_script_error in wasm/src/runtime.c.
     const line = buffer.readUInt32LE(cursor);
-    const payload = buffer.subarray(cursor + 4, cursor + countOrLen);
+    const flags = buffer.readUInt8(cursor + 4);
+    const payload = buffer.subarray(cursor + 5, cursor + countOrLen);
     cursor += countOrLen;
-    const error = splitErrorPayload(payload);
-    // `line` is internal plumbing consumed by buildScriptError; it is not part of
-    // the public ReplyValue contract, hence the cast.
-    const value = (line > 0 ? { ...error, line } : error) as ReplyValue;
+    // An engine error's message is `<kind>[:<name>]`, not `CODE message`.
+    const error =
+      flags & SCRIPT_ERROR_ENGINE
+        ? { err: Buffer.from(payload) }
+        : splitErrorPayload(payload);
+    // `line` and `flags` are internal plumbing consumed by buildScriptError;
+    // they are not part of the public ReplyValue contract, hence the cast.
+    const value = {
+      ...error,
+      ...(line > 0 ? { line } : {}),
+      ...(flags ? { flags } : {}),
+    } as ReplyValue;
     return { value, offset: cursor };
   }
 

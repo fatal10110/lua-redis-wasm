@@ -72,6 +72,8 @@ import {
   encodeRedisProps,
   ensureBuffer,
   REPLY_SCRIPT_ERROR,
+  SCRIPT_ERROR_ENGINE,
+  SCRIPT_ERROR_FROM_TABLE,
 } from "./codec.js";
 import {
   loadModule,
@@ -537,12 +539,17 @@ export class LuaEngine {
 /**
  * Builds a script-aborting error reply. The engine composes no user-facing prose:
  *
- * - Engine-originated errors (globals protection) arrive as a coded marker; we
- *   forward `{ kind, name }` in `meta` and the host chooses the wording. `err`
- *   carries the bare `kind` as a machine-readable default.
+ * - Engine-originated errors (globals protection, a bad redis.call argument)
+ *   are flagged by the WASM runtime (`SCRIPT_ERROR_ENGINE`) with a
+ *   `<kind>[:<name>]` message; we forward `{ kind, name }` in `meta` and the host
+ *   chooses the wording. `err` carries the bare `kind` as a machine-readable
+ *   default. The message text alone never makes an engine error (#59).
  * - Lua runtime / redis.call errors already carry their own message (and code);
  *   they pass through untouched, with only `line`/`sha` attached for the host to
- *   decorate.
+ *   decorate. A table error's `err` (`SCRIPT_ERROR_FROM_TABLE`) is what Redis
+ *   sends as-is (`-<err>`), so it has a `code` only if its first word is one; a
+ *   string error gets the default `ERR` code when it has none, as Redis
+ *   prefixes `ERR ` (#76).
  *
  * The line comes from the WASM error handler (`value.line`), which captures the
  * script frame at the error point — including command errors propagated out of
@@ -554,34 +561,39 @@ export class LuaEngine {
  * every evaluation.
  */
 function buildScriptError(
-  value: { err: Buffer; code?: Buffer; line?: number },
+  value: { err: Buffer; code?: Buffer; line?: number; flags?: number },
   script: Buffer,
-): { err: Buffer; code: Buffer; meta: ReplyErrorMeta } {
+): { err: Buffer; code?: Buffer; meta: ReplyErrorMeta } {
   const sha = computeSha1Hex(script).toString("utf8");
-  const errStr = value.err.toString("utf8");
+  const flags = value.flags ?? 0;
   let line = value.line ?? 1;
-  if (value.line === undefined && errStr.startsWith("user_script:")) {
-    const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
-    if (colonIdx > 12) {
-      line = Number(errStr.substring(12, colonIdx)) || 1;
+  if (value.line === undefined) {
+    const errStr = value.err.toString("utf8");
+    if (errStr.startsWith("user_script:")) {
+      const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
+      if (colonIdx > 12) {
+        line = Number(errStr.substring(12, colonIdx)) || 1;
+      }
     }
   }
 
-  const marker = parseErrorMarker(errStr);
-  if (marker) {
+  if (flags & SCRIPT_ERROR_ENGINE) {
+    const { kind, name } = parseEngineError(value.err.toString("utf8"));
     return {
-      err: Buffer.from(marker.kind, "utf8"),
+      err: Buffer.from(kind, "utf8"),
       code: Buffer.from("ERR", "utf8"),
-      meta: { kind: marker.kind, name: marker.name, line, sha },
+      meta: name === undefined ? { kind, line, sha } : { kind, name, line, sha },
     };
   }
 
-  return {
-    err: value.err,
-    // Preserve a propagated command code (e.g. WRONGTYPE); otherwise "ERR".
-    code: value.code ?? Buffer.from("ERR", "utf8"),
-    meta: { line, sha },
-  };
+  // Preserve a propagated command code (e.g. WRONGTYPE). A table error without
+  // one stays code-less, like Redis's `-<err>`; anything else defaults to ERR.
+  const code =
+    value.code ??
+    (flags & SCRIPT_ERROR_FROM_TABLE ? undefined : Buffer.from("ERR", "utf8"));
+  return code === undefined
+    ? { err: value.err, meta: { line, sha } }
+    : { err: value.err, code, meta: { line, sha } };
 }
 
 /**
@@ -714,27 +726,16 @@ function writeSha1Import(
   writePtrLen(exports.HEAPU8, retPtr, out);
 }
 
-const ERROR_MARKER = "__RLUA_E__:";
-
 /**
- * Engine-originated errors (globals protection, see runtime.c) cross the
- * Lua->WASM->JS boundary as a coded string `__RLUA_E__:<kind>:<name>` (Lua errors
- * carry no type tag, so the discriminator travels in the string). Splits out the
- * opaque `kind` and `name`; the library forwards them and never interprets the
- * kind. Returns undefined for ordinary error messages.
+ * Splits an engine error message (`<kind>` or `<kind>:<name>`, see
+ * SCRIPT_ERROR_ENGINE) into the opaque `kind` and the `name`. The library
+ * forwards them and never interprets the kind.
  */
-function parseErrorMarker(
-  errStr: string,
-): { kind: string; name?: string } | undefined {
-  const idx = errStr.indexOf(ERROR_MARKER);
-  if (idx < 0) {
-    return undefined;
-  }
-  const rest = errStr.slice(idx + ERROR_MARKER.length); // "<kind>" or "<kind>:<name>"
-  const sep = rest.indexOf(":");
+function parseEngineError(message: string): { kind: string; name?: string } {
+  const sep = message.indexOf(":");
   return sep < 0
-    ? { kind: rest }
-    : { kind: rest.slice(0, sep), name: rest.slice(sep + 1) };
+    ? { kind: message }
+    : { kind: message.slice(0, sep), name: message.slice(sep + 1) };
 }
 
 /**
