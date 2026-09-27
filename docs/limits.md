@@ -9,7 +9,11 @@
   `ERR Script killed by fuel limit` (Redis: `ERR Script killed by user with
   SCRIPT KILL...`). Like a Redis `SCRIPT KILL`, it cannot be caught: after a
   `pcall`/`xpcall` catches it, it is raised again at the next instruction until
-  it escapes the script.
+  it escapes the script. No `xpcall` message handler runs for it, and a kill
+  inside a coroutine stops the whole script.
+- Known gap (#75): fuel is charged per thread every 1000 instructions, so a
+  coroutine that finishes within 1000 instructions is never charged. Work spread
+  over many short coroutines is not bounded by the budget.
 
 ## Memory Limits
 - WASM linear memory: 64 MiB max.

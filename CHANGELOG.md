@@ -62,7 +62,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pcall` returns the `err` string of a caught error table, like Redis's
   `luaRedisPcall`. `pcall(redis.call, ...)` still yields a string; `xpcall`
   handlers now receive the table. `redis-6.2` keeps string errors. The error the
-  host receives when a script aborts is unchanged.
+  host receives when a script aborts is unchanged, except that CR/LF around a
+  host error's message is now trimmed as in Redis (`"\r\nboom"` → `boom`, was
+  `"  boom"`).
 - The fuel-limit kill is raised as `ERR Script killed by fuel limit` (code `ERR`,
   message `Script killed by fuel limit`) without a `user_script:N:` position
   prefix, and `redis.setresp` / `ERR empty reply from host` errors lose that
@@ -167,12 +169,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table's `err` field (`MY custom`, `ERR boom`) instead of
   `ERR script execution failed`, like Redis's `luaExtractErrorInformation`
   (`ERR unknown error` when `err` is not a string); other non-string error values
-  are reported as Lua's `tostring` renders them (`nil`, `true`, ...) (#37).
+  are reported as Lua's `tostring` renders them (`nil`, `true`, ...) (#37). This
+  is Redis 7.0+ behavior, applied to every profile (Redis 6.2 fails on a table
+  error).
 - The fuel limit can no longer be bypassed with `pcall` (#38): like Redis after
   `SCRIPT KILL`, a spent budget switches the hook to fire on every instruction
   and line, so the kill is raised again after any `pcall` / `xpcall` catches it
-  (including inside coroutines and `xpcall` message handlers) until it escapes
-  the script. The counting hook is restored before the next evaluation.
+  until it escapes the script. No `xpcall` message handler runs for the kill, and
+  a kill inside a coroutine stops the whole script even if `coroutine.resume`
+  returned it as a value. The counting hook is restored before the next
+  evaluation. Coroutines that finish within 1000 instructions are still not
+  charged (#75).
 
 ## [1.3.0] - 2026-06-08
 

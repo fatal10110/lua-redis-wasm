@@ -66,8 +66,9 @@ through `redisProps`.
   the other `redis.*` functions raise `{err=...}` tables, and the global `pcall`
   returns the `err` string of a caught error table. `redis-6.2` raises plain
   strings. Override with `compat.tableErrors`.
-- An uncaught table error is reported by its `err` field, like Redis's
-  `luaExtractErrorInformation`.
+- An uncaught table error is reported by its `err` field, like Redis 7.0+'s
+  `luaExtractErrorInformation`. This applies to every profile; Redis 6.2 itself
+  fails on a table error.
 - Script timeouts are an instruction budget (`maxFuel`), not a wall-clock
   `lua-time-limit`; see [limits](limits.md).
 

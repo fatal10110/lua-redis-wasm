@@ -258,8 +258,10 @@ lets the host render. When a script aborts, the reply carries:
   runtime / `redis.call` errors, the original message, passed through untouched.
   An error object that is a table (`error({err='MY custom'})`,
   `error(redis.error_reply('boom'))`, a `redis.call` error) is reported by its `err`
-  field, like Redis (`ERR unknown error` when `err` is not a string); other
-  non-string values as Lua's `tostring` renders them (`error(nil)` → `nil`).
+  field, like Redis 7.0+ (`ERR unknown error` when `err` is not a string); other
+  non-string values as Lua's `tostring` renders them (`error(nil)` → `nil`). This
+  applies to every profile, `redis-6.2` included, although Redis 6.2 itself fails
+  on a table error (its error handler concatenates it as a string).
 
 The host owns wording: map `kind` to the Redis message (version-specific if you care)
 and decorate with `line`/`sha` as needed
@@ -279,7 +281,9 @@ table. A host command error becomes the same table `redis.pcall` returns:
 added to a message that has no space and trailing CR/LF trimmed, as in Redis. With
 `profile: "redis-6.2"` errors are plain strings and a host error reaches the script
 verbatim. The `compat.tableErrors` option overrides the profile. What the host
-receives when the error aborts the script is the same in both models.
+receives when the error aborts the script is the same in both models, except that
+the table model trims CR/LF around the message after the code, as Redis does
+(host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`).
 
 ### log
 
@@ -461,8 +465,11 @@ budget aborts with `{ err: "Script killed by fuel limit", code: "ERR" }` plus th
 usual `meta` (`line`, `sha`), where a killed Redis script reports
 `ERR Script killed by user with SCRIPT KILL...`. As in Redis after `SCRIPT KILL`,
 the kill cannot be caught: once raised it is raised again at every instruction, so
-it escapes any `pcall` or `xpcall` (including their message handlers) and reaches
-the host. Each evaluation starts with the full budget.
+it escapes any `pcall` or `xpcall` and reaches the host; no `xpcall` message
+handler runs for it, and a kill inside a coroutine stops the whole script. Each
+evaluation starts with the full budget. Known gap: a coroutine that finishes
+within 1000 instructions is never charged, so a script that runs its work in
+many short coroutines is not bounded by `maxFuel` (#75).
 
 The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
 `not enough memory` error and the engine stays usable. Because Lua 5.1 has no
