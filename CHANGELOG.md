@@ -161,6 +161,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The browser build no longer throws `ReferenceError: Buffer is not defined`
+  when imported without a global `Buffer`: no `Buffer` is created when the
+  module loads, so a static `import { LuaEngine } from "lua-redis-wasm"` works
+  and the `Buffer` polyfill can be installed afterwards, before the first call
+  (#90).
 - `redis.status_reply` checks its arguments like Redis: anything but exactly one
   string argument returns (no longer raises `bad argument #1`) the error table
   `redis.error_reply` returns for a bad call, `{err='ERR wrong number or type of
