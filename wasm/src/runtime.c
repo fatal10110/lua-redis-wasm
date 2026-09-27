@@ -834,6 +834,10 @@ LUALIB_API int luaopen_struct(lua_State *L);
 LUALIB_API int luaopen_cmsgpack(lua_State *L);
 LUALIB_API int luaopen_bit(lua_State *L);
 
+/* lua_cjson_checked.c: frees the buffers of cjson calls an error unwound and
+ * shrinks the encode buffers cjson keeps. Called after every script. */
+void cjson_release_buffers(void);
+
 static void load_redis_modules(lua_State *L) {
   luaLoadLib(L, "cjson", luaopen_cjson);
   luaLoadLib(L, "struct", luaopen_struct);
@@ -1266,6 +1270,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
   int status = lua_pcall(g_state, 0, 1, errfunc);
+  cjson_release_buffers();
   // Free the script's garbage before allocating the reply: a script that
   // filled the heap and caught the error would otherwise leave no room for it.
   // run_guarded acts on the result once the reply is built.
