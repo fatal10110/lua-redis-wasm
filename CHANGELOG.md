@@ -54,9 +54,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   encoder grows the Lua stack with `lua_checkstack` like Redis and caps nesting
   at 1000 levels, replying `ERR reached lua stack limit` instead (#35). Redis
   places that error at the too-deep element; here it replaces the whole reply.
-- A host reply nested deeper than 1000 levels now raises
+- The WASM decoder for host replies now grows the Lua stack with
+  `lua_checkstack` and caps nesting at 1000 levels: a deeper reply raises
   `ERR reached lua stack limit` from `redis.call`/`redis.pcall` instead of
-  overrunning the Lua stack (#50).
+  overrunning the Lua stack (#50). The JS reply encoder (`encodeReplyValue`) is
+  recursive, so a very deep host reply (about 3000 levels for arrays, less for
+  `{map=}` replies or under nested `pcall` frames) can still overflow the JS
+  stack before it reaches the decoder. See `docs/limits.md`.
 - Lua numbers outside the int64 range (including NaN and `±math.huge`) now
   convert to the integer reply `-9223372036854775808`, matching Redis on x86-64,
   instead of saturating (#46).
