@@ -8,6 +8,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # A hang in synchronous WASM code (e.g. a reply-encoding regression) must
+    # fail the job instead of running until the 6h default.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
