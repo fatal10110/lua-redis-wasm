@@ -20,6 +20,8 @@ function firstExisting(candidates: string[]): string {
 
 // The browser bundle is a build output (`npm run build:ts`). CI builds it before
 // the tests, so it must be there; locally the test is skipped if it is missing.
+// Tests do not rebuild it: after changing src/, run `npm run build:ts` again or
+// this test checks a stale bundle.
 const missing = !fs.existsSync(bundle);
 if (missing && process.env.CI) {
   throw new Error(`${bundle} not found: run \`npm run build:ts\` before the tests`);
@@ -27,7 +29,11 @@ if (missing && process.env.CI) {
 
 test(
   "browser bundle imports without a global Buffer and runs once one is installed",
-  { skip: missing && "dist/index.browser.mjs not built (npm run build:ts)" },
+  {
+    skip:
+      missing &&
+      "dist/index.browser.mjs not built: run `npm run build:ts` (and again after changing src/)"
+  },
   async () => {
     const wasmPath = firstExisting([
       path.resolve(process.cwd(), "dist/redis_lua.wasm"),
@@ -38,15 +44,21 @@ test(
       path.resolve(process.cwd(), "wasm/build/redis_lua.mjs")
     ]);
 
-    // A fresh process, so removing the global does not affect the test runner.
-    // The bundle is imported with no `Buffer` global, as in a browser; the
+    // A fresh process, so removing globals does not affect the test runner.
+    // The bundle is imported with no `Buffer`, `process` or `global`, as in a
+    // browser (so the glue also takes its non-Node branch); the `Buffer`
     // polyfill is installed only after the import, as a static import forces.
     const child = `
       import { readFile } from "node:fs/promises";
       const wasmBytes = new Uint8Array(await readFile(${JSON.stringify(wasmPath)}));
+      const log = console.log;
       delete globalThis.Buffer;
+      delete globalThis.process;
+      delete globalThis.global;
       const { LuaEngine } = await import(${JSON.stringify(pathToFileURL(bundle).href)});
-      if (typeof globalThis.Buffer !== "undefined") throw new Error("Buffer reappeared");
+      for (const name of ["Buffer", "process", "global"]) {
+        if (name in globalThis) throw new Error(name + " reappeared");
+      }
 
       globalThis.Buffer = (await import("node:buffer")).Buffer;
       const engine = await LuaEngine.create({
@@ -64,7 +76,7 @@ test(
         [Buffer.from("a\\x00b")]
       );
       const error = engine.eval("error('ERR boom', 0)");
-      process.stdout.write(JSON.stringify({
+      log(JSON.stringify({
         reply: reply.map((b) => b.toString("latin1")),
         error: { err: error.err.toString(), code: error.code.toString() }
       }));
