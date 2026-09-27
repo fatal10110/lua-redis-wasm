@@ -6,6 +6,67 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-27
+
+### Breaking changes
+
+Each item says what changed and what to do. Details are in the entries below.
+
+- **`EngineLimits.maxMemoryBytes` is gone** (#54). It was never enforced.
+  Remove it from your `limits`; TypeScript reports it as an unknown property.
+- **Limits must be non-negative integers.** `load()` / `LuaEngine.create()`
+  throw a `RangeError` for a negative, fractional, `NaN`, `Infinity` or
+  non-numeric limit (before, `0.5` silently meant "no limit"). Round or
+  validate the values you pass. Values above 2^32 - 1 are capped.
+- **Scripts get Redis 7 error tables by default** (#48). With no `profile`, and
+  with every profile except `redis-6.2`, `redis.call` (and `redis.log`,
+  `redis.setresp`, ...) raise an `{err=...}` table instead of a string, and an
+  `xpcall` handler receives that table. `pcall(redis.call, ...)` still returns
+  a string. To keep 1.x string errors, pass `profile: "redis-6.2"` or
+  `compat: { tableErrors: false }`.
+- **Error codes the host receives changed.** Write `-<code> <err>`, or
+  `-<err>` when `code` is missing, and don't rely on a string error's first
+  word being its code:
+  - An uncaught string error always has code `ERR` and its whole message as
+    `err` (#83): `error('MY boom', 0)` is now code `ERR`, `err` `MY boom` (was
+    code `MY`). In the `redis-6.2` model every script error is reported this
+    way, `redis.call` errors included (`WRONGTYPE ...` → code `ERR`).
+  - In the Redis 7 model, a table error whose `err` does not start with an
+    uppercase code has no `code` (#76): `error({err='boom'})` →
+    `{ err: "boom" }` (was code `ERR`), as Redis 7 sends `-boom`.
+  - An exception thrown by `redisCall` / `redisPcall` becomes `ERR <message>`
+    when its message has no uppercase code (was `<message>`). Throw
+    `new Error("WRONGTYPE ...")` or return `{ err }` to pick the code yourself.
+  - The fuel-limit kill is `ERR Script killed by fuel limit` with no
+    `user_script:N:` prefix (#14). Update any code that matches that text.
+- **`cjson.decode_array_with_array_mt` is removed** (#78). The vendored sources
+  moved from Redis 8.4 to Valkey 8.0.11, which does not have it, and a table
+  whose metatable has `__is_cjson_array` no longer encodes as a JSON array.
+  Scripts that need it must avoid it (Redis 7.x and Valkey never had it).
+- **A nested eval is refused.** Calling `eval` / `evalWithArgs` from inside a
+  host callback now replies `ERR nested eval is not supported: a script is
+  already running`, and `reset()` / `dispose()` throw there. Run the second
+  script after the first one returns, or on a second engine.
+- **Typed reply tables convert at any protocol level** (#29).
+  `{double=}`, `{map=}`, `{set=}`, `{big_number=}` and `{verbatim_string=}` in a
+  script's return value now reach the host as typed replies even without
+  `redis.setresp(3)` (they were empty arrays). A host serving RESP2 clients must
+  convert them itself (see the README).
+- **Scripts may see different values**, matching real Redis: `math.random`
+  uses Redis's generator (#45), so seeded sequences differ from 1.x; number
+  arguments to `redis.call` are formatted like Redis 7.4+ (`1e15` →
+  `1000000000000000`, #68); after `redis.setresp(3)` a null host reply is
+  `nil`, not `false` (#31); a returned function or userdata becomes `nil`
+  instead of failing the script (#66). Update tests that assert the old values.
+- **`eval` / `evalWithArgs` can throw.** A script or KEYS/ARGV too large for the
+  WASM heap throws a `RangeError` (the engine stays usable); after an exception
+  escapes the WASM module, every later call throws `LuaEngine is unusable: ...`
+  and you need a new engine (#39, #40). Wrap evaluations if you embed untrusted
+  scripts.
+- **WASM ABI version 3.** If you load your own `.wasm` / glue through
+  `wasmPath`, `wasmBytes` or `modulePath`, rebuild it from this release; 1.x
+  binaries are not compatible. The bundled files need no action.
+
 ### Added
 
 - `LuaEngine.create(options)` / `LuaEngine.createStandalone(options)` static
@@ -18,18 +79,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collected; later `eval` / `evalWithArgs` / `reset` throw. `dispose()` is
   idempotent; both are refused (throw) while a script is running, i.e. from a
   host callback (#43).
-
 - `redisCall`/`redisPcall` handlers receive a second `ctx: { source, line }`
   argument describing the caller (new WASM exports `current_call_source` /
   `current_call_line`), so hosts can build Redis 6.2's `@user_script: N:` prefix
   for `redis.pcall` errors (#28).
-
-- Dedicated **browser** build with no `node:*` imports, selected automatically via
-  the `browser` condition in `package.json` `exports`. Browser bundlers (Vite,
-  webpack, Rollup) now resolve the package without aliasing or stubbing `node:fs`,
-  `node:fs/promises`, `node:path`, `node:url`, or `node:crypto`. The Node build is
-  unchanged in behavior and selected via the `node` condition.
-
 - `reseedRandom` compat override: reseed `math.random` with 0 before every
   script. Set by the `redis-6.2` profile only (#45).
 - `compat.tableErrors` option (WASM compat flag `0x10`) selecting the Redis 7
@@ -48,27 +101,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps no reference to it (#43).
 - The WASM `reset` export also rebuilds a missing VM (after a failed build or
   `close_vm`) instead of returning -1 (#43).
-- The vendored C sources (Lua 5.1 with cjson/cmsgpack/struct/bit, `fpconv`,
-  `rand.c`) now come from Valkey 8.0.11 (BSD-3-Clause, `vendor/valkey` submodule)
-  instead of the Redis 8.4 tree (`vendor/redis`), whose newer files are licensed
-  under RSALv2/SSPLv1/AGPLv3. This removes the two such files the build used:
-  the `rand.h` and `solarisfixes.h` headers (included by `redis_math.c` and
-  `lua_cjson.c`), which now come from Valkey under BSD-3-Clause.
-  Valkey 8.0.11's Lua is the same code as Redis 8.4's
-  apart from `cjson.decode_array_with_array_mt` (see Removed): it carries the same
-  security fixes (CVE-2024-31449, CVE-2025-46817, CVE-2025-46818, CVE-2025-46819,
-  CVE-2025-49844) and the same string hashing, so table iteration order is
-  unchanged. `THIRD_PARTY_NOTICES.md` now covers the BSD-3-Clause code from
-  Valkey / Redis 7.2.4 (including the portions of `wasm/src` derived from it),
-  `strbuf.c`, `fpconv.c` and `fpconv_powers.h`.
-- WASM ABI version 2: the script error (`0x06`) payload carries a `flags` byte
-  after `line` (`0x01` engine error, `0x02` message from an error table), so
-  the TS layer no longer reads the error's kind from its text (#59, #76). See
-  `docs/abi.md`.
-- WASM ABI version 3: an engine error's script error payload carries its kind
-  and name in fields of their own, before the message, which is now the
-  Redis-worded error the script saw instead of `<kind>[:<name>]` (#87). See
-  `docs/abi.md`.
+- Redis 7 error model for the `redis-7.x`, `redis-8.0` and `valkey-*` profiles
+  and the default (#48): `redis.call` raises an `{err=...}` table instead of a
+  string (the same table `redis.pcall` returns, with
+  `ignore_error_stats_update=true`; a host error with no space in it gets the
+  `ERR` code and trailing CR/LF is trimmed, like Redis's `luaPushErrorBuff`), as
+  do `redis.log`, `redis.setresp` and the other `redis.*` errors, and the global
+  `pcall` returns the `err` string of a caught error table, like Redis's
+  `luaRedisPcall`. `pcall(redis.call, ...)` still yields a string; `xpcall`
+  handlers now receive the table. `redis-6.2` keeps string errors. The error the
+  host receives when a script aborts is unchanged, except that CR/LF around a
+  host error's message is now trimmed as in Redis (`"\r\nboom"` → `boom`, was
+  `"  boom"`).
 - In the Redis 7 error model (every profile but `redis-6.2`, see
   `compat.tableErrors`), an uncaught table error whose `err` has no uppercase
   error code is reported without a `code` instead of with `ERR`, since Redis 7
@@ -89,45 +133,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error code becomes an `ERR <message>` error reply (was `<message>`): it is a
   host failure, not a Redis reply, like Redis's `addReplyError`. A returned
   `{ err }` reply is still passed on as is.
-- WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
-  (`{0,0}` on success, otherwise the error message C raises as a Lua error), and
-  every `PtrLen`-returning export and import uses the struct-return pointer only.
-  The speculative non-sret plumbing is removed (`packPtrLen`/`unpackPtrLen`,
-  `getTempRet0`, arity detection); `WasmExports` / `HostImport` are typed
-  accordingly (#52).
-- The WASM module links with `-sABORTING_MALLOC=0`: an exhausted heap makes
-  `malloc` return 0 instead of aborting the module (#40).
-- The loader is split into `loader.ts` (Node: reads glue/`.wasm` from disk) and
-  `loader.browser.ts` (browser: `fetch`), over a shared platform-agnostic
-  `loader-core.ts`. The browser build aliases `./loader.js` to the browser loader,
-  so no Node builtin enters the browser graph.
-- SHA-1 (for EVALSHA digests) now uses a dependency-free synchronous implementation
-  (`sha1.ts`) instead of `node:crypto`, so the browser build needs no `crypto`
-  polyfill. Output is byte-for-byte identical to `crypto.createHash("sha1")`.
-- Build outputs renamed: `dist/index.node.{mjs,cjs}` (Node) and
-  `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
-  is unchanged; only internal file names moved.
-- `maxReplyBytes` and `maxArgBytes` are enforced only by the WASM runtime; the
-  duplicate checks in `LuaEngine` are gone (#53). KEYS/ARGV over `maxArgBytes`
-  are now copied into the heap before being rejected, so ones too large for the
-  heap throw `RangeError` rather than returning the limit error.
-- `load()` throws a `RangeError` for a limit that is not a non-negative integer
-  (negative, fractional, `NaN`, `Infinity`, non-numeric), and limits above
-  2^32 - 1 saturate instead of wrapping around in the WASM call.
-- The script's SHA1 is computed only when a script error is built, not on every
-  `eval` / `evalWithArgs` (#57).
-- Redis 7 error model for the `redis-7.x`, `redis-8.0` and `valkey-*` profiles
-  and the default (#48): `redis.call` raises an `{err=...}` table instead of a
-  string (the same table `redis.pcall` returns, with
-  `ignore_error_stats_update=true`; a host error with no space in it gets the
-  `ERR` code and trailing CR/LF is trimmed, like Redis's `luaPushErrorBuff`), as
-  do `redis.log`, `redis.setresp` and the other `redis.*` errors, and the global
-  `pcall` returns the `err` string of a caught error table, like Redis's
-  `luaRedisPcall`. `pcall(redis.call, ...)` still yields a string; `xpcall`
-  handlers now receive the table. `redis-6.2` keeps string errors. The error the
-  host receives when a script aborts is unchanged, except that CR/LF around a
-  host error's message is now trimmed as in Redis (`"\r\nboom"` → `boom`, was
-  `"  boom"`).
 - The fuel-limit kill is raised as `ERR Script killed by fuel limit` (code `ERR`,
   message `Script killed by fuel limit`) without a `user_script:N:` position
   prefix, and `redis.setresp` / `ERR empty reply from host` errors lose that
@@ -144,11 +149,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `redis-7.2`, and the Valkey profiles say `server.log() requires two arguments
   or more.`. With no profile the wording is unchanged. The wording is selected
   by two profile-only WASM compat flags, `0x20` and `0x40`.
+- `maxReplyBytes` and `maxArgBytes` are enforced only by the WASM runtime; the
+  duplicate checks in `LuaEngine` are gone (#53). KEYS/ARGV over `maxArgBytes`
+  are now copied into the heap before being rejected, so ones too large for the
+  heap throw `RangeError` rather than returning the limit error.
+- `load()` throws a `RangeError` for a limit that is not a non-negative integer
+  (negative, fractional, `NaN`, `Infinity`, non-numeric), and limits above
+  2^32 - 1 saturate instead of wrapping around in the WASM call.
+- The script's SHA1 is computed only when a script error is built, not on every
+  `eval` / `evalWithArgs` (#57).
+- The vendored C sources (Lua 5.1 with cjson/cmsgpack/struct/bit, `fpconv`,
+  `rand.c`) now come from Valkey 8.0.11 (BSD-3-Clause, `vendor/valkey` submodule)
+  instead of the Redis 8.4 tree (`vendor/redis`), whose newer files are licensed
+  under RSALv2/SSPLv1/AGPLv3. This removes the two such files the build used:
+  the `rand.h` and `solarisfixes.h` headers (included by `redis_math.c` and
+  `lua_cjson.c`), which now come from Valkey under BSD-3-Clause.
+  Valkey 8.0.11's Lua is the same code as Redis 8.4's
+  apart from `cjson.decode_array_with_array_mt` (see Removed): it carries the same
+  security fixes (CVE-2024-31449, CVE-2025-46817, CVE-2025-46818, CVE-2025-46819,
+  CVE-2025-49844) and the same string hashing, so table iteration order is
+  unchanged. `THIRD_PARTY_NOTICES.md` now covers the BSD-3-Clause code from
+  Valkey / Redis 7.2.4 (including the portions of `wasm/src` derived from it),
+  `strbuf.c`, `fpconv.c` and `fpconv_powers.h`.
+- WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
+  (`{0,0}` on success, otherwise the error message C raises as a Lua error), and
+  every `PtrLen`-returning export and import uses the struct-return pointer only.
+  The speculative non-sret plumbing is removed (`packPtrLen`/`unpackPtrLen`,
+  `getTempRet0`, arity detection); `WasmExports` / `HostImport` are typed
+  accordingly (#52).
+- WASM ABI version 2: the script error (`0x06`) payload carries a `flags` byte
+  after `line` (`0x01` engine error, `0x02` message from an error table), so
+  the TS layer no longer reads the error's kind from its text (#59, #76). See
+  `docs/abi.md`.
+- WASM ABI version 3: an engine error's script error payload carries its kind
+  and name in fields of their own, before the message, which is now the
+  Redis-worded error the script saw instead of `<kind>[:<name>]` (#87). See
+  `docs/abi.md`.
+- The WASM module links with `-sABORTING_MALLOC=0`: an exhausted heap makes
+  `malloc` return 0 instead of aborting the module (#40).
 
 ### Deprecated
 
 - `LuaWasmEngine`: now an alias of `LuaEngine` (its statics work unchanged and
-  return a `LuaEngine`), to be removed in the next major version. Use
+  return a `LuaEngine`), to be removed in a future major version. Use
   `LuaEngine.create()` / `LuaEngine.createStandalone()` (#55).
 
 ### Removed
@@ -166,6 +209,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   module loads, so a static `import { LuaEngine } from "lua-redis-wasm"` works
   and the `Buffer` polyfill can be installed afterwards, before the first call
   (#90).
+- After `redis.setresp(3)`, a null reply from the host reaches the script as
+  `nil` instead of `false`, and a null inside an array reply ends the Lua table
+  there, as in Redis 7.2/8.0 (RESP2 still gives `false`). A raised
+  `redis.call` error no longer leaks the reply buffer (#30).
+- `{ok=}` / `{err=}` reply strings are sanitized like Redis: cut at the first
+  NUL, and CR/LF mapped to spaces (`{err=}` also has trailing CR/LF trimmed).
+  Script-aborting errors get the same treatment so hosts can write them to RESP
+  as is (#33).
+- Typed reply tables (`{double=}`, `{big_number=}`, `{map=}`, `{set=}`,
+  `{verbatim_string=}`) in a script's return value now convert at any protocol
+  level, matching real Redis 7.x/8.x. Previously they encoded as an empty array
+  unless the script called `redis.setresp(3)`. Hosts serving RESP2 clients must
+  convert these typed replies themselves (see README). Typed-table lookups now
+  use raw access and exact type checks like Redis (`{double='1.5'}`, `{err=42}`
+  and `{ok=1}` are no longer converted, `__index` metamethods are ignored),
+  `\r`/`\n` in `big_number` are replaced with spaces, and `verbatim_string`
+  formats are truncated or space-padded to exactly 3 bytes (#29).
 - `redis.status_reply` checks its arguments like Redis: anything but exactly one
   string argument returns (no longer raises `bad argument #1`) the error table
   `redis.error_reply` returns for a bad call, `{err='ERR wrong number or type of
@@ -212,6 +272,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to luaProtectedTableError must be a string or number` instead of a
   `global-read` error named `?`, and `meta.name` keeps a global's name past a
   NUL byte (#87).
+- `error({err='MY custom'})` and `error(redis.error_reply('boom'))` report the
+  table's `err` field (`MY custom`, `ERR boom`) instead of
+  `ERR script execution failed`, like Redis's `luaExtractErrorInformation`
+  (`ERR unknown error` when `err` is not a string); other non-string error values
+  are reported as Lua's `tostring` renders them (`nil`, `true`, ...) (#37). This
+  is Redis 7.0+ behavior, applied to every profile (Redis 6.2 fails on a table
+  error).
+- The fuel limit can no longer be bypassed with `pcall` (#38): like Redis after
+  `SCRIPT KILL`, a spent budget switches the hook to fire on every instruction
+  and line, so the kill is raised again after any `pcall` / `xpcall` catches it
+  until it escapes the script. No `xpcall` message handler runs for the kill, and
+  a kill inside a coroutine stops the whole script even if `coroutine.resume`
+  returned it as a value. The counting hook is restored before the next
+  evaluation. Coroutines that finish within 1000 instructions are still not
+  charged (#75).
 - `cjson.encode` of a value that expands into a document too large for the heap
   (e.g. a table holding the same subtable many times) raises `not enough memory`
   instead of aborting the module and leaving the engine unusable. cjson's string
@@ -236,16 +311,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same subtable many times) fails straight away with
   `ERR reply exceeds configured limit` instead of first exhausting the heap
   (#69).
-- Typed reply tables (`{double=}`, `{big_number=}`, `{map=}`, `{set=}`,
-  `{verbatim_string=}`) in a script's return value now convert at any protocol
-  level, matching real Redis 7.x/8.x. Previously they encoded as an empty array
-  unless the script called `redis.setresp(3)`. Hosts serving RESP2 clients must
-  convert these typed replies themselves (see README). Typed-table lookups now
-  use raw access and exact type checks like Redis (`{double='1.5'}`, `{err=42}`
-  and `{ok=1}` are no longer converted, `__index` metamethods are ignored),
-  `\r`/`\n` in `big_number` are replaced with spaces, and `verbatim_string`
-  formats are truncated or space-padded to exactly 3 bytes.
-- `load()` (and `LuaWasmEngine.create`) now rejects with
+- `load()` (and `LuaEngine.create`) now rejects with
   `Failed to instantiate redis_lua.wasm: ...` when WebAssembly instantiation fails
   (truncated/corrupt `.wasm`, unresolvable import) instead of hanging forever (#44).
 - The WASM build links with undefined-symbol errors enabled: host imports are
@@ -285,26 +351,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out of memory. `cmsgpack.pack` still aborts when it runs out of heap (as with
   Redis's aborting allocator), which marks the engine unusable, instead of
   writing through a NULL buffer.
-- Returning a function, coroutine or userdata (e.g. `cjson.null`) now replies
-  nil in its place, at any depth (array elements, `{map=}` keys/values, `{set=}`
-  members), like Redis, instead of failing the whole script with
-  `ERR unsupported Lua return type`. That error is gone; the only remaining
-  reply encoding failure (out of memory) reports `ERR reply encoding failed`
-  (#66).
-- Number arguments to `redis.call`/`redis.pcall` are formatted like Redis 7.4+
-  instead of with Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as
-  integers (`1e15` → `1000000000000000`), others in the shortest round-trip form
-  via Redis's `fpconv_dtoa` (`0.1+0.2` → `0.30000000000000004`). The same for
-  every compat profile; the `redis-7.2` profile thus matches Redis 7.2.5+
-  (7.2.0–7.2.4 sent `1e15` as `1e+15`) (#68).
-- `math.random` / `math.randomseed` now use Redis's PRNG (`redisLrand48` /
-  `redisSrand48` from `vendor/redis/src/rand.c`) instead of libc
-  `rand()`/`srand()`, so they return the same numbers as a real server (#45).
-  As in Redis 7.0+ and Valkey, one sequence runs across scripts for the life of
-  the engine (a new engine's first `math.random(1,1000000)` is `396465`, like a
-  freshly started server), and a `math.randomseed` carries over to later
-  scripts. The `redis-6.2` profile reseeds with 0 before every script, like
-  Redis 6.2 (`170829` every time).
 - Running out of memory outside the script body no longer aborts the module
   through Lua's panic handler (#41). KEYS/ARGV setup runs in protected mode (a
   huge ARGV replies `ERR not enough memory to set KEYS/ARGV`), as do VM setup
@@ -319,21 +365,109 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is running now replies `ERR nested eval is not supported: a script is
   already running` instead of running on (and possibly closing) the VM under
   the outer script.
-- `error({err='MY custom'})` and `error(redis.error_reply('boom'))` report the
-  table's `err` field (`MY custom`, `ERR boom`) instead of
-  `ERR script execution failed`, like Redis's `luaExtractErrorInformation`
-  (`ERR unknown error` when `err` is not a string); other non-string error values
-  are reported as Lua's `tostring` renders them (`nil`, `true`, ...) (#37). This
-  is Redis 7.0+ behavior, applied to every profile (Redis 6.2 fails on a table
-  error).
-- The fuel limit can no longer be bypassed with `pcall` (#38): like Redis after
-  `SCRIPT KILL`, a spent budget switches the hook to fire on every instruction
-  and line, so the kill is raised again after any `pcall` / `xpcall` catches it
-  until it escapes the script. No `xpcall` message handler runs for the kill, and
-  a kill inside a coroutine stops the whole script even if `coroutine.resume`
-  returned it as a value. The counting hook is restored before the next
-  evaluation. Coroutines that finish within 1000 instructions are still not
-  charged (#75).
+- Returning a function, coroutine or userdata (e.g. `cjson.null`) now replies
+  nil in its place, at any depth (array elements, `{map=}` keys/values, `{set=}`
+  members), like Redis, instead of failing the whole script with
+  `ERR unsupported Lua return type`. That error is gone; the only remaining
+  reply encoding failure (out of memory) reports `ERR reply encoding failed`
+  (#66).
+- Number arguments to `redis.call`/`redis.pcall` are formatted like Redis 7.4+
+  instead of with Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as
+  integers (`1e15` → `1000000000000000`), others in the shortest round-trip form
+  via Redis's `fpconv_dtoa` (`0.1+0.2` → `0.30000000000000004`). The same for
+  every compat profile; the `redis-7.2` profile thus matches Redis 7.2.5+
+  (7.2.0–7.2.4 sent `1e15` as `1e+15`) (#68).
+- `math.random` / `math.randomseed` now use Redis's PRNG (the rand48 generator
+  from `rand.c`, `redisLrand48` / `redisSrand48` in Redis, `serverLrand48` /
+  `serverSrand48` in the vendored Valkey sources) instead of libc
+  `rand()`/`srand()`, so they return the same numbers as a real server (#45).
+  As in Redis 7.0+ and Valkey, one sequence runs across scripts for the life of
+  the engine (a new engine's first `math.random(1,1000000)` is `396465`, like a
+  freshly started server), and a `math.randomseed` carries over to later
+  scripts. The `redis-6.2` profile reseeds with 0 before every script, like
+  Redis 6.2 (`170829` every time).
+
+## [1.5.0] - 2026-06-30
+
+### Added
+
+- Redis/Valkey compatibility profiles: `load({ profile, compat })` (and the
+  engine factories) take a `profile` (`redis-6.2`, `redis-7.0`, `redis-7.2`,
+  `redis-7.4`, `redis-8.0`, `valkey-8.0`, `valkey-9.0`) selecting the Lua
+  sandbox behaviors that differ across versions: the `print` global (Redis 6.2
+  only), the sandboxed `os` library (Redis 7.4+ / Valkey 8.0+) and the `server`
+  alias of `redis` (Valkey 8.0+). `compat` overrides single flags
+  (`print`, `os`, `serverAlias`). With no profile the behavior is unchanged
+  (≈ `valkey-8.0`). New WASM export `set_compat` (#25).
+
+## [1.4.1] - 2026-06-30
+
+### Added
+
+- `redisProps` option: host-injected `redis.*` constants (`{ value }`) and stub
+  functions (`{ returns }`), such as `REDIS_VERSION` or `replicate_commands`,
+  applied at VM init/reset before the globals are locked. `server` is created
+  as an alias of `redis` (#12).
+- RESP3 in `redis.setresp(3)`: booleans, doubles, maps, sets, big numbers and
+  verbatim strings, in script returns and host replies (`ReplyValue` gained the
+  matching variants). Unsupported protocol versions are rejected (#22).
+- Optional `RedisHost.onSetResp(version)` hook, called when a script switches
+  protocol with `redis.setresp()`, so the host can match the reply shapes it
+  returns (#24).
+- Structured error details on script-aborting errors: an explicit `code` (a
+  propagated command code such as `WRONGTYPE`, otherwise `ERR`) and `meta`
+  (`{ kind, name, line, sha }`), with `kind` set for errors the engine raises
+  itself (`global-read`, `command-arg-type`) so the host picks the wording (#5).
+
+### Changed
+
+- The Lua sandbox follows Redis's globals protection: reading a nonexistent
+  global raises an error, and the globals are read-only (writing one raises
+  `Attempt to modify a readonly table`). `setfenv` / `getfenv` are removed (#5).
+- The allowed builtins mirror Redis's allow lists: `loadstring`, `load`,
+  `collectgarbage`, `gcinfo`, `coroutine` and `os` (sandboxed to `os.clock`) are
+  available again; `print`, `dofile`, `loadfile` and the `io`, `debug` and
+  `package` libraries are not (#16).
+- Script return values convert like Redis: a script without `return` replies
+  nil (was `OK`), Lua numbers are truncated to integers (`return 3.7` → `3`),
+  a table with both `ok` and `err` is an error, arrays stop at the first nil,
+  and `redis.call` / `redis.pcall` reject arguments that are not strings or
+  numbers. A null host reply reaches the script as `false`, and
+  `redis.error_reply` prepends `ERR ` only when the message has no code (#5).
+- The Lua 5.1 sources are vendored from the Redis tree as a git submodule
+  (`vendor/redis/deps/lua`).
+
+### Fixed
+
+- A script with no explicit `return` replied with an empty array, because
+  opening the base library leaked a table onto the Lua stack (#5).
+- Command errors propagated out of `redis.call` report the script line that
+  issued the call instead of line 1, like Redis's error handler (#13).
+- `math.random` is deterministic: every new or reset VM starts from seed 0 and
+  the sequence advances across scripts, as in Redis (#21).
+
+## [1.4.0] - 2026-06-28
+
+### Added
+
+- Dedicated **browser** build with no `node:*` imports, selected automatically via
+  the `browser` condition in `package.json` `exports`. Browser bundlers (Vite,
+  webpack, Rollup) now resolve the package without aliasing or stubbing `node:fs`,
+  `node:fs/promises`, `node:path`, `node:url`, or `node:crypto`. The Node build is
+  unchanged in behavior and selected via the `node` condition.
+
+### Changed
+
+- The loader is split into `loader.ts` (Node: reads glue/`.wasm` from disk) and
+  `loader.browser.ts` (browser: `fetch`), over a shared platform-agnostic
+  `loader-core.ts`. The browser build aliases `./loader.js` to the browser loader,
+  so no Node builtin enters the browser graph.
+- SHA-1 (for EVALSHA digests) now uses a dependency-free synchronous implementation
+  (`sha1.ts`) instead of `node:crypto`, so the browser build needs no `crypto`
+  polyfill. Output is byte-for-byte identical to `crypto.createHash("sha1")`.
+- Build outputs renamed: `dist/index.node.{mjs,cjs}` (Node) and
+  `dist/index.browser.mjs` (browser). The package entry (`import "lua-redis-wasm"`)
+  is unchanged; only internal file names moved.
 
 ## [1.3.0] - 2026-06-08
 
@@ -368,5 +502,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `redis.pcall` / `redis.log` host integration, `cjson` / `cmsgpack` / `struct` / `bit`
   modules, resource limits, and binary-safe replies.
 
+[Unreleased]: https://github.com/fatal10110/lua-redis-wasm/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.5.0...v2.0.0
+[1.5.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.4.1...v1.5.0
+[1.4.1]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/fatal10110/lua-redis-wasm/releases/tag/v1.2.2
