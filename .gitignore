@@ -9,6 +9,9 @@ dist/
 wasm/build/tests/
 wasm/build/redis_lua.wasm
 wasm/build/redis_lua.mjs
+wasm/build/redis_lua.debug.wasm
+wasm/build/redis_lua.debug.mjs
+wasm/build/generated/
 dist/redis_lua.wasm
 dist/redis_lua.mjs
 
