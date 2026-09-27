@@ -15,9 +15,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [docs/host-interface.md](docs/host-interface.md#script-load-and-compile).
 - The `ReplyError` type (`{ err, code?, meta? }`), which `compile` returns.
 - **WASM ABI version 4**: the `compile` export and the `SCRIPT_ERROR_COMPILE`
-  (`0x04`) script error flag. A custom `.wasm` built from an earlier release
-  still runs scripts, but `compile()` throws with it; rebuild it from this
-  release. The bundled files need no action.
+  (`0x04`) script error flag. A custom `.wasm` built from 2.0.0 (ABI 3) still
+  runs scripts, but `compile()` throws with it; rebuild it from this release.
+  The bundled files need no action.
+
+### Changed
+
+- **`meta.kind` has a new value, `compile`, whose `err` is not the kind**
+  (#94). For the engine kinds (`global-read`, `command-arg-type`) `err` is the
+  bare kind, which the host replaces with Redis's wording; for `compile`, `err`
+  is Lua's message, which Redis keeps (`Error compiling script (new
+  function): <err>`). A host that maps every `meta.kind` to wording
+  (`WORDING[meta.kind] ?? meta.kind`) must check for `compile` first, or it
+  sends `compile` instead of the syntax error it used to send.
 
 ### Fixed
 
@@ -30,7 +40,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text (`error("user_script:1: ...", 0)`) is not flagged. Running out of
   memory while compiling a very large script is a compile error too, as in
   Redis.
-
 - **An uncaught string error keeps a leading `ERR`** (#93).
   `error('ERR x', 0)` now reaches the host as `{ err: "ERR x", code: "ERR" }`
   (was `err: "x"`), so the host writes `-ERR ERR x` like Redis 7.0+ and

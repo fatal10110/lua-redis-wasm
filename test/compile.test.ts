@@ -145,10 +145,16 @@ test("compile(): the script does not run and the Lua VM is left as it was", asyn
   assert.deepEqual(engine.eval("return {rawget(_G, 'x'), rawget(_G, 'y')}"), []);
   assert.deepEqual(engine.eval("return cjson.encode({{1}})"), Buffer.from("[[1]]"));
   assert.match(asError(engine.eval("while true do end")).err.toString(), /Script killed by fuel limit/);
-  // Many compiles leave nothing behind on the Lua stack.
+  // Many compiles leave nothing behind on the Lua stack: a compiled function
+  // or message left there would still be referenced when this eval collects
+  // (run_script only clears the stack when it returns).
+  const LUA_KB = "collectgarbage('collect') return collectgarbage('count')";
+  const before = engine.eval(LUA_KB) as number;
   for (let i = 0; i < 1000; i++) {
     engine.compile(i % 2 ? `return ${i}` : SYNTAX);
   }
+  const after = engine.eval(LUA_KB) as number;
+  assert.ok(after - before < 8, `Lua memory grew by ${after - before} KB over 1000 compiles`);
   assert.equal(engine.eval("return 7"), 7);
   assert.deepEqual(engine.evalWithArgs("return {KEYS[1], ARGV[1]}", ["k"], ["a"]), [Buffer.from("k"), Buffer.from("a")]);
 });
@@ -240,6 +246,7 @@ test("compile(): a WASM binary without the compile export is reported", async ()
   const real = exports._compile;
   delete exports._compile;
   assert.throws(() => engine.compile("return 1"), /not supported by this WASM binary/);
+  assert.equal(engine.eval("return 1"), 1);
   exports._compile = real;
   assert.equal(engine.compile("return 1"), null);
 });

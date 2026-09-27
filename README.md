@@ -125,27 +125,6 @@ engine.evalWithArgs(
 );
 ```
 
-### Check a script without running it
-
-`engine.compile(script)` only compiles the script, as Redis does for
-`SCRIPT LOAD`. It returns `null` when the script is valid Lua, or the same
-error reply `eval` would give. Nothing runs: no `redis.call`, no globals, no
-fuel spent.
-
-```typescript
-engine.compile("return 1"); // null
-engine.compile("return +");
-// {
-//   err: Buffer.from("user_script:1: unexpected symbol near '+'"),
-//   code: Buffer.from("ERR"),
-//   meta: { kind: "compile", line: 1, sha: "..." },
-// }
-```
-
-Redis replies `-ERR Error compiling script (new function): <err>` for a script
-that does not compile, both to `SCRIPT LOAD` and `EVAL`; see
-[Handle errors](#handle-errors).
-
 ### Connect `redis.call` to your data
 
 The `host` object you pass to `LuaEngine.create` is how scripts reach your
@@ -234,6 +213,27 @@ are Redis 7 `{err=...}` tables by default; the `redis-6.2`
 [profile](#pick-a-redisvalkey-compatibility-profile) uses plain strings.
 
 Details: [docs/errors.md](docs/errors.md).
+
+### Check a script without running it
+
+`engine.compile(script)` only compiles the script, as Redis does for
+`SCRIPT LOAD`. It returns `null` when the script is valid Lua, or the same
+error reply `eval` would give. Nothing runs: no `redis.call`, no globals, no
+fuel spent.
+
+```typescript
+engine.compile("return 1"); // null
+engine.compile("return +");
+// {
+//   err: Buffer.from("user_script:1: unexpected symbol near '+'"),
+//   code: Buffer.from("ERR"),
+//   meta: { kind: "compile", line: 1, sha: "..." },
+// }
+```
+
+Redis replies `-ERR Error compiling script (new function): <err>` for a script
+that does not compile, both to `SCRIPT LOAD` and `EVAL` (see above).
+Details: [docs/host-interface.md](docs/host-interface.md#script-load-and-compile).
 
 ### Limit script runtime and size
 

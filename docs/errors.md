@@ -121,7 +121,8 @@ engine.eval("local a = 1\nreturn +");
 ```
 
 - `err` is Lua's message, `user_script:<line>: ...`, and `code` is `ERR`, in
-  every profile. `meta.line` is the line from that message.
+  every profile. `meta.line` is the line from that message (1 when the
+  message has no `user_script:N:` prefix, as for `not enough memory`).
 - Redis (6.2 to 8.x, Valkey 8.0 and 9.0) replies
   `-ERR Error compiling script (new function): <err>` to `EVAL` and
   `SCRIPT LOAD` alike, with no `script: <sha>, on @user_script:<line>.` suffix
