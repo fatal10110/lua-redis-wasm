@@ -34,8 +34,8 @@ Application → Public API (engine.ts) → Loader (loader.ts) → Emscripten Glu
 
 ### Layer Responsibilities
 
-- **src/engine.ts** - Core API: `LuaWasmEngine` (convenience), `LuaWasmModule` (factory), `LuaEngine` (evaluation)
-- **src/loader.ts** - WASM module loading, host import injection
+- **src/engine.ts** - Core API: `LuaEngine` (evaluation, `reset()`/`dispose()`, static `create`/`createStandalone` convenience factories), `LuaWasmModule` (factory), `LuaWasmEngine` (deprecated alias of `LuaEngine`)
+- **src/loader.ts** / **src/loader.browser.ts** / **src/loader-core.ts** - WASM module loading (compiled module cached per process), host import injection
 - **src/codec.ts** - Binary encoding/decoding for ABI (reply values, argument arrays)
 - **src/helpers.ts** - WASM memory operations, ABI helpers, SHA1
 - **src/types.ts** - TypeScript types (`ReplyValue`, `RedisHost`, `EngineLimits`)
@@ -51,8 +51,13 @@ const engine = module.create(host);
 engine.eval(script);
 
 // Convenience API (simpler)
-const engine = await LuaWasmEngine.create({ host, limits });
+const engine = await LuaEngine.create({ host, limits });
 engine.eval(script);
+
+engine.reset();   // fresh Lua VM, same limits/compat/props/host
+engine.dispose(); // close the VM and drop the WASM instance
+
+// LuaWasmEngine is a deprecated alias of LuaEngine (removed in the next major)
 ```
 
 ### Binary Protocol (ABI)
@@ -75,7 +80,8 @@ type RedisHost = {
 
 ## Key Patterns
 
-- **Module is one-time use**: After `create()` or `createStandalone()`, the module cannot create another engine
+- **Module is one-time use**: After `create()` or `createStandalone()`, the module cannot create another engine (it hands its instance to the engine); the compiled `WebAssembly.Module` is cached, so another `load()` only instantiates
+- **Lifecycle**: `reset()`/`dispose()` are refused while a script runs (from a host callback); after `dispose()` every eval/reset throws
 - **Binary-safe throughout**: All data flows as Buffers, never strings (except intentional UTF-8 for commands)
 - **sret ABI**: `PtrLen`-returning exports/imports take a leading struct-return pointer; the engine writes/reads the 8-byte result there
 - **Host imports never throw**: each import catches everything and reports failure via its return value, which C raises as a Lua error; an exception that still escapes WASM marks the engine unusable

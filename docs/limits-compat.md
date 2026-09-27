@@ -14,7 +14,7 @@ Limits are optional and all enforced by the WASM runtime (see the README's
 Example:
 
 ```js
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host,
   limits: {
     maxFuel: 10_000_000,

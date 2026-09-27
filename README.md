@@ -34,9 +34,9 @@ npm install lua-redis-wasm
 ## Quick Start
 
 ```typescript
-import { LuaWasmEngine } from "lua-redis-wasm";
+import { LuaEngine } from "lua-redis-wasm";
 
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host: {
     redisCall(args) {
       const cmd = args[0].toString();
@@ -62,16 +62,19 @@ const data = engine.evalWithArgs(
   [Buffer.from("user:1")],
   [Buffer.from("hello")],
 );
+
+// Release the engine's WASM instance when done
+engine.dispose();
 ```
 
 ## API
 
-### LuaWasmEngine.create(options)
+### LuaEngine.create(options)
 
 Creates a new engine instance with host integration.
 
 ```typescript
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host: RedisHost,         // Required: host callbacks
   limits?: EngineLimits,   // Optional: resource limits
   wasmPath?: string,       // Optional: custom WASM file path
@@ -80,12 +83,12 @@ const engine = await LuaWasmEngine.create({
 });
 ```
 
-### LuaWasmEngine.createStandalone(options)
+### LuaEngine.createStandalone(options)
 
 Creates an engine without host integration. `redis.call` and `redis.pcall` return errors.
 
 ```typescript
-const engine = await LuaWasmEngine.createStandalone({});
+const engine = await LuaEngine.createStandalone({});
 engine.eval("return math.sqrt(16)"); // Works
 engine.eval("return redis.call('PING')"); // Returns error
 ```
@@ -95,7 +98,7 @@ engine.eval("return redis.call('PING')"); // Returns error
 The package ships no version-specific `redis.*` helpers by default. Supply them via `redisProps`:
 
 ```typescript
-const engine = await LuaWasmEngine.create({
+const engine = await LuaEngine.create({
   host,
   redisProps: {
     REDIS_VERSION:      { value: "7.4.0" },
@@ -132,21 +135,65 @@ engine.evalWithArgs(
 );
 ```
 
-### LuaWasmEngine (Convenience)
+### engine.reset()
 
-Alternative API that combines loading and creation.
-
-#### LuaWasmEngine.create(options)
-
-```typescript
-const engine = await LuaWasmEngine.create({ host: myHost });
-```
-
-#### LuaWasmEngine.createStandalone(options)
+Replaces the Lua VM with a fresh one, as if the engine had just been created:
+whatever earlier scripts left in the VM (e.g. `cjson.encode_max_depth(...)`
+settings) is discarded. Limits, `profile`/`compat`, `redisProps` and the host
+callbacks are kept, and so is the `math.random` generator state (process-wide in
+Redis too, see [docs/compat.md](docs/compat.md)).
 
 ```typescript
-const engine = await LuaWasmEngine.createStandalone();
+engine.reset();
 ```
+
+`reset()` throws when called while a script is running (i.e. from one of the
+engine's host callbacks), after `dispose()`, or on an unusable engine. If the new
+VM cannot be built (out of memory) it throws and every `eval` returns
+`ERR Lua VM not initialized` until a later `reset()` succeeds.
+
+### engine.dispose()
+
+Closes the Lua VM and drops the engine's WASM instance (with its 64 MB linear
+memory) and host callbacks so they can be garbage collected. Afterwards `eval`,
+`evalWithArgs` and `reset` throw `LuaEngine has been disposed`; calling `dispose()`
+again does nothing. It throws when called while a script is running (from one of
+the engine's host callbacks) and leaves the engine untouched; dispose it once the
+evaluation has returned.
+
+```typescript
+const engine = await LuaEngine.createStandalone();
+try {
+  engine.eval(script);
+} finally {
+  engine.dispose();
+}
+```
+
+### load(options) and LuaWasmModule
+
+`LuaEngine.create(options)` is `load(options)` followed by
+`module.create(options.host)` (and `createStandalone` by
+`module.createStandalone()`). Use the two steps to separate the async load from
+the synchronous engine creation:
+
+```typescript
+import { load } from "lua-redis-wasm";
+
+const module = await load({ limits: { maxFuel: 10_000_000 } });
+const engine = module.create(myHost); // or module.createStandalone()
+```
+
+A `LuaWasmModule` creates exactly one engine. The compiled WASM module is cached
+for the process (keyed by the resolved `wasmPath`/URL, or by the `wasmBytes`
+array), so only the first `load()` reads and compiles the binary; every engine
+still gets its own instance and memory, and engines share no state.
+
+### LuaWasmEngine (deprecated)
+
+`LuaWasmEngine` is a deprecated alias of `LuaEngine`, kept until the next major
+version: `LuaWasmEngine.create(...)` / `LuaWasmEngine.createStandalone(...)` still
+work and return a `LuaEngine`. Replace `LuaWasmEngine` with `LuaEngine`.
 
 ## Host Interface
 

@@ -8,6 +8,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `LuaEngine.create(options)` / `LuaEngine.createStandalone(options)` static
+  factories (plus `LuaEngine.defaultWasmPath()` / `defaultModulePath()`),
+  replacing `LuaWasmEngine` (#55).
+- `LuaEngine.reset()`: replace the Lua VM with a fresh one, keeping limits,
+  compat profile, `redisProps` and host callbacks (the existing WASM `reset`
+  export). `LuaEngine.dispose()`: close the Lua VM (new WASM export `close_vm`)
+  and drop the engine's WASM instance and host callbacks so they can be garbage
+  collected; later `eval` / `evalWithArgs` / `reset` throw. `dispose()` is
+  idempotent; both are refused (throw) while a script is running, i.e. from a
+  host callback (#43).
+
 - `redisCall`/`redisPcall` handlers receive a second `ctx: { source, line }`
   argument describing the caller (new WASM exports `current_call_source` /
   `current_call_line`), so hosts can build Redis 6.2's `@user_script: N:` prefix
@@ -26,6 +37,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The compiled `WebAssembly.Module` is cached per process, keyed by the
+  resolved `wasmPath` / URL or by the `wasmBytes` array: only the first `load()`
+  reads and compiles the binary, later ones only instantiate it (each engine
+  still gets its own instance and memory). A failed compilation is not cached.
+  In Node, `wasmPath` may also be a `file://` URL (#43).
+- A `LuaWasmModule` hands its WASM instance over to the engine it creates and
+  keeps no reference to it (#43).
+- The WASM `reset` export also rebuilds a missing VM (after a failed build or
+  `close_vm`) instead of returning -1 (#43).
 - The vendored C sources (Lua 5.1 with cjson/cmsgpack/struct/bit, `fpconv`,
   `rand.c`) now come from Valkey 8.0.11 (BSD-3-Clause, `vendor/valkey` submodule)
   instead of the Redis 8.4 tree (`vendor/redis`), whose newer files are licensed
@@ -94,6 +114,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `redis-7.2`, and the Valkey profiles say `server.log() requires two arguments
   or more.`. With no profile the wording is unchanged. The wording is selected
   by two profile-only WASM compat flags, `0x20` and `0x40`.
+
+### Deprecated
+
+- `LuaWasmEngine`: now an alias of `LuaEngine` (its statics work unchanged and
+  return a `LuaEngine`), to be removed in the next major version. Use
+  `LuaEngine.create()` / `LuaEngine.createStandalone()` (#55).
 
 ### Removed
 
