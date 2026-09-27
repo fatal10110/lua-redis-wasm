@@ -54,6 +54,7 @@ import type {
   ReplyErrorMeta,
   RedisHost,
   RedisCallHandler,
+  RedisCallContext,
   RedisLogHandler,
   EngineOptions,
   StandaloneOptions,
@@ -545,8 +546,8 @@ export class LuaWasmModule {
    *     if (cmd === "PING") return { ok: Buffer.from("PONG") };
    *     throw new Error("ERR unknown command");
    *   },
-   *   redisPcall(args) {
-   *     try { return this.redisCall(args); }
+   *   redisPcall(args, ctx) {
+   *     try { return this.redisCall(args, ctx); }
    *     catch (e) { return { err: Buffer.from(e.message) }; }
    *   },
    *   log(level, msg) { console.log(msg.toString()); }
@@ -639,13 +640,34 @@ export class LuaWasmModule {
     const exports = this.exports;
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
+      // source is copied lazily: for loadstring code it is the whole chunk, and
+      // most handlers never read it. The pointer is only valid during the
+      // handler, so a first read after it returns throws instead of reading
+      // memory the chunk may no longer own.
+      const sourcePtr = exports._current_call_source?.() ?? 0;
+      let source: Buffer | undefined;
+      let done = false;
+      const ctx: RedisCallContext = {
+        line: exports._current_call_line?.() ?? 0,
+        get source() {
+          if (source === undefined && done) {
+            throw new Error("ctx.source read after the redis.call handler returned");
+          }
+          const heap = exports.HEAPU8;
+          return (source ??= sourcePtr
+            ? readBytes(heap, sourcePtr, heap.indexOf(0, sourcePtr) - sourcePtr)
+            : Buffer.alloc(0));
+        },
+      };
       try {
         return isPcall
-          ? host.redisPcall.call(host, args)
-          : host.redisCall.call(host, args);
+          ? host.redisPcall.call(host, args, ctx)
+          : host.redisCall.call(host, args, ctx);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { err: Buffer.from(message, "utf8") };
+      } finally {
+        done = true;
       }
     };
 

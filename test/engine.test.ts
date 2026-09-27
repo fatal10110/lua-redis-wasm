@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { load, LuaWasmModule, LuaEngine } from "../src/index.js";
 import { LuaWasmEngine, makePropsHandler } from "../src/engine.js";
 import { encodeRedisProps } from "../src/codec.js";
-import type { ReplyValue, RedisHost } from "../src/types.js";
+import type { ReplyValue, RedisHost, RedisCallContext } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
 
 // Helper to resolve WASM path (checks dist/ first, then wasm/build/)
@@ -1560,4 +1560,60 @@ test("compat: default (no profile) keeps historical behavior", async () => {
   assert.equal(engine.eval("return type(os)").toString(), "table");
   assert.equal(engine.eval("return server == redis"), 1);
   assertGlobalAbsent(engine, "print");
+});
+
+test("redis.call/pcall: handler receives the caller's source and line", async () => {
+  const calls: Array<[string, string | undefined, number | undefined]> = [];
+  const record = (kind: string) => (args: Buffer[], ctx?: RedisCallContext) => {
+    calls.push([`${kind} ${args[0].toString()}`, ctx?.source.toString("latin1"), ctx?.line]);
+    return { err: Buffer.from("ERR nope") };
+  };
+  const module = await load();
+  const engine = module.create(createTestHost({ redisCall: record("call"), redisPcall: record("pcall") }));
+  engine.eval(
+    [
+      "local x = 1",
+      "redis.pcall('a')",
+      "local function f()",
+      "  return redis.pcall('b')",
+      "end",
+      "f()",
+      "pcall(function()",
+      "  redis.call('c')",
+      "end)",
+      "pcall(redis.pcall, 'd')",
+      "loadstring(\"return redis.pcall('e')\")()",
+      "loadstring(\"return redis.pcall('\\255')\")()"
+    ].join("\n")
+  );
+  // Stack level 1 as-is, like Redis 6.2's luaPushError: no C-frame skipping.
+  assert.deepEqual(calls, [
+    ["pcall a", "@user_script", 2],
+    ["pcall b", "@user_script", 4],
+    ["call c", "@user_script", 8],
+    ["pcall d", "=[C]", -1],
+    ["pcall e", "return redis.pcall('e')", 1],
+    ["pcall \ufffd", "return redis.pcall('\u00ff')", 1] // source is raw chunk text
+  ]);
+});
+
+test("redis.call: ctx.source read after the handler returned throws", async () => {
+  let kept: RedisCallContext | undefined;
+  let early: Buffer | undefined;
+  const module = await load();
+  const engine = module.create(
+    createTestHost({
+      redisCall: (_args, ctx) => {
+        kept = ctx;
+        return null;
+      },
+      redisPcall: (_args, ctx) => {
+        early = ctx?.source; // materialized inside the handler: stays readable
+        return null;
+      }
+    })
+  );
+  engine.eval("redis.call('a') redis.pcall('b')");
+  assert.throws(() => kept?.source, /after the redis.call handler returned/);
+  assert.equal(early?.toString(), "@user_script");
 });

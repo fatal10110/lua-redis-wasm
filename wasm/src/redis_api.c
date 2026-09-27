@@ -12,6 +12,20 @@
 #define LOG_WARNING 3
 
 static uint32_t g_resp_version = 2;
+/* Caller of the redis.call/redis.pcall currently dispatched to the host: the
+ * chunk source (NUL-terminated, NULL when unknown) and line. Read by the host
+ * via current_call_source()/current_call_line() from inside its callback, e.g.
+ * to build Redis 6.2's "<source>: <line>: " pcall error prefix. */
+static const char *g_call_source = NULL;
+static int32_t g_call_line = 0;
+
+uint32_t current_call_source(void) {
+  return (uint32_t)(uintptr_t)g_call_source;
+}
+
+int32_t current_call_line(void) {
+  return g_call_line;
+}
 
 uint32_t redis_resp_version(void) {
   return g_resp_version;
@@ -334,8 +348,20 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
     lua_pushliteral(L, "__RLUA_E__:command-arg-type");
     return lua_error(L);
   }
+  /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
+   * as-is, without skipping C frames, so pcall(redis.pcall, ...) reports
+   * "=[C]" and line -1. ar.source stays valid for the duration of the call. */
+  lua_Debug ar;
+  g_call_source = NULL;
+  g_call_line = 0;
+  if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+    g_call_source = ar.source;
+    g_call_line = (int32_t)ar.currentline;
+  }
   PtrLen reply = raise_on_error ? host_redis_call((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len)
                                 : host_redis_pcall((uint32_t)(uintptr_t)ab.data, (uint32_t)ab.len);
+  g_call_source = NULL;
+  g_call_line = 0;
   free(ab.data);
   if (reply.ptr == 0 || reply.len == 0) {
     return luaL_error(L, "ERR empty reply from host");

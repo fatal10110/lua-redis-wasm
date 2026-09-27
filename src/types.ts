@@ -104,6 +104,8 @@ export type ReplyValue =
  *
  * @param args - Command arguments as binary-safe Buffers.
  *               First element is the command name (e.g., "GET", "SET").
+ * @param ctx - Call-site context (e.g. the calling script line). Always
+ *              supplied by the engine; optional so handlers can call each other.
  * @returns Redis-compatible reply value
  * @throws Error to return an error reply to Lua
  *
@@ -117,7 +119,27 @@ export type ReplyValue =
  * };
  * ```
  */
-export type RedisCallHandler = (args: Buffer[]) => ReplyValue;
+export type RedisCallHandler = (args: Buffer[], ctx?: RedisCallContext) => ReplyValue;
+
+/**
+ * Call-site context passed to {@link RedisCallHandler}: the caller of
+ * `redis.call`/`redis.pcall` (stack level 1, as Redis 6.2's `luaPushError`
+ * sees it). Lets a host build Redis 6.2's `<source>: <line>: ` prefix for
+ * pcall errors, which it returns as an error table rather than raising.
+ */
+export type RedisCallContext = {
+  /**
+   * Chunk source of the caller, raw bytes: `"@user_script"` for the script
+   * itself, the chunk string/name for `loadstring` code, `"=[C]"` when called
+   * from a C function (e.g. `pcall(redis.pcall, ...)`). Empty when unknown, in
+   * which case Redis omits the prefix. Copied lazily from WASM memory on first
+   * access, so read it inside the handler: a first read after the handler has
+   * returned throws.
+   */
+  readonly source: Buffer;
+  /** Line of the call within `source`; -1 for a C caller, 0 when unknown. */
+  line: number;
+};
 
 /**
  * Handler function for redis.log() invocations from Lua.
@@ -159,10 +181,10 @@ export type RedisLogHandler = (level: number, message: Buffer) => void;
  *     if (cmd === "PING") return { ok: Buffer.from("PONG") };
  *     throw new Error("ERR unknown command");
  *   },
- *   redisPcall(args) {
+ *   redisPcall(args, ctx) {
  *     // Handle redis.pcall() - return error instead of throwing
  *     try {
- *       return this.redisCall(args);
+ *       return this.redisCall(args, ctx);
  *     } catch (err) {
  *       return { err: Buffer.from(err.message) };
  *     }
