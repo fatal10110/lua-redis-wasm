@@ -28,7 +28,7 @@ int compat_table_errors(void);
  * COMPAT_VALKEY_WORDING, defined in runtime.c): Redis 6.2-7.2 say
  * "Invalid debug level." in redis.log; Valkey 8.0+ names "server.log()" in the
  * redis.log arity error and, with table errors, says "Command arguments must
- * be strings or integers" for a bad redis.pcall argument.
+ * be strings or integers" for a bad redis.call / redis.pcall argument.
  * Snapshot by register_redis_api like compat_table_errors. */
 int compat_log_debug_level(void);
 int compat_valkey_wording(void);
@@ -43,15 +43,19 @@ int redis_table_errors(void);
  * Never returns. */
 int redis_raise_error(lua_State *L, const char *msg);
 
-/* Raises an engine-originated error: `msg` is "__RLUA_E__:<kind>[:<name>]",
- * raised like redis_raise_error and recorded with redis_mark_engine_error so
- * the host is told it is an engine error (SCRIPT_ERROR_ENGINE). Never returns. */
-int redis_raise_engine_error(lua_State *L, const char *msg);
+/* Kinds of the engine-originated errors (SCRIPT_ERROR_ENGINE, see abi.h): an
+ * opaque tag the host maps to its own wording. */
+#define ENGINE_ERROR_GLOBAL_READ "global-read"
+#define ENGINE_ERROR_COMMAND_ARG_TYPE "command-arg-type"
 
-/* Records the string at idx as this eval's engine-originated error (defined in
- * runtime.c). Only an uncaught error with exactly this message is reported to
- * the host as an engine error; the message text alone never makes one. */
-void redis_mark_engine_error(lua_State *L, int idx);
+/* Records this eval's engine-originated error (defined in runtime.c), before
+ * raising it: `kind` (a static string, ENGINE_ERROR_*), the error value at
+ * value_idx (the string, or the {err=...} table, the script sees: Redis's
+ * wording, never the kind) and the string at name_idx (0 for none) as the name
+ * involved. Only that error, uncaught or rethrown unchanged, is reported to the
+ * host as an engine error, with this kind and name; the message text alone
+ * never makes one (#59). */
+void redis_mark_engine_error(lua_State *L, const char *kind, int value_idx, int name_idx);
 
 /* Decodes the host_redis_props blob and assigns each entry onto the global
  * `redis` table. Returns 0 on success, -1 on a malformed blob. */

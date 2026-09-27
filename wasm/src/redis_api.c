@@ -3,7 +3,8 @@
  * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
  * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and double2ll
  * from src/util.c, and from Redis 6.2's src/scripting.c (BSD-3-Clause) for the
- * redis-6.2 profile's error_reply / status_reply / log / setresp / pcall errors. */
+ * redis-6.2 profile's error_reply / status_reply / log / setresp / call / pcall
+ * errors. */
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
@@ -29,7 +30,7 @@ static int g_table_errors = 0;
  * "Invalid debug level." (Redis 6.2-7.2) instead of "Invalid log level.", and
  * the Valkey 8.0+ wording: "server.log()" instead of "redis.log()" in the
  * redis.log arity error and, with table errors, "Command arguments must be
- * strings or integers" for a bad redis.pcall argument. */
+ * strings or integers" for a bad redis.call / redis.pcall argument. */
 static int g_log_debug_level = 0;
 static int g_valkey_wording = 0;
 /* Caller of the redis.call/redis.pcall currently dispatched to the host: the
@@ -76,13 +77,6 @@ int redis_raise_error(lua_State *L, const char *msg) {
     lua_pushstring(L, msg);
   }
   return lua_error(L);
-}
-
-int redis_raise_engine_error(lua_State *L, const char *msg) {
-  lua_pushstring(L, msg);
-  redis_mark_engine_error(L, -1);
-  lua_pop(L, 1);
-  return redis_raise_error(L, msg);
 }
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
@@ -321,6 +315,37 @@ static int push_bad_call_error(lua_State *L, const char *msg) {
   return 1;
 }
 
+/* A redis.call / redis.pcall argument that is not a string or number. The
+ * error is the table luaPushError builds, worded by profile: Redis 7.0-8.0
+ * "ERR Lua redis lib command arguments ...", Valkey 8.0+ "ERR Command
+ * arguments ...", and Redis 6.2 "Lua redis() command arguments ..." in its
+ * positioned, code-less form (push_bad_call_error). redis.pcall returns it
+ * (`return raise_error ? luaError(lua) : 1;`) and the script goes on.
+ * redis.call raises it, like luaError (the table) with table errors and like
+ * Redis 6.2's luaRaiseError (its `err` string) without, so a script that
+ * catches it sees Redis's message; it is recorded as the command-arg-type
+ * engine error (no name: Redis's wording takes no variable), which the host is
+ * told about if it goes uncaught.
+ * Derived from luaRedisGenericCommand / luaArgsToRedisArgv / luaError in
+ * Valkey 8.0's src/script_lua.c (same in Redis 7.2.4 but for the wording) and
+ * luaRedisGenericCommand / luaRaiseError in Redis 6.2's src/scripting.c,
+ * BSD-3-Clause. */
+static int bad_command_args(lua_State *L, int raise_on_error) {
+  const char *msg = !g_table_errors ? "Lua redis() command arguments must be strings or integers"
+                    : g_valkey_wording
+                        ? "Command arguments must be strings or integers"
+                        : "Lua redis lib command arguments must be strings or integers";
+  push_bad_call_error(L, msg);
+  if (!raise_on_error) {
+    return 1;
+  }
+  if (!g_table_errors) {
+    lua_getfield(L, -1, "err"); /* raise the string */
+  }
+  redis_mark_engine_error(L, ENGINE_ERROR_COMMAND_ARG_TYPE, -1, 0);
+  return lua_error(L);
+}
+
 /* A command error reply from the host. Table-error mode builds it like Redis
  * 7's redisProtocolToLuaType_Error: luaPushErrorBuff's form plus
  * ignore_error_stats_update=true, the same table whether redis.call raises it
@@ -518,27 +543,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
   ArgBuffer ab;
   if (encode_args(L, 1, argc, &ab) != 0) {
     free(ab.data);
-    if (!raise_on_error) {
-      /* redis.pcall returns this error like any other failure instead of
-       * raising it (`return raise_error ? luaError(lua) : 1;`), so the engine
-       * words it: Redis 7.0-8.0 "Lua redis lib command arguments ...", Valkey
-       * 8.0+ "Command arguments ...", and Redis 6.2 "Lua redis() command
-       * arguments ..." in its positioned, code-less form. It never reaches the
-       * host as an engine error.
-       * Derived from luaRedisGenericCommand / luaArgsToRedisArgv in Valkey
-       * 8.0's src/script_lua.c (same in Redis 7.2.4 but for the wording) and
-       * luaRedisGenericCommand in Redis 6.2's src/scripting.c, BSD-3-Clause. */
-      if (!g_table_errors) {
-        return push_bad_call_error(L, "Lua redis() command arguments must be strings or integers");
-      }
-      return push_bad_call_error(L, g_valkey_wording
-                                        ? "Command arguments must be strings or integers"
-                                        : "Lua redis lib command arguments must be strings or integers");
-    }
-    // redis.call raises it as an engine error: coded kind, no name (Redis's
-    // wording for this takes no variable). Raised without a "user_script:N:"
-    // position prefix, matching real Redis; the host renders the wording.
-    return redis_raise_engine_error(L, "__RLUA_E__:command-arg-type");
+    return bad_command_args(L, raise_on_error);
   }
   /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
    * as-is, without skipping C frames, so pcall(redis.pcall, ...) reports

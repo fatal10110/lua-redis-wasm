@@ -71,10 +71,51 @@ export const REPLY_SCRIPT_ERROR = 0x06;
 
 /**
  * REPLY_SCRIPT_ERROR flag: the engine raised this error itself (globals
- * protection, a bad redis.call argument). The message is `<kind>[:<name>]`,
- * unsanitized. Set by the engine only, never inferred from the text (#59).
+ * protection, a bad redis.call argument). The payload carries its kind and
+ * name in fields of their own, before the message (the Redis-worded error the
+ * script saw). Set by the engine only, never inferred from the text (#59, #87).
  */
 export const SCRIPT_ERROR_ENGINE = 0x01;
+
+/** Name length of an engine error without a name (ENGINE_ERROR_NO_NAME). */
+const ENGINE_ERROR_NO_NAME = 0xffff_ffff;
+
+/**
+ * Reads an engine error's `[kind_len u32][kind][name_len u32][name]` fields
+ * (ABI 3) from `payload`, returning them and the rest (the message).
+ */
+function readEngineError(payload: Buffer): {
+  engine: { kind: string; name?: string };
+  message: Buffer;
+} {
+  let cursor = 0;
+  const field = (): Buffer | undefined => {
+    if (cursor + 4 > payload.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    const len = payload.readUInt32LE(cursor);
+    cursor += 4;
+    if (len === ENGINE_ERROR_NO_NAME) {
+      return undefined;
+    }
+    if (cursor + len > payload.length) {
+      throw new Error("ERR reply decoding failed");
+    }
+    const bytes = payload.subarray(cursor, cursor + len);
+    cursor += len;
+    return bytes;
+  };
+  const kind = field();
+  if (kind === undefined) {
+    throw new Error("ERR reply decoding failed");
+  }
+  const name = field();
+  const engine =
+    name === undefined
+      ? { kind: kind.toString("utf8") }
+      : { kind: kind.toString("utf8"), name: name.toString("utf8") };
+  return { engine, message: Buffer.from(payload.subarray(cursor)) };
+}
 
 /**
  * REPLY_SCRIPT_ERROR flag: the message is the `err` field of an error table,
@@ -401,23 +442,33 @@ export function decodeReply(
   }
 
   if (type === REPLY_SCRIPT_ERROR) {
-    // Payload (ABI 2) is a u32le `line` (0 = unknown, parse from message
-    // prefix), a u8 `flags` (SCRIPT_ERROR_*) and the message bytes. See
+    // Payload (ABI 3) is a u32le `line` (0 = unknown, parse from message
+    // prefix), a u8 `flags` (SCRIPT_ERROR_*), an engine error's kind and name
+    // (SCRIPT_ERROR_ENGINE only) and the message bytes. See
     // reply_script_error in wasm/src/runtime.c.
+    if (countOrLen < 5 || cursor + countOrLen > buffer.length) {
+      throw new Error("ERR reply decoding failed");
+    }
     const line = buffer.readUInt32LE(cursor);
     const flags = buffer.readUInt8(cursor + 4);
     const payload = buffer.subarray(cursor + 5, cursor + countOrLen);
     cursor += countOrLen;
-    // An engine error's message is `<kind>[:<name>]`, not `CODE message`; a
-    // table error's `err` is split like an error reply, with no default code.
-    const error =
-      flags & SCRIPT_ERROR_ENGINE
-        ? { err: Buffer.from(payload) }
-        : flags & SCRIPT_ERROR_FROM_TABLE
+    // An engine error's kind and name come from their own fields, never from
+    // the message; a table error's `err` is split like an error reply, with no
+    // default code.
+    let error: { err: Buffer; code?: Buffer; engine?: { kind: string; name?: string } };
+    if (flags & SCRIPT_ERROR_ENGINE) {
+      const { engine, message } = readEngineError(payload);
+      error = { err: message, engine };
+    } else {
+      error =
+        flags & SCRIPT_ERROR_FROM_TABLE
           ? splitErrorPayload(payload)
           : stringScriptError(payload);
-    // `line` and `flags` are internal plumbing consumed by buildScriptError;
-    // they are not part of the public ReplyValue contract, hence the cast.
+    }
+    // `line`, `flags` and `engine` are internal plumbing consumed by
+    // buildScriptError; they are not part of the public ReplyValue contract,
+    // hence the cast.
     const value = {
       ...error,
       ...(line > 0 ? { line } : {}),

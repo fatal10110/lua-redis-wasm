@@ -65,6 +65,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after `line` (`0x01` engine error, `0x02` message from an error table), so
   the TS layer no longer reads the error's kind from its text (#59, #76). See
   `docs/abi.md`.
+- WASM ABI version 3: an engine error's script error payload carries its kind
+  and name in fields of their own, before the message, which is now the
+  Redis-worded error the script saw instead of `<kind>[:<name>]` (#87). See
+  `docs/abi.md`.
 - In the Redis 7 error model (every profile but `redis-6.2`, see
   `compat.tableErrors`), an uncaught table error whose `err` has no uppercase
   error code is reported without a `code` instead of with `ERR`, since Redis 7
@@ -180,6 +184,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   itself off as a globals-protection error with any `kind`/`name`. The engine
   now records the error it raised and flags only that one over the ABI; any
   other text is sanitized and reported as an ordinary error (#59).
+- A script that catches an engine error no longer sees the internal
+  `__RLUA_E__:<kind>` marker but Redis's message for its profile:
+  `pcall(redis.call, 'set', 'k', {})` gives `ERR Lua redis lib command
+  arguments must be strings or integers` (Redis 7.x/8.0 profiles and no
+  profile), `ERR Command arguments must be strings or integers` (Valkey
+  profiles) or `=[C]: -1: Lua redis() command arguments must be strings or
+  integers` (`redis-6.2`), the error `redis.pcall` returns; a caught read of a
+  nonexistent global gives `user_script:<line>: Script attempted to access
+  nonexistent global variable '<name>'`. `redis.call` raises that error as an
+  `{err=...}` table in the Redis 7 error model, so an `xpcall` handler gets the
+  table. Uncaught, or rethrown unchanged (`error(e, 0)`, or the error table
+  itself with its `err` untouched), it still reaches the host with
+  `meta.kind` / `meta.name`; a changed or lookalike error table never does,
+  nor does a host command error in the Redis 7 error model. A string equal to
+  the exact message of an engine error raised earlier in the same eval (from
+  the script, or a host command error in the `redis-6.2` string model) cannot
+  be told apart from `error(e, 0)` and is flagged, as the marker text was.
+  `error(e)` raises a new, position-prefixed error and is reported as an
+  ordinary string error, as Redis reports it. Indexing the globals with a key
+  that is not a string or number (`_G[true]`) raises Redis's `Second argument
+  to luaProtectedTableError must be a string or number` instead of a
+  `global-read` error named `?`, and `meta.name` keeps a global's name past a
+  NUL byte (#87).
 - `cjson.encode` of a value that expands into a document too large for the heap
   (e.g. a table holding the same subtable many times) raises `not enough memory`
   instead of aborting the module and leaving the engine unusable. cjson's string

@@ -46,6 +46,9 @@ static uint32_t g_error_line = 0;
 /* Set by script_error_handler when the error object was a table, so its
  * message is that table's `err` field (see SCRIPT_ERROR_FROM_TABLE). */
 static int g_error_from_table = 0;
+/* Set by script_error_handler when the error object is the engine error
+ * recorded in this eval (see is_engine_error), sent as SCRIPT_ERROR_ENGINE. */
+static int g_error_is_engine = 0;
 
 /* Registry references to the C functions the eval path calls in protected
  * mode. Pushing a C function creates a closure, which allocates and so can
@@ -56,10 +59,16 @@ static int g_error_from_table = 0;
 static int g_error_handler_ref = LUA_NOREF;
 static int g_encode_reply_ref = LUA_NOREF;
 static int g_collect_garbage_ref = LUA_NOREF;
-/* Registry slot holding the message of the last engine-originated error raised
- * in the current eval (see redis_mark_engine_error), or false. Created once per
- * VM so marking an error overwrites an existing slot and never allocates. */
-static int g_engine_error_ref = LUA_NOREF;
+/* The last engine-originated error raised in the current eval (see
+ * redis_mark_engine_error): registry slots holding the error value raised, its
+ * message and its name (or false), and its kind (NULL for none). The slots are
+ * created once per VM, so marking an error overwrites them. */
+static int g_engine_error_value_ref = LUA_NOREF;
+static int g_engine_error_msg_ref = LUA_NOREF;
+static int g_engine_error_name_ref = LUA_NOREF;
+static const char *g_engine_error_kind = NULL;
+
+static int is_engine_error(lua_State *L, int idx);
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
@@ -199,10 +208,6 @@ static size_t error_len(const char *msg) {
   return len;
 }
 
-/* Prefix of the messages redis_mark_engine_error is used for, as scripts see
- * them (e.g. through pcall). reply_script_error strips it. */
-#define ENGINE_ERROR_PREFIX "__RLUA_E__:"
-
 static PtrLen reply_error(const char *msg, size_t len) {
   ReplyBuffer rb;
   rb_init(&rb);
@@ -219,6 +224,14 @@ static PtrLen reply_error(const char *msg, size_t len) {
 // reply_error for a string literal; the length excludes the NUL terminator.
 #define REPLY_ERROR_LIT(lit) reply_error((lit), sizeof(lit) - 1)
 
+/* The engine error of a script error reply: its kind (a static string) and its
+ * name (binary, `name` NULL for none). */
+typedef struct EngineErrorInfo {
+  const char *kind;
+  const char *name;
+  size_t name_len;
+} EngineErrorInfo;
+
 /* Like reply_error, but tags the reply as a script-aborting error so the host
  * decorates it with the script sha / source context. Used for load and runtime
  * (lua_pcall) failures, including errors that propagated out of redis.call.
@@ -228,32 +241,48 @@ static PtrLen reply_error(const char *msg, size_t len) {
  * Command errors propagated out of redis.call carry no `user_script:N:` text
  * prefix, so the line cannot be recovered from the message alone; the host
  * reads it from this field. 0 means "parse from the message prefix"
- * (load/syntax errors, which never run the error handler). */
-static PtrLen reply_script_error(const char *msg, uint32_t line, uint8_t flags) {
+ * (load/syntax errors, which never run the error handler). An engine error
+ * (`engine` non-NULL, SCRIPT_ERROR_ENGINE) then has its kind and name, each a
+ * u32le length and the bytes (name length ENGINE_ERROR_NO_NAME for none), so
+ * the host never reads them from the message. */
+static PtrLen reply_script_error(const char *msg, uint32_t line, uint8_t flags,
+                                 const EngineErrorInfo *engine) {
   // Goes beyond Redis, which sends these raw (addReplyErrorSdsEx): sanitized
-  // like a returned {err=} so a host can put it straight into RESP. Engine
-  // errors are left intact: their name is structured data, and the host
-  // replaces the message text anyway. Only the flag, which the engine sets
-  // when it raised the error itself, selects that: the text is not trusted,
-  // since scripts and host command errors control it (#59).
-  int engine = (flags & SCRIPT_ERROR_ENGINE) != 0;
-  if (engine && strncmp(msg, ENGINE_ERROR_PREFIX, sizeof(ENGINE_ERROR_PREFIX) - 1) == 0) {
-    msg += sizeof(ENGINE_ERROR_PREFIX) - 1;
-  }
-  size_t len = engine ? strlen(msg) : error_len(msg);
+  // like a returned {err=} so a host can put it straight into RESP. An engine
+  // error's name is data and is sent raw in its own field (a global's name may
+  // contain CR/LF); the message, as the script saw it, is sanitized like any
+  // other (#59).
+  size_t len = error_len(msg);
+  size_t kind_len = engine ? strlen(engine->kind) : 0;
+  size_t name_len = engine && engine->name ? engine->name_len : 0;
+  size_t engine_len = engine ? 8 + kind_len + name_len : 0;
   ReplyBuffer rb;
   rb_init(&rb);
-  if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)(len + 5)) != 0) {
+  if (rb_write_header(&rb, REPLY_SCRIPT_ERROR, (uint32_t)(5 + engine_len + len)) != 0) {
     return (PtrLen){0, 0};
   }
   uint8_t prefix[5];
   write_u32_le(prefix, line);
   prefix[4] = flags;
-  if (rb_append(&rb, prefix, sizeof(prefix)) != 0) {
-    free(rb.data);
-    return (PtrLen){0, 0};
+  int rc = rb_append(&rb, prefix, sizeof(prefix));
+  if (rc == 0 && engine) {
+    uint8_t field[4];
+    write_u32_le(field, (uint32_t)kind_len);
+    rc = rb_append(&rb, field, sizeof(field));
+    if (rc == 0) {
+      rc = rb_append(&rb, engine->kind, kind_len);
+    }
+    if (rc == 0) {
+      write_u32_le(field, engine->name ? (uint32_t)name_len : ENGINE_ERROR_NO_NAME);
+      rc = rb_append(&rb, field, sizeof(field));
+    }
+    if (rc == 0 && name_len > 0) {
+      rc = rb_append(&rb, engine->name, name_len);
+    }
   }
-  int rc = engine ? rb_append(&rb, msg, len) : rb_append_single_line(&rb, msg, len);
+  if (rc == 0) {
+    rc = rb_append_single_line(&rb, msg, len);
+  }
   if (rc != 0) {
     free(rb.data);
     return (PtrLen){0, 0};
@@ -281,7 +310,9 @@ static PtrLen reply_script_error(const char *msg, uint32_t line, uint8_t flags) 
  * A table's message is flagged (g_error_from_table, SCRIPT_ERROR_FROM_TABLE, in
  * the Redis 7 error model only): Redis 7 replies "-<err>" for it as-is, with no
  * ERR code added (luaCallFunction
- * in Valkey 8.0's src/script_lua.c, same in Redis 7.2.4) (#76). */
+ * in Valkey 8.0's src/script_lua.c, same in Redis 7.2.4) (#76).
+ * Whether the error object is this eval's engine error is decided here too
+ * (g_error_is_engine), on the object itself rather than on its message. */
 static int script_error_handler(lua_State *L) {
   lua_Debug ar;
   g_error_line = 0;
@@ -292,6 +323,7 @@ static int script_error_handler(lua_State *L) {
       break;
     }
   }
+  g_error_is_engine = is_engine_error(L, 1);
   switch (lua_type(L, 1)) {
     case LUA_TSTRING:
       break;
@@ -633,8 +665,9 @@ static void remove_package_entry(lua_State *L, const char *name) {
 // 6.2-8.x and Valkey; everything else is constant. Default reproduces the
 // historical behavior (os loaded, `server` alias present, print stripped),
 // which matches Valkey 8.0/8.1 except for the redis.log arity error and the
-// redis.pcall bad-argument error, which keep the Redis wording ("redis.log()
-// requires ...", "Lua redis lib command arguments ...", no COMPAT_VALKEY_WORDING).
+// redis.call / redis.pcall bad-argument error, which keep the Redis wording
+// ("redis.log() requires ...", "Lua redis lib command arguments ...", no
+// COMPAT_VALKEY_WORDING).
 #define COMPAT_PRINT 0x1u        // keep Lua `print` (Redis 6.2 only)
 #define COMPAT_OS 0x2u           // expose `os` lib (Redis 7.4+, Valkey 8.0+)
 #define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
@@ -646,7 +679,8 @@ static void remove_package_entry(lua_State *L, const char *name) {
 // Error wording only, set from the profile (no CompatOverrides field):
 #define COMPAT_LOG_DEBUG_LEVEL 0x20u // redis.log: "Invalid debug level." (Redis 6.2-7.2)
 // Valkey 8.0+ wording: redis.log's "server.log() requires ..." and, with table
-// errors, redis.pcall's "Command arguments must be strings or integers".
+// errors, the redis.call / redis.pcall "Command arguments must be strings or
+// integers".
 #define COMPAT_VALKEY_WORDING 0x40u
 static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS | COMPAT_TABLE_ERRORS;
 
@@ -689,11 +723,21 @@ static void disable_non_determinism(lua_State *L, uint32_t flags) {
 // Globals protection: mirror real Redis exactly.
 //
 // READ of a nonexistent global -> a metatable __index handler (this function)
-// raises, matching Redis's luaSetErrorMetatable. It raises the coded marker
-// `__RLUA_E__:global-read:<name>` and records it as an engine error
-// (redis_mark_engine_error), which is what makes run_script report it as one;
-// the TS layer forwards { kind, name } and the host picks the wording. `name`
-// is the __index key (stack index 2).
+// raises, matching Redis's luaSetErrorMetatable, with Redis's message:
+// "user_script:<line>: Script attempted to access nonexistent global variable
+// '<name>'" (luaL_error, positioned at the script line that read it). It is
+// recorded as the global-read engine error (redis_mark_engine_error), which is
+// what makes run_script report it as one: the TS layer forwards { kind, name }
+// and the host picks the wording. A script that catches it sees Redis's
+// message. The message reads `name` (the __index key, stack index 2) as a C
+// string, like Redis's %s; the recorded name keeps all its bytes, as it has a
+// length-prefixed field of its own. A call with other than 2 arguments (the
+// handler called directly) or a key that is not a string or number (_G[true])
+// raises Redis's argument errors instead, as ordinary errors.
+// Derived from luaProtectedTableError / luaSetErrorMetatable in Valkey 8.0's
+// src/script_lua.c (same in Redis 7.2.4, and in Redis 6.2.14's
+// src/scripting.c), BSD-3-Clause; the warning Valkey logs for a wrong argument
+// count is not reproduced.
 //
 // WRITE of any global (creation or reassignment of an existing one) -> the
 // patched Lua's native readonly flag (lua_enablereadonlytable), enabled in
@@ -702,37 +746,93 @@ static void disable_non_determinism(lua_State *L, uint32_t flags) {
 // untouched. The flag blocks every write, including reassigning an existing
 // global -- which a __newindex metatable would miss.
 static int protect_globals_index(lua_State *L) {
-  const char *name = lua_tostring(L, 2);
-  /* luaL_error's position prefix is empty here (level 1 is this C function). */
-  lua_pushfstring(L, ENGINE_ERROR_PREFIX "global-read:%s", name ? name : "?");
-  redis_mark_engine_error(L, -1);
+  if (lua_gettop(L) != 2) {
+    return luaL_error(L, "Wrong number of arguments to luaProtectedTableError");
+  }
+  if (!lua_isstring(L, 2)) { /* true for a number too, as upstream's check */
+    return luaL_error(L, "Second argument to luaProtectedTableError must be a string or number");
+  }
+  const char *name = lua_tostring(L, 2); /* converts a number key in place */
+  luaL_where(L, 1); /* the script line that read it, as luaL_error does */
+  lua_pushfstring(L, "Script attempted to access nonexistent global variable '%s'", name);
+  lua_concat(L, 2);
+  redis_mark_engine_error(L, ENGINE_ERROR_GLOBAL_READ, -1, 2);
   return lua_error(L);
 }
 
-/* Records the string at idx as the engine-originated error of this eval. The
- * error run_script replies with is reported as an engine error
- * (SCRIPT_ERROR_ENGINE) only if its message is this exact string: a later,
- * different error, or a script raising a lookalike marker text, is not (#59).
- * A script that catches the engine error and rethrows it unchanged still gets
- * it reported as one, like rethrowing Redis's own error table. */
-void redis_mark_engine_error(lua_State *L, int idx) {
-  lua_pushvalue(L, idx);
-  lua_rawseti(L, LUA_REGISTRYINDEX, g_engine_error_ref);
+void redis_mark_engine_error(lua_State *L, const char *kind, int value_idx, int name_idx) {
+  int top = lua_gettop(L);
+  if (value_idx < 0) {
+    value_idx = top + value_idx + 1;
+  }
+  if (name_idx < 0) {
+    name_idx = top + name_idx + 1;
+  }
+  lua_pushvalue(L, value_idx);
+  lua_rawseti(L, LUA_REGISTRYINDEX, g_engine_error_value_ref);
+  if (lua_istable(L, value_idx)) {
+    lua_pushliteral(L, "err");
+    lua_rawget(L, value_idx);
+  } else {
+    lua_pushvalue(L, value_idx);
+  }
+  lua_rawseti(L, LUA_REGISTRYINDEX, g_engine_error_msg_ref);
+  if (name_idx > 0) {
+    lua_pushvalue(L, name_idx);
+  } else {
+    lua_pushboolean(L, 0);
+  }
+  lua_rawseti(L, LUA_REGISTRYINDEX, g_engine_error_name_ref);
+  g_engine_error_kind = kind;
 }
 
 static void clear_engine_error(lua_State *L) {
-  lua_pushboolean(L, 0);
-  lua_rawseti(L, LUA_REGISTRYINDEX, g_engine_error_ref);
+  const int refs[] = {g_engine_error_value_ref, g_engine_error_msg_ref, g_engine_error_name_ref};
+  for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
+    lua_pushboolean(L, 0);
+    lua_rawseti(L, LUA_REGISTRYINDEX, refs[i]);
+  }
+  g_engine_error_kind = NULL;
 }
 
-/* Whether the value at idx is the message recorded by redis_mark_engine_error. */
+/* Whether the error object at idx is the engine error recorded in this eval by
+ * redis_mark_engine_error: the very error table raised, with its `err`
+ * unchanged, or a string equal to its message as the script sees it (the error
+ * string, or the `err` string the unwrapping pcall returns for the table). So
+ * it is the engine's error when the script lets it go or rethrows it unchanged
+ * (error(e, 0), or the table itself), but not when the script changes the
+ * table or composes a new error from it (error(e) prefixes a position), and
+ * never for a later, different error. Error text that merely looks like it is
+ * not the engine's (#59), unless it is the very message the engine raised
+ * earlier in the same eval, raised as a string: a script can do that, and so
+ * can a host command error in the Redis 6.2 model, where redis.call raises the
+ * host's text as a string. A lookalike table ({err=...}, a host command error
+ * in the Redis 7 model) never is. */
 static int is_engine_error(lua_State *L, int idx) {
+  if (!g_engine_error_kind) {
+    return 0;
+  }
   if (idx < 0) {
     idx = lua_gettop(L) + idx + 1;
   }
-  lua_rawgeti(L, LUA_REGISTRYINDEX, g_engine_error_ref);
-  int equal = lua_type(L, idx) == LUA_TSTRING && lua_rawequal(L, idx, -1);
+  int type = lua_type(L, idx);
+  if (type != LUA_TTABLE && type != LUA_TSTRING) {
+    return 0;
+  }
+  lua_rawgeti(L, LUA_REGISTRYINDEX,
+              type == LUA_TTABLE ? g_engine_error_value_ref : g_engine_error_msg_ref);
+  int equal = lua_rawequal(L, idx, -1);
   lua_pop(L, 1);
+  if (equal && type == LUA_TTABLE) {
+    /* The table must still carry the message: once the script changed its
+     * `err` (e.err = 'ERR hacked', nil, 42) it is the script's own error,
+     * reported with its own message, as Redis does. */
+    lua_rawgeti(L, LUA_REGISTRYINDEX, g_engine_error_msg_ref);
+    lua_pushliteral(L, "err");
+    lua_rawget(L, idx);
+    equal = lua_rawequal(L, -1, -2);
+    lua_pop(L, 2);
+  }
   return equal;
 }
 
@@ -1129,7 +1229,12 @@ static int setup_state_body(lua_State *L) {
     lua_setglobal(L, "server");
   }
   lua_pushboolean(L, 0);
-  g_engine_error_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  g_engine_error_value_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  lua_pushboolean(L, 0);
+  g_engine_error_msg_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  lua_pushboolean(L, 0);
+  g_engine_error_name_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  g_engine_error_kind = NULL;
   enable_globals_protection(L);
   g_error_handler_ref = store_cfunction(L, script_error_handler);
   g_encode_reply_ref = store_cfunction(L, encode_reply_body);
@@ -1264,12 +1369,13 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, script_len, "@user_script") != 0) {
     const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0, 0);
+    PtrLen out = reply_script_error(err ? err : "ERR script load failed", 0, 0, NULL);
     lua_settop(g_state, 0);
     return out;
   }
   g_error_line = 0;
   g_error_from_table = 0;
+  g_error_is_engine = 0;
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
   int status = lua_pcall(g_state, 0, 1, errfunc);
@@ -1282,25 +1388,35 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
     // Whether the kill escaped (status != 0) or was swallowed as a value. The
     // message carries its code, like the error table Redis 7 raises for a kill.
     PtrLen out = reply_script_error(FUEL_KILL_MSG, g_fuel_kill_line,
-                                    redis_table_errors() ? SCRIPT_ERROR_FROM_TABLE : 0);
+                                    redis_table_errors() ? SCRIPT_ERROR_FROM_TABLE : 0, NULL);
     lua_settop(g_state, 0);
     return out;
   }
   if (status != 0) {
-    // The error handler ran (and set g_error_from_table) only for LUA_ERRRUN;
-    // a memory error or a failing handler leaves a plain message. A table's
-    // `err` is sent as-is only in the Redis 7 error model: Redis 6.2 replies
-    // "-ERR Error running script ..." for every script error.
+    // The error handler ran (and set g_error_from_table / g_error_is_engine)
+    // only for LUA_ERRRUN; a memory error or a failing handler leaves a plain
+    // message. A table's `err` is sent as-is only in the Redis 7 error model:
+    // Redis 6.2 replies "-ERR Error running script ..." for every script
+    // error. An engine error is sent with the kind and name recorded when it
+    // was raised; its message is what the script saw (Redis's wording).
     uint8_t flags = 0;
+    EngineErrorInfo engine = {NULL, NULL, 0};
     if (status == LUA_ERRRUN) {
-      if (is_engine_error(g_state, -1)) {
+      if (g_error_is_engine) {
         flags = SCRIPT_ERROR_ENGINE;
+        engine.kind = g_engine_error_kind;
+        lua_rawgeti(g_state, LUA_REGISTRYINDEX, g_engine_error_name_ref);
+        if (lua_type(g_state, -1) == LUA_TSTRING) {
+          engine.name = lua_tolstring(g_state, -1, &engine.name_len);
+        }
+        lua_insert(g_state, -2); /* keep the name referenced, below the message */
       } else if (g_error_from_table && redis_table_errors()) {
         flags = SCRIPT_ERROR_FROM_TABLE;
       }
     }
     const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line, flags);
+    PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line, flags,
+                                    engine.kind ? &engine : NULL);
     lua_settop(g_state, 0);
     return out;
   }
