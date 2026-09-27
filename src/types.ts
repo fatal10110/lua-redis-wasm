@@ -274,7 +274,7 @@ export type EngineLimits = {
 };
 
 /**
- * Named Redis/Valkey compatibility profile. Selects which of the three Lua
+ * Named Redis/Valkey compatibility profile. Selects which of the four Lua
  * sandbox behaviors that differ across versions are emulated. Aliases collapse
  * to identical behavior (redis-7.0 == redis-7.2; redis-7.4 == redis-8.0;
  * valkey-8.0 == valkey-9.0). Use {@link CompatOverrides} to tweak a single flag.
@@ -290,7 +290,7 @@ export type CompatProfile =
 
 /**
  * Fine-grained overrides for the compatibility profile, merged over the
- * selected {@link CompatProfile} (or the default). These are the only three Lua
+ * selected {@link CompatProfile} (or the default). These are the only four Lua
  * sandbox behaviors that actually differ across Redis 6.2-8.x and Valkey.
  */
 export type CompatOverrides = {
@@ -300,6 +300,13 @@ export type CompatOverrides = {
   os?: boolean;
   /** Expose `server` as an alias of `redis`. Valkey 8.0+ only. Default: true. */
   serverAlias?: boolean;
+  /**
+   * Reseed `math.random` with 0 before every script, so each script sees the
+   * same sequence. Only Redis 6.2 did; Redis 7.0+ and Valkey keep one sequence
+   * running across scripts (per engine here, per server process there), and
+   * `math.randomseed` changes it for the scripts that follow. Default: false.
+   */
+  reseedRandom?: boolean;
 };
 
 /**

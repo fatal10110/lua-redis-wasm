@@ -28,12 +28,14 @@ for file in $REDIS_LUA_MODULES; do
 done
 MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/redis/deps/fpconv/fpconv_dtoa.c" # redis.call number args
 
-COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/lua_cmsgpack_checked.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $CORE_FILES $LIB_FILES $MODULE_FILES"
+COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/redis_math.c $ROOT_DIR/wasm/src/lua_cmsgpack_checked.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $REDIS_SRC/rand.c $CORE_FILES $LIB_FILES $MODULE_FILES"
 
 mkdir -p "$OUT_DIR"
 
-for test in runtime_smoke runtime_eval_smoke runtime_eval_args_smoke modules_smoke; do
-  emcc -O2 -DENABLE_CJSON_GLOBAL -sENVIRONMENT=node -sEXIT_RUNTIME=1 \
+# LUA_REDIS_WASM_TESTING exposes test-only hooks from runtime.c (e.g.
+# test_unprotected_error); the production build never defines it.
+for test in runtime_smoke runtime_eval_smoke runtime_eval_args_smoke modules_smoke redis_math_smoke runtime_panic_smoke; do
+  emcc -O2 -DENABLE_CJSON_GLOBAL -DLUA_REDIS_WASM_TESTING -sENVIRONMENT=node -sEXIT_RUNTIME=1 \
     -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
     "$ROOT_DIR/wasm/src/tests/$test.c" $COMMON_SRC \
     -o "$OUT_DIR/$test.js"
