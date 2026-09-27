@@ -69,6 +69,39 @@ const REPLY_ERROR = 0x05;
  */
 export const REPLY_SCRIPT_ERROR = 0x06;
 
+/**
+ * REPLY_SCRIPT_ERROR flag: the engine raised this error itself (globals
+ * protection, a bad redis.call argument). The message is `<kind>[:<name>]`,
+ * unsanitized. Set by the engine only, never inferred from the text (#59).
+ */
+export const SCRIPT_ERROR_ENGINE = 0x01;
+
+/**
+ * REPLY_SCRIPT_ERROR flag: the message is the `err` field of an error table,
+ * which Redis 7 sends as-is, so no default `ERR` code is added (#76). Set only
+ * in the Redis 7 error model.
+ */
+export const SCRIPT_ERROR_FROM_TABLE = 0x02;
+
+const ERR_PREFIX = Buffer.from("ERR ", "utf8");
+
+/**
+ * An uncaught string (non-table) script error, or any script error in the
+ * Redis 6.2 error model: Redis sends it with the `ERR` code in front (Redis 7's
+ * error handler wraps it as `{err='ERR ' .. tostring(err)}`, Redis 6.2 replies
+ * `-ERR Error running script ...`), so the code is always `ERR` and the whole
+ * message is `err`, whatever its first word (#83). The engine's own string
+ * errors already read `ERR ...`; one leading `ERR ` is dropped so they are not
+ * reported as `ERR ERR ...` (a script's `error('ERR x', 0)` thus reports `x`).
+ */
+function stringScriptError(payload: Buffer): { err: Buffer; code: Buffer } {
+  const hasErr = payload.subarray(0, ERR_PREFIX.length).equals(ERR_PREFIX);
+  return {
+    err: Buffer.from(hasErr ? payload.subarray(ERR_PREFIX.length) : payload),
+    code: Buffer.from("ERR", "utf8"),
+  };
+}
+
 const REPLY_BOOL = 0x07;
 const REPLY_DOUBLE = 0x08;
 const REPLY_MAP = 0x09;
@@ -103,6 +136,16 @@ function splitErrorPayload(payload: Buffer): { err: Buffer; code?: Buffer } {
     };
   }
   return { err: Buffer.from(payload) };
+}
+
+/**
+ * Error reply for a failure message that is not a Redis reply (e.g. a thrown
+ * host exception): split like a wire payload, with the generic `ERR` code
+ * when the message has none, as Redis's `addReplyError` adds `-ERR `.
+ */
+export function failureErrorReply(message: Buffer): { err: Buffer; code: Buffer } {
+  const { err, code } = splitErrorPayload(message);
+  return { err, code: code ?? Buffer.from("ERR", "utf8") };
 }
 
 /** Tests whether `buffer[0, end)` matches the Redis error-code shape `[A-Z][A-Z0-9]*`. */
@@ -358,15 +401,28 @@ export function decodeReply(
   }
 
   if (type === REPLY_SCRIPT_ERROR) {
-    // Payload is a u32le `line` (0 = unknown, parse from message prefix) followed
-    // by the `CODE message` bytes. See reply_script_error in wasm/src/runtime.c.
+    // Payload (ABI 2) is a u32le `line` (0 = unknown, parse from message
+    // prefix), a u8 `flags` (SCRIPT_ERROR_*) and the message bytes. See
+    // reply_script_error in wasm/src/runtime.c.
     const line = buffer.readUInt32LE(cursor);
-    const payload = buffer.subarray(cursor + 4, cursor + countOrLen);
+    const flags = buffer.readUInt8(cursor + 4);
+    const payload = buffer.subarray(cursor + 5, cursor + countOrLen);
     cursor += countOrLen;
-    const error = splitErrorPayload(payload);
-    // `line` is internal plumbing consumed by buildScriptError; it is not part of
-    // the public ReplyValue contract, hence the cast.
-    const value = (line > 0 ? { ...error, line } : error) as ReplyValue;
+    // An engine error's message is `<kind>[:<name>]`, not `CODE message`; a
+    // table error's `err` is split like an error reply, with no default code.
+    const error =
+      flags & SCRIPT_ERROR_ENGINE
+        ? { err: Buffer.from(payload) }
+        : flags & SCRIPT_ERROR_FROM_TABLE
+          ? splitErrorPayload(payload)
+          : stringScriptError(payload);
+    // `line` and `flags` are internal plumbing consumed by buildScriptError;
+    // they are not part of the public ReplyValue contract, hence the cast.
+    const value = {
+      ...error,
+      ...(line > 0 ? { line } : {}),
+      ...(flags ? { flags } : {}),
+    } as ReplyValue;
     return { value, offset: cursor };
   }
 

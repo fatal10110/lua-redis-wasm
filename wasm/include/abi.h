@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define REDIS_LUA_WASM_ABI_VERSION 1
+#define REDIS_LUA_WASM_ABI_VERSION 2
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +28,22 @@ typedef enum ReplyType {
   REPLY_BIG_NUMBER = 0x0b,
   REPLY_VERBATIM = 0x0c
 } ReplyType;
+
+/* REPLY_SCRIPT_ERROR payload: u32le `line`, u8 `flags`, then the message.
+ * `line` is the script line at the error point (0 = unknown, parse it from the
+ * message's "user_script:N:" prefix). `flags` tells the host how to read the
+ * message; it is set by the engine, never inferred from the message text. */
+/* Engine-originated error (globals protection, a bad redis.call argument): the
+ * message is "<kind>" or "<kind>:<name>", unsanitized. */
+#define SCRIPT_ERROR_ENGINE 0x01u
+/* The message is the `err` field of an error table, which Redis 7 sends as-is
+ * ("-<err>"): its leading word is the error code only if it has one, and no
+ * default code is added. Set only in the Redis 7 error model (COMPAT_TABLE_ERRORS);
+ * Redis 6.2 replies "-ERR ..." for every script error. Otherwise the error was
+ * a string (or another value), or the model is 6.2's: Redis sends it as
+ * "-ERR <message>", so the host reports code ERR and the whole message, less
+ * one leading "ERR " (the engine's own string errors carry it). */
+#define SCRIPT_ERROR_FROM_TABLE 0x02u
 
 #if defined(__GNUC__)
 typedef struct __attribute__((packed)) ReplyHeader {

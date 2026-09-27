@@ -31,11 +31,25 @@ int compat_table_errors(void);
 int compat_log_debug_level(void);
 int compat_server_log_name(void);
 
+/* The error model register_redis_api snapshot for the current state: non-zero
+ * for Redis 7 table errors. */
+int redis_table_errors(void);
+
 /* Raises `msg` as a script error in the error model of the current state:
  * {err=msg} with table errors, the string itself otherwise. With table errors
  * `msg` should be "CODE message"; a Redis 6.2 (string) error may have no code.
  * Never returns. */
 int redis_raise_error(lua_State *L, const char *msg);
+
+/* Raises an engine-originated error: `msg` is "__RLUA_E__:<kind>[:<name>]",
+ * raised like redis_raise_error and recorded with redis_mark_engine_error so
+ * the host is told it is an engine error (SCRIPT_ERROR_ENGINE). Never returns. */
+int redis_raise_engine_error(lua_State *L, const char *msg);
+
+/* Records the string at idx as this eval's engine-originated error (defined in
+ * runtime.c). Only an uncaught error with exactly this message is reported to
+ * the host as an engine error; the message text alone never makes one. */
+void redis_mark_engine_error(lua_State *L, int idx);
 
 /* Decodes the host_redis_props blob and assigns each entry onto the global
  * `redis` table. Returns 0 on success, -1 on a malformed blob. */

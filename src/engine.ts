@@ -71,7 +71,9 @@ import {
   encodeArgArray,
   encodeRedisProps,
   ensureBuffer,
+  failureErrorReply,
   REPLY_SCRIPT_ERROR,
+  SCRIPT_ERROR_ENGINE,
 } from "./codec.js";
 import {
   loadModule,
@@ -537,12 +539,17 @@ export class LuaEngine {
 /**
  * Builds a script-aborting error reply. The engine composes no user-facing prose:
  *
- * - Engine-originated errors (globals protection) arrive as a coded marker; we
- *   forward `{ kind, name }` in `meta` and the host chooses the wording. `err`
- *   carries the bare `kind` as a machine-readable default.
+ * - Engine-originated errors (globals protection, a bad redis.call argument)
+ *   are flagged by the WASM runtime (`SCRIPT_ERROR_ENGINE`) with a
+ *   `<kind>[:<name>]` message; we forward `{ kind, name }` in `meta` and the host
+ *   chooses the wording. `err` carries the bare `kind` as a machine-readable
+ *   default. The message text alone never makes an engine error (#59).
  * - Lua runtime / redis.call errors already carry their own message (and code);
  *   they pass through untouched, with only `line`/`sha` attached for the host to
- *   decorate.
+ *   decorate. A table error's `err` (`SCRIPT_ERROR_FROM_TABLE`, Redis 7 error
+ *   model) is what Redis sends as-is (`-<err>`), so it has a `code` only if its
+ *   first word is one (#76); any other error has code `ERR` and its whole
+ *   message as `err`, as Redis prefixes `ERR ` (#83). The codec applies this.
  *
  * The line comes from the WASM error handler (`value.line`), which captures the
  * script frame at the error point — including command errors propagated out of
@@ -554,34 +561,36 @@ export class LuaEngine {
  * every evaluation.
  */
 function buildScriptError(
-  value: { err: Buffer; code?: Buffer; line?: number },
+  value: { err: Buffer; code?: Buffer; line?: number; flags?: number },
   script: Buffer,
-): { err: Buffer; code: Buffer; meta: ReplyErrorMeta } {
+): { err: Buffer; code?: Buffer; meta: ReplyErrorMeta } {
   const sha = computeSha1Hex(script).toString("utf8");
-  const errStr = value.err.toString("utf8");
+  const flags = value.flags ?? 0;
   let line = value.line ?? 1;
-  if (value.line === undefined && errStr.startsWith("user_script:")) {
-    const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
-    if (colonIdx > 12) {
-      line = Number(errStr.substring(12, colonIdx)) || 1;
+  if (value.line === undefined) {
+    const errStr = value.err.toString("utf8");
+    if (errStr.startsWith("user_script:")) {
+      const colonIdx = errStr.indexOf(":", 12); // after "user_script:"
+      if (colonIdx > 12) {
+        line = Number(errStr.substring(12, colonIdx)) || 1;
+      }
     }
   }
 
-  const marker = parseErrorMarker(errStr);
-  if (marker) {
+  if (flags & SCRIPT_ERROR_ENGINE) {
+    const { kind, name } = parseEngineError(value.err.toString("utf8"));
     return {
-      err: Buffer.from(marker.kind, "utf8"),
+      err: Buffer.from(kind, "utf8"),
       code: Buffer.from("ERR", "utf8"),
-      meta: { kind: marker.kind, name: marker.name, line, sha },
+      meta: name === undefined ? { kind, line, sha } : { kind, name, line, sha },
     };
   }
 
-  return {
-    err: value.err,
-    // Preserve a propagated command code (e.g. WRONGTYPE); otherwise "ERR".
-    code: value.code ?? Buffer.from("ERR", "utf8"),
-    meta: { line, sha },
-  };
+  // The codec already applied the code rule (a table error keeps a propagated
+  // code such as WRONGTYPE, or none; any other error has ERR).
+  return value.code === undefined
+    ? { err: value.err, meta: { line, sha } }
+    : { err: value.err, code: value.code, meta: { line, sha } };
 }
 
 /**
@@ -639,8 +648,10 @@ function errorMessage(err: unknown): string {
  * `retPtr`. A throw anywhere (argument decoding, the host handler, encoding a
  * malformed ReplyValue, heap exhaustion) becomes an error reply carrying the
  * exception message, which C raises (call) or returns as an error table
- * (pcall). If even that cannot be allocated, the zero PtrLen makes C raise
- * "ERR empty reply from host".
+ * (pcall). A thrown exception is a host failure, not a reply the host built,
+ * so it gets the generic `ERR` code when its message has none (a returned
+ * `{ err }` is passed on as is). If even that cannot be allocated, the zero
+ * PtrLen makes C raise "ERR empty reply from host".
  */
 function writeReplyImport(
   exports: WasmExports,
@@ -653,9 +664,10 @@ function writeReplyImport(
   } catch (err) {
     rethrowFault(err);
     try {
-      out = encodeReplyToPtrLen(exports, {
-        err: Buffer.from(errorMessage(err), "utf8"),
-      });
+      out = encodeReplyToPtrLen(
+        exports,
+        failureErrorReply(Buffer.from(errorMessage(err), "utf8")),
+      );
     } catch (fallbackErr) {
       rethrowFault(fallbackErr);
       out = NULL_PTR_LEN;
@@ -714,27 +726,16 @@ function writeSha1Import(
   writePtrLen(exports.HEAPU8, retPtr, out);
 }
 
-const ERROR_MARKER = "__RLUA_E__:";
-
 /**
- * Engine-originated errors (globals protection, see runtime.c) cross the
- * Lua->WASM->JS boundary as a coded string `__RLUA_E__:<kind>:<name>` (Lua errors
- * carry no type tag, so the discriminator travels in the string). Splits out the
- * opaque `kind` and `name`; the library forwards them and never interprets the
- * kind. Returns undefined for ordinary error messages.
+ * Splits an engine error message (`<kind>` or `<kind>:<name>`, see
+ * SCRIPT_ERROR_ENGINE) into the opaque `kind` and the `name`. The library
+ * forwards them and never interprets the kind.
  */
-function parseErrorMarker(
-  errStr: string,
-): { kind: string; name?: string } | undefined {
-  const idx = errStr.indexOf(ERROR_MARKER);
-  if (idx < 0) {
-    return undefined;
-  }
-  const rest = errStr.slice(idx + ERROR_MARKER.length); // "<kind>" or "<kind>:<name>"
-  const sep = rest.indexOf(":");
+function parseEngineError(message: string): { kind: string; name?: string } {
+  const sep = message.indexOf(":");
   return sep < 0
-    ? { kind: rest }
-    : { kind: rest.slice(0, sep), name: rest.slice(sep + 1) };
+    ? { kind: message }
+    : { kind: message.slice(0, sep), name: message.slice(sep + 1) };
 }
 
 /**

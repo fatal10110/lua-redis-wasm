@@ -149,14 +149,10 @@ for (const [profile, w] of PROFILES) {
     assertErr(engine.eval("\nredis.log()"), m.arity, "ERR", 2);
     assertErr(engine.eval("\nredis.log(4, 'msg')"), m.level, "ERR", 2);
     assertErr(engine.eval("\nredis.log('x', 'msg')"), m.type, "ERR", 2);
-    if (w.table) {
-      assertErr(engine.eval("\nredis.setresp(4)"), "RESP version must be 2 or 3.", "ERR", 2);
-    } else {
-      // A code-less string error is split by the uppercase rule on the host
-      // side, so "RESP" reads as the code (the same limitation as
-      // error('MY boom', 0); Redis 6.2 sends "-ERR Error running script ...").
-      assertErr(engine.eval("\nredis.setresp(4)"), "version must be 2 or 3.", "RESP", 2);
-    }
+    // A code-less string error (6.2) always has code ERR on the host side, its
+    // first word is not the code: Redis 6.2 sends "-ERR Error running script
+    // ..." (#83).
+    assertErr(engine.eval("\nredis.setresp(4)"), "RESP version must be 2 or 3.", "ERR", 2);
   });
 }
 

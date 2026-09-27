@@ -27,7 +27,9 @@ sets, big numbers, and verbatim strings. Push replies are not representable.
 ### redisCall
 - Invoked for `redis.call(...)`.
 - Receives the command name and arguments as `Buffer[]`.
-- May throw to signal an error; the engine converts it to `{ err: Buffer }`.
+- May throw to signal an error; the engine converts it to an error reply with
+  the exception message and, when the message has no uppercase code, the
+  generic `ERR` code.
 
 ### redisPcall
 - Invoked for `redis.pcall(...)`.

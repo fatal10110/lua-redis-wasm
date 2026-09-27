@@ -46,6 +46,10 @@ int32_t current_call_line(void) {
   return g_call_line;
 }
 
+int redis_table_errors(void) {
+  return g_table_errors;
+}
+
 uint32_t redis_resp_version(void) {
   return g_resp_version;
 }
@@ -71,6 +75,13 @@ int redis_raise_error(lua_State *L, const char *msg) {
     lua_pushstring(L, msg);
   }
   return lua_error(L);
+}
+
+int redis_raise_engine_error(lua_State *L, const char *msg) {
+  lua_pushstring(L, msg);
+  redis_mark_engine_error(L, -1);
+  lua_pop(L, 1);
+  return redis_raise_error(L, msg);
 }
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
@@ -482,7 +493,7 @@ static int redis_call_common(lua_State *L, int raise_on_error) {
     // Coded kind, no name (Redis's wording for this takes no variable). Raised
     // without a "user_script:N:" position prefix, matching real Redis; the host
     // renders "Lua redis lib command arguments must be strings or integers".
-    return redis_raise_error(L, "__RLUA_E__:command-arg-type");
+    return redis_raise_engine_error(L, "__RLUA_E__:command-arg-type");
   }
   /* Record the caller exactly as Redis 6.2's luaPushError does: stack level 1
    * as-is, without skipping C frames, so pcall(redis.pcall, ...) reports

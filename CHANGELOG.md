@@ -61,6 +61,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged. `THIRD_PARTY_NOTICES.md` now covers the BSD-3-Clause code from
   Valkey / Redis 7.2.4 (including the portions of `wasm/src` derived from it),
   `strbuf.c`, `fpconv.c` and `fpconv_powers.h`.
+- WASM ABI version 2: the script error (`0x06`) payload carries a `flags` byte
+  after `line` (`0x01` engine error, `0x02` message from an error table), so
+  the TS layer no longer reads the error's kind from its text (#59, #76). See
+  `docs/abi.md`.
+- In the Redis 7 error model (every profile but `redis-6.2`, see
+  `compat.tableErrors`), an uncaught table error whose `err` has no uppercase
+  error code is reported without a `code` instead of with `ERR`, since Redis 7
+  sends it as-is: `error({err='boom'})` → `{ err: "boom", meta }` (Redis:
+  `-boom script: ...`), and likewise `error({err=7})`,
+  `error({err='oops something'})` and a host command error reply such as
+  `"oops something"`. A string error, and every error in the `redis-6.2` string
+  model (Redis 6.2 sends `-ERR ...`), still gets `ERR` (#76).
+- An uncaught string error always has code `ERR` and its whole message as `err`,
+  as Redis sends `-ERR <message>`: its first word is no longer split off as the
+  code (`error('MY boom', 0)` → code `ERR`, `err` `MY boom`, was code `MY`). One
+  leading `ERR ` is dropped, since the engine's own string errors carry it, so
+  `error('ERR x', 0)` reports `x` (Redis: `-ERR ERR x`). In the `redis-6.2`
+  model this applies to every script error, table errors and `redis.call`
+  errors included (`WRONGTYPE ...` → code `ERR`, `err` `WRONGTYPE ...`), as
+  Redis 6.2 replies `-ERR Error running script ...` (#83).
+- A `redisCall` / `redisPcall` handler exception whose message has no uppercase
+  error code becomes an `ERR <message>` error reply (was `<message>`): it is a
+  host failure, not a Redis reply, like Redis's `addReplyError`. A returned
+  `{ err }` reply is still passed on as is.
 - WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
   (`{0,0}` on success, otherwise the error message C raises as a Lua error), and
   every `PtrLen`-returning export and import uses the struct-return pointer only.
@@ -133,6 +157,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Engine errors (globals protection, a bad `redis.call` argument) are no longer
+  recognized by the `__RLUA_E__:` text in the message. A script
+  (`error('__RLUA_E__:x\r\n+OK')`) or a host command error echoing a key could
+  use that text to skip the CR/LF sanitization of script errors and to pass
+  itself off as a globals-protection error with any `kind`/`name`. The engine
+  now records the error it raised and flags only that one over the ABI; any
+  other text is sanitized and reported as an ordinary error (#59).
 - `maxReplyBytes` is checked while the reply is encoded instead of after it is
   built in full: a small value that expands into a huge reply (a table holding
   the same subtable many times) fails straight away with

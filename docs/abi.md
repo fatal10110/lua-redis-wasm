@@ -35,7 +35,7 @@ Reply `type` values:
 - 0x03: array (payload: repeated Reply)
 - 0x04: status (payload: bytes)
 - 0x05: error (payload: bytes)
-- 0x06: script error (payload: bytes)
+- 0x06: script error (payload: line u32, flags u8, message bytes; see below)
 - 0x07: boolean (payload: 1 byte, 0 or 1)
 - 0x08: double (payload: float64 little-endian)
 - 0x09: map (payload: repeated key Reply, value Reply pairs)
@@ -50,6 +50,45 @@ Encoding details:
 - Doubles are little-endian float64.
 - Arrays, sets, and maps are encoded as concatenated Reply entries.
 - All string-like payloads are raw bytes and may include null bytes.
+
+### Script errors
+A script error (0x06) is an error that aborted the script: a load or runtime
+error, including one that propagated out of `redis.call`. Error *values* the
+script returns (e.g. `return redis.pcall(...)`) are plain errors (0x05).
+`count_or_len` covers the whole payload:
+
+```
+struct ScriptErrorPayload {
+  uint32_t line;   // script line at the error point, 0 = unknown
+  uint8_t flags;   // SCRIPT_ERROR_* below
+  uint8_t message[count_or_len - 5];
+}
+```
+
+- `line` 0 means the error handler did not run (load/syntax errors); the line
+  is then parsed from the message's `user_script:N:` prefix.
+- `flags` is set by the engine and never inferred from the message text, which
+  scripts and host command errors control:
+  - `0x01` `SCRIPT_ERROR_ENGINE`: the engine raised the error itself (globals
+    protection, a bad `redis.call` argument). `message` is `<kind>` or
+    `<kind>:<name>`, unsanitized: `name` is data (a global's name may contain
+    CR/LF). Only the error the engine raised in the current eval, uncaught or
+    rethrown unchanged, carries it.
+  - `0x02` `SCRIPT_ERROR_FROM_TABLE`: `message` is the `err` field of an error
+    table (`error({err=...})`, a `redis.call` error, the fuel kill). Redis 7
+    sends it as-is (`-<err>`), so the host must not add a default error code.
+    Set only in the Redis 7 error model (compat flag `0x10`): Redis 6.2 sends
+    `-ERR ...` for every script error.
+  - neither: a string (or other value) error, or any error in the Redis 6.2
+    error model. Redis sends it as `-ERR <message>` (Redis 7's error handler
+    wraps it as `{err='ERR ' .. tostring(err)}`; Redis 6.2 replies
+    `-ERR Error running script ...`), so the host reports code `ERR` and the
+    whole message, whatever its first word, less one leading `ERR `: the
+    engine's own string errors (`ERR reply decoding failed`, ...) already carry
+    it.
+- Except with `SCRIPT_ERROR_ENGINE`, `message` is cut at the first NUL, has
+  trailing CR/LF trimmed and every other CR/LF mapped to a space, so it can be
+  written into RESP as is.
 
 ## Calling Convention
 `ptr_len` is the C struct `PtrLen { uint32_t ptr; uint32_t len; }`. clang's
@@ -164,5 +203,7 @@ struct ArgEntry {
 - Host-side failures must map to `error` replies with Redis-like error strings.
 
 ## Versioning
-- ABI version: 1 (1: `host_redis_log`/`host_redis_setresp` return a failure `ptr_len`)
+- ABI version: 2
+  - 2: the script error (0x06) payload carries a `flags` byte after `line`.
+  - 1: `host_redis_log`/`host_redis_setresp` return a failure `ptr_len`.
 - Breaking changes require incrementing ABI version and updating `abi.h`.

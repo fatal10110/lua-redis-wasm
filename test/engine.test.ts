@@ -576,9 +576,10 @@ test("returned error values without an uppercase code keep the whole message", a
   assert.equal(codeless.code, undefined);
   assert.equal(codeless.err.toString("utf8"), "no such key");
 
-  // Host handler that throws a plain Error.
+  // Host handler that throws a plain Error: a host failure, not a Redis reply,
+  // so it gets the generic ERR code like Redis's addReplyError.
   const thrown = engine.eval("return redis.pcall('BOOM')") as Err;
-  assert.equal(thrown.code, undefined);
+  assert.equal(thrown.code?.toString("utf8"), "ERR");
   assert.equal(thrown.err.toString("utf8"), "connection lost");
 
   // Hand-built error table.
