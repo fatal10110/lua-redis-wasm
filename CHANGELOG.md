@@ -34,7 +34,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the host as code `ERR`, `err` `log failed` (not `ERR ERR log failed`),
   `throw new Error("WRONGTYPE x")` as code `WRONGTYPE`, and a script that
   catches `log sink down` sees `ERR log sink down` (was `log sink down`). With
-  `redis-6.2` the message is raised as it is, like any 6.2 host error.
+  `redis-6.2` the message is raised as it is (a `redisCall` throw with no code
+  still gets `ERR`, as every Redis error reply has one).
 - **`redis.sha1hex` checks its arity** (#95). No argument or more than one
   raises `wrong number of arguments`, as in Redis (was Lua's `bad argument #1`
   error, or the hash of the first argument). A script that catches it sees

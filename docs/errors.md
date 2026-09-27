@@ -35,8 +35,9 @@ uppercase token (`[A-Z][A-Z0-9]*`) into `code`; write `-<code> <err>`, or
   itself: `error('ERR x', 0)` → code `ERR`, `err` `ERR x`, which the host writes
   as `-ERR ERR x` like Redis 7.0+ (Redis 6.2: `... @user_script:1: ERR x`).
   The engine's own errors, and exceptions thrown by host callbacks, never read
-  `ERR ERR`: they are raised as an error table in the Redis 7 error model, and
-  the engine's own without a code of their own with `redis-6.2`.
+  `ERR ERR` in the Redis 7 error model, where they are raised as error tables;
+  with `redis-6.2` the engine's own are bare, and a host error is kept whole
+  (`ERR ...` included), as Redis 6.2 does.
 - In the Redis 7 error model (every profile but `redis-6.2`, see
   `compat.tableErrors`), an error **table**'s `err` is what Redis sends as-is,
   so a table error has a `code` only when its `err` starts with one:
