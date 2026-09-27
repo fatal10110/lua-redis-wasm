@@ -73,6 +73,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `error({err='oops something'})` and a host command error reply such as
   `"oops something"`. A string error, and every error in the `redis-6.2` string
   model (Redis 6.2 sends `-ERR ...`), still gets `ERR` (#76).
+- An uncaught string error always has code `ERR` and its whole message as `err`,
+  as Redis sends `-ERR <message>`: its first word is no longer split off as the
+  code (`error('MY boom', 0)` → code `ERR`, `err` `MY boom`, was code `MY`). One
+  leading `ERR ` is dropped, since the engine's own string errors carry it, so
+  `error('ERR x', 0)` reports `x` (Redis: `-ERR ERR x`). In the `redis-6.2`
+  model this applies to every script error, table errors and `redis.call`
+  errors included (`WRONGTYPE ...` → code `ERR`, `err` `WRONGTYPE ...`), as
+  Redis 6.2 replies `-ERR Error running script ...` (#83).
 - A `redisCall` / `redisPcall` handler exception whose message has no uppercase
   error code becomes an `ERR <message>` error reply (was `<message>`): it is a
   host failure, not a Redis reply, like Redis's `addReplyError`. A returned

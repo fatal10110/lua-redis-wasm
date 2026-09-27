@@ -297,13 +297,17 @@ The engine composes **no** user-facing error wording — it classifies the error
 lets the host render. When a script aborts, the reply carries:
 
 - `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call`.
-  A string error without one (`error('boom')`) gets `ERR`, as Redis prefixes
-  `ERR `. In the Redis 7 error model (every profile but `redis-6.2`, see
+  An uncaught string error always has code `ERR` and its whole message as `err`,
+  whatever its first word (`error('MY boom', 0)` → code `ERR`, `err` `MY boom`),
+  as Redis sends it as `-ERR <message>`. One leading `ERR ` is dropped, because
+  the engine's own string errors carry it, so `error('ERR x', 0)` reports `x`
+  (Redis: `-ERR ERR x`). In the Redis 7 error model (every profile but `redis-6.2`, see
   `compat.tableErrors`), an error table's `err` is what Redis sends as-is, so a
   table error has a `code` only when its `err` starts with one:
   `error({err='MY boom'})` → code `MY`, `err` `boom`; `error({err='boom'})` → no
   `code`, `err` `boom` (Redis: `-boom script: ...`). With `redis-6.2` string
-  errors, which Redis 6.2 always sends as `-ERR ...`, it gets `ERR` too. Write
+  errors, which Redis 6.2 always sends as `-ERR ...`, every script error takes
+  the string rule: `error({err='MY boom'})` → code `ERR`, `err` `MY boom`. Write
   `-<code> <err>`, or `-<err>` when `code` is absent.
   See [Reply Types](#reply-types).
 - `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
@@ -343,16 +347,15 @@ added to a message that has no space and trailing CR/LF trimmed, as in Redis. Wi
 verbatim; the `redis.log` and `redis.setresp` argument errors carry no `ERR` code
 (`RESP version must be 2 or 3.`), and `redis.error_reply` returns its argument
 unchanged, as in Redis 6.2. The `compat.tableErrors` option overrides the
-profile. Uncaught, they reach the host like any string error: split by the
-uppercase-code rule, so `RESP version must be 2 or 3.` reports code `RESP` (Redis
-6.2 wraps it in `ERR Error running script ...`). Other than that, what the host
-receives when the error aborts the script is the same in both models, except that
-the table model trims CR/LF around the message after the code, as Redis does
-(host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`), and that a
-host error reply whose first word is not an uppercase code (`"oops something"`),
-like an `error({err=...})` table without one, stays code-less in the table model,
-as Redis 7 sends it as-is, while with string errors it gets the `ERR` code, as
-Redis 6.2 prefixes `ERR` to every script error.
+profile. When the error aborts the script, the host receives what each Redis
+version sends. In the table model a host error reply (or `error({err=...})`
+table) keeps its code (`WRONGTYPE ...` → code `WRONGTYPE`), stays code-less when
+its first word is not an uppercase code (`"oops something"`), as Redis 7 sends it
+as-is, and has CR/LF around the message after the code trimmed (`"\r\nboom"` →
+`boom`). With string errors every script error has code `ERR` and the whole
+message, less one leading `ERR ` (`WRONGTYPE ...` → code `ERR`, `err`
+`WRONGTYPE ...`; `RESP version must be 2 or 3.` → code `ERR`; `"\r\nboom"` →
+`"  boom"`), as Redis 6.2 replies `-ERR Error running script ...`.
 
 ### log
 

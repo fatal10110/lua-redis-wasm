@@ -25,10 +25,13 @@
  *   the message; `code` is the optional leading error code (e.g. `WRONGTYPE`).
  *   On decode the code is split out of the wire payload; on encode it is
  *   prepended back. When `code` is omitted the message is used verbatim. A
- *   script-aborting error has `code` `ERR` when it was a string error without
- *   one, and, in the Redis 7 error model (`compat.tableErrors`), no `code` when
- *   it was a table whose `err` has none (`error({err='boom'})`), which Redis 7
- *   sends as `-boom`; Redis 6.2 sends `-ERR ...` for every script error.
+ *   script-aborting string error always has `code` `ERR` and its whole message
+ *   (less one leading `ERR `) as `err`, as Redis sends `-ERR <message>`. In the
+ *   Redis 7 error model (`compat.tableErrors`) a table error's `err` is split
+ *   like an error reply, with no `code` when it has none
+ *   (`error({err='boom'})`, which Redis 7 sends as `-boom`); in the Redis 6.2
+ *   model it takes the string rule, as Redis 6.2 sends `-ERR ...` for every
+ *   script error.
  * - `{ double: number }` - RESP3 double reply
  * - `{ big_number: Buffer }` - RESP3 big number reply
  * - `{ verbatim_string: { format: Buffer; string: Buffer } }` - RESP3 verbatim string

@@ -78,9 +78,29 @@ export const SCRIPT_ERROR_ENGINE = 0x01;
 
 /**
  * REPLY_SCRIPT_ERROR flag: the message is the `err` field of an error table,
- * which Redis sends as-is, so no default `ERR` code is added (#76).
+ * which Redis 7 sends as-is, so no default `ERR` code is added (#76). Set only
+ * in the Redis 7 error model.
  */
 export const SCRIPT_ERROR_FROM_TABLE = 0x02;
+
+const ERR_PREFIX = Buffer.from("ERR ", "utf8");
+
+/**
+ * An uncaught string (non-table) script error, or any script error in the
+ * Redis 6.2 error model: Redis sends it with the `ERR` code in front (Redis 7's
+ * error handler wraps it as `{err='ERR ' .. tostring(err)}`, Redis 6.2 replies
+ * `-ERR Error running script ...`), so the code is always `ERR` and the whole
+ * message is `err`, whatever its first word (#83). The engine's own string
+ * errors already read `ERR ...`; one leading `ERR ` is dropped so they are not
+ * reported as `ERR ERR ...` (a script's `error('ERR x', 0)` thus reports `x`).
+ */
+function stringScriptError(payload: Buffer): { err: Buffer; code: Buffer } {
+  const hasErr = payload.subarray(0, ERR_PREFIX.length).equals(ERR_PREFIX);
+  return {
+    err: Buffer.from(hasErr ? payload.subarray(ERR_PREFIX.length) : payload),
+    code: Buffer.from("ERR", "utf8"),
+  };
+}
 
 const REPLY_BOOL = 0x07;
 const REPLY_DOUBLE = 0x08;
@@ -388,11 +408,14 @@ export function decodeReply(
     const flags = buffer.readUInt8(cursor + 4);
     const payload = buffer.subarray(cursor + 5, cursor + countOrLen);
     cursor += countOrLen;
-    // An engine error's message is `<kind>[:<name>]`, not `CODE message`.
+    // An engine error's message is `<kind>[:<name>]`, not `CODE message`; a
+    // table error's `err` is split like an error reply, with no default code.
     const error =
       flags & SCRIPT_ERROR_ENGINE
         ? { err: Buffer.from(payload) }
-        : splitErrorPayload(payload);
+        : flags & SCRIPT_ERROR_FROM_TABLE
+          ? splitErrorPayload(payload)
+          : stringScriptError(payload);
     // `line` and `flags` are internal plumbing consumed by buildScriptError;
     // they are not part of the public ReplyValue contract, hence the cast.
     const value = {

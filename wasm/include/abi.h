@@ -40,8 +40,9 @@ typedef enum ReplyType {
  * ("-<err>"): its leading word is the error code only if it has one, and no
  * default code is added. Set only in the Redis 7 error model (COMPAT_TABLE_ERRORS);
  * Redis 6.2 replies "-ERR ..." for every script error. Otherwise the error was
- * a string (or another value), or the model is 6.2's, and the host adds the
- * generic ERR code when the message carries none. */
+ * a string (or another value), or the model is 6.2's: Redis sends it as
+ * "-ERR <message>", so the host reports code ERR and the whole message, less
+ * one leading "ERR " (the engine's own string errors carry it). */
 #define SCRIPT_ERROR_FROM_TABLE 0x02u
 
 #if defined(__GNUC__)

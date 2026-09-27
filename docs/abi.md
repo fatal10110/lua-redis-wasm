@@ -80,8 +80,12 @@ struct ScriptErrorPayload {
     Set only in the Redis 7 error model (compat flag `0x10`): Redis 6.2 sends
     `-ERR ...` for every script error.
   - neither: a string (or other value) error, or any error in the Redis 6.2
-    error model. Redis prefixes it with `ERR `; the engine reports the generic
-    `ERR` code when the message has none.
+    error model. Redis sends it as `-ERR <message>` (Redis 7's error handler
+    wraps it as `{err='ERR ' .. tostring(err)}`; Redis 6.2 replies
+    `-ERR Error running script ...`), so the host reports code `ERR` and the
+    whole message, whatever its first word, less one leading `ERR `: the
+    engine's own string errors (`ERR reply decoding failed`, ...) already carry
+    it.
 - Except with `SCRIPT_ERROR_ENGINE`, `message` is cut at the first NUL, has
   trailing CR/LF trimmed and every other CR/LF mapped to a space, so it can be
   written into RESP as is.

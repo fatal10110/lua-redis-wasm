@@ -79,15 +79,18 @@ const ALL_PROFILES: Array<CompatProfile | undefined> = [...TABLE_PROFILES, "redi
 for (const profile of ALL_PROFILES) {
   const name = profile ?? "default";
 
-  // Code of a table error whose err has none: Redis 7 sends the err as-is, Redis
-  // 6.2 replies "-ERR ..." for every script error (#76).
-  const bare = profile === "redis-6.2" ? "ERR" : undefined;
+  // Redis 7 sends a table error's err as-is, so its code is its first word, if
+  // any (#76); Redis 6.2 replies "-ERR ..." for every script error (#83).
+  const v62 = profile === "redis-6.2";
+  const bare = v62 ? "ERR" : undefined;
+  const coded = (code: string, message: string): [string, string] =>
+    v62 ? ["ERR", `${code} ${message}`] : [code, message];
 
   test(`error model (${name}): error() with a table reports its err field`, async () => {
     const engine = await engineFor(profile);
-    assertErr(engine.eval("error({err='MY custom'})"), "MY", "custom", 1);
+    assertErr(engine.eval("error({err='MY custom'})"), ...coded("MY", "custom"), 1);
     assertErr(engine.eval("local x = 1\nerror(redis.error_reply('boom'))"), "ERR", "boom", 2);
-    assertErr(engine.eval("error({err='WRONGTYPE bad\\r\\nvalue'})"), "WRONGTYPE", "bad  value");
+    assertErr(engine.eval("error({err='WRONGTYPE bad\\r\\nvalue'})"), ...coded("WRONGTYPE", "bad  value"));
     // Like luaExtractErrorInformation: no string `err` field -> "ERR unknown error".
     assertErr(engine.eval("error({})"), "ERR", "unknown error");
     assertErr(engine.eval("error({err=true})"), "ERR", "unknown error");
@@ -104,7 +107,7 @@ for (const profile of ALL_PROFILES) {
     assertErr(engine.eval("\nerror({err='oops something'})"), bare, "oops something", 2);
     assertErr(engine.eval("error({err='My Error x'})"), bare, "My Error x");
     assertErr(engine.eval("error({err='boom\\r\\n'})"), bare, "boom");
-    assertErr(engine.eval("error({err='MY boom'})"), "MY", "boom", 1);
+    assertErr(engine.eval("error({err='MY boom'})"), ...coded("MY", "boom"), 1);
     // A code-less host error reply, raised by redis.call or rethrown from
     // redis.pcall, gets the same code either way.
     assertErr(engine.eval("return redis.call('oops')"), bare, "oops something", 1);
@@ -115,9 +118,24 @@ for (const profile of ALL_PROFILES) {
       err: Buffer.from("oops thrown"),
       code: Buffer.from("ERR"),
     });
-    // A string error still gets the generic code, as Redis prefixes "ERR ".
+    assertUsable(engine);
+  });
+
+  test(`error model (${name}): an uncaught string error always has code ERR (#83)`, async () => {
+    const engine = await engineFor(profile);
+    // Redis 7 wraps it as {err='ERR ' .. tostring(err)}; Redis 6.2 replies
+    // "-ERR Error running script ...". Its first word is never the code.
     assertErr(engine.eval("error('boom', 0)"), "ERR", "boom");
     assertErr(engine.eval("error('boom')"), "ERR", "user_script:1: boom", 1);
+    assertErr(engine.eval("error('MY boom', 0)"), "ERR", "MY boom");
+    assertErr(engine.eval("error('WRONGTYPE x\\r\\ny', 0)"), "ERR", "WRONGTYPE x  y");
+    assertErr(engine.eval("error(42)"), "ERR", "user_script:1: 42");
+    // The engine's own "ERR ..." strings are not reported as "ERR ERR ...", so
+    // a script's own leading "ERR " is dropped as well.
+    assertErr(engine.eval("error('ERR foo', 0)"), "ERR", "foo");
+    assertErr(engine.eval("error('ERRX foo', 0)"), "ERR", "ERRX foo");
+    // Load errors take the same path.
+    assertErr(engine.eval("return +"), "ERR", "user_script:1: unexpected symbol near '+'", 1);
     assertUsable(engine);
   });
 
@@ -216,6 +234,8 @@ test("error model (redis-6.2): redis.call raises a string, pcall is the stock on
   ]);
   assert.equal((engine.eval("return select(2, xpcall(function() redis.log(9, 'x') end, function(e) return type(e) end))") as Buffer).toString(), "string");
   assertErr(engine.eval("redis.call('SET', 'k', 'v')\nredis.call('nope')"), "ERR", "unknown command 'nope'", 2);
+  // Redis 6.2: "-ERR Error running script ...: @user_script:3: WRONGTYPE ..." (#83).
+  assertErr(engine.eval("\n\nredis.call('wrongtype')"), "ERR", "WRONGTYPE Operation against a key holding the wrong kind of value", 3);
   assertUsable(engine);
 });
 

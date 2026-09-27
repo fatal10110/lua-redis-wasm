@@ -74,7 +74,6 @@ import {
   failureErrorReply,
   REPLY_SCRIPT_ERROR,
   SCRIPT_ERROR_ENGINE,
-  SCRIPT_ERROR_FROM_TABLE,
 } from "./codec.js";
 import {
   loadModule,
@@ -547,10 +546,10 @@ export class LuaEngine {
  *   default. The message text alone never makes an engine error (#59).
  * - Lua runtime / redis.call errors already carry their own message (and code);
  *   they pass through untouched, with only `line`/`sha` attached for the host to
- *   decorate. A table error's `err` (`SCRIPT_ERROR_FROM_TABLE`) is what Redis
- *   sends as-is (`-<err>`), so it has a `code` only if its first word is one; a
- *   string error gets the default `ERR` code when it has none, as Redis
- *   prefixes `ERR ` (#76).
+ *   decorate. A table error's `err` (`SCRIPT_ERROR_FROM_TABLE`, Redis 7 error
+ *   model) is what Redis sends as-is (`-<err>`), so it has a `code` only if its
+ *   first word is one (#76); any other error has code `ERR` and its whole
+ *   message as `err`, as Redis prefixes `ERR ` (#83). The codec applies this.
  *
  * The line comes from the WASM error handler (`value.line`), which captures the
  * script frame at the error point — including command errors propagated out of
@@ -587,14 +586,11 @@ function buildScriptError(
     };
   }
 
-  // Preserve a propagated command code (e.g. WRONGTYPE). A table error without
-  // one stays code-less, like Redis's `-<err>`; anything else defaults to ERR.
-  const code =
-    value.code ??
-    (flags & SCRIPT_ERROR_FROM_TABLE ? undefined : Buffer.from("ERR", "utf8"));
-  return code === undefined
+  // The codec already applied the code rule (a table error keeps a propagated
+  // code such as WRONGTYPE, or none; any other error has ERR).
+  return value.code === undefined
     ? { err: value.err, meta: { line, sha } }
-    : { err: value.err, code, meta: { line, sha } };
+    : { err: value.err, code: value.code, meta: { line, sha } };
 }
 
 /**
