@@ -1,4 +1,5 @@
 export { load, LuaWasmModule, LuaEngine, LuaWasmEngine } from "./engine.js";
+export { WasmFault } from "./helpers.js";
 export type {
   EngineOptions,
   EngineLimits,
