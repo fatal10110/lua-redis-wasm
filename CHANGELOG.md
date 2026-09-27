@@ -101,7 +101,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of with Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as
   integers (`1e15` → `1000000000000000`), others in the shortest round-trip form
   via Redis's `fpconv_dtoa` (`0.1+0.2` → `0.30000000000000004`). The same for
-  every compat profile (#68).
+  every compat profile; the `redis-7.2` profile thus matches Redis 7.2.5+
+  (7.2.0–7.2.4 sent `1e15` as `1e+15`) (#68).
 
 ## [1.3.0] - 2026-06-08
 

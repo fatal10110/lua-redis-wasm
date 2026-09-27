@@ -170,8 +170,8 @@ Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as plain integers
 (`1e15` → `1000000000000000`, `-0.0` → `0`), everything else in the shortest
 round-trip form (`0.1+0.2` → `0.30000000000000004`, `1e300` → `1e+300`, `1/0` →
 `inf`, `0/0` → `nan` or `-nan`). This applies whatever the `profile` compat
-option. Older versions differ: Redis 7.2 always used the shortest form
-(`1e15` → `1e+15`), and Redis 7.0 and earlier used `%.17g`
+option. Older versions differ: Redis 7.2.0–7.2.4 always used the shortest form
+(`1e15` → `1e+15`; 7.2.5+ matches 7.4), and Redis 7.0 and earlier used `%.17g`
 (`3.3` → `3.2999999999999998`).
 
 A zero-argument `redis.call()` / `redis.pcall()` is delegated to the host with an

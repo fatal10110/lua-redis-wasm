@@ -139,11 +139,12 @@ for (const fn of ["call", "pcall"]) {
 
 test("redis.call: NaN number argument is formatted by fpconv_dtoa", async () => {
   const { engine, calls } = await capturingEngine();
-  // The NaN sign bit is platform-dependent (x86 Redis sends "-nan" for 0/0).
+  // The sign of 0/0 is platform-dependent (x86 Redis sends "-nan"), but
+  // -(0/0) flips it deterministically, so the two args are one of each.
+  // (Lua's "%.14g" spells NaN the same way; this pins the spelling, not the fix.)
   engine.eval("redis.call('SET', 'k', 0/0, -(0/0))");
   assert.equal(calls.length, 1);
-  assert.match(calls[0][2], /^-?nan$/);
-  assert.match(calls[0][3], /^-?nan$/);
+  assert.deepEqual(new Set(calls[0].slice(2)), new Set(["nan", "-nan"]));
 });
 
 test("redis.call: string arguments are passed through, numbers in every position", async () => {
