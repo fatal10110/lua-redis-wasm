@@ -387,14 +387,56 @@ static int l_redis_pcall(lua_State *L) {
   return redis_call_common(L, 0);
 }
 
+/* Raises `msg` as a plain string, without luaL_error's "user_script:N:"
+ * position prefix, the same way this engine currently raises redis.call errors;
+ * the script line reaches the host through the error handler instead. Redis 7
+ * (luaPushError + luaError) raises a table {err="ERR ..."} here; switching to
+ * table errors is tracked in #48. */
+static int raise_bare_error(lua_State *L, const char *msg) {
+  lua_pushstring(L, msg);
+  return lua_error(L);
+}
+
+/* redis.log(level, ...). Mirrors Redis's luaLogCommand (src/script_lua.c): the
+ * level must be a number (numeric strings count, like lua_isnumber) truncated to
+ * an int in 0..3, and every argument after it is converted with lua_tolstring
+ * and joined with " ". Values lua_tolstring cannot convert (nil, booleans,
+ * tables, ...) are skipped, with no separator of their own; a separator is
+ * written before every converted argument except the first one after the level,
+ * exactly as Redis does. Verbosity filtering is left to the host, which receives
+ * every message. */
 static int l_redis_log(lua_State *L) {
   int argc = lua_gettop(L);
   if (argc < 2) {
-    return luaL_error(L, "ERR redis.log requires level and message");
+    return raise_bare_error(L, "ERR redis.log() requires two arguments or more.");
   }
-  int level = (int)luaL_checkinteger(L, 1);
+  if (!lua_isnumber(L, 1)) {
+    return raise_bare_error(L, "ERR First argument must be a number (log level).");
+  }
+  /* Redis assigns the number to an int (truncation toward zero) and then checks
+   * LL_DEBUG..LL_WARNING. Range-check the double first so NaN / huge values
+   * never reach the float-to-int conversion (which traps in WASM). */
+  lua_Number raw_level = lua_tonumber(L, 1);
+  if (!(raw_level > -1 && raw_level < 4)) {
+    return raise_bare_error(L, "ERR Invalid log level.");
+  }
+  int level = (int)raw_level;
+
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  for (int j = 2; j <= argc; j++) {
+    size_t len = 0;
+    const char *s = lua_tolstring(L, j, &len);
+    if (s) {
+      if (j != 2) {
+        luaL_addchar(&b, ' ');
+      }
+      luaL_addlstring(&b, s, len);
+    }
+  }
+  luaL_pushresult(&b);
   size_t len = 0;
-  const char *msg = luaL_checklstring(L, 2, &len);
+  const char *msg = lua_tolstring(L, -1, &len);
   host_redis_log((uint32_t)level, (uint32_t)(uintptr_t)msg, (uint32_t)len);
   return 0;
 }
@@ -411,36 +453,59 @@ static int l_redis_sha1hex(lua_State *L) {
   return 1;
 }
 
-// Tests whether the message opens with a Redis error code: a space-terminated
-// leading token matching `[A-Z][A-Z0-9]*`. Mirrors isErrorCode in src/codec.ts.
-static int has_error_code(const char *msg, size_t len) {
-  const char *space = memchr(msg, ' ', len);
-  if (space == NULL || space == msg) {
-    return 0;
-  }
-  for (const char *p = msg; p < space; p++) {
-    unsigned char c = (unsigned char)*p;
-    int is_upper = c >= 'A' && c <= 'Z';
-    int is_digit = c >= '0' && c <= '9';
-    if (!is_upper && !(p > msg && is_digit)) {
-      return 0;
-    }
-  }
-  return 1;
+static int is_crlf(char c) {
+  return c == '\r' || c == '\n';
 }
 
+/* redis.error_reply(msg). Mirrors Redis's luaRedisErrorReplyCommand +
+ * luaPushErrorBuff (src/script_lua.c):
+ * - anything but exactly one string argument returns (does not raise)
+ *   {err="ERR wrong number or type of arguments"};
+ * - the message is read as a C string (cut at the first NUL) and one leading
+ *   '-' is dropped;
+ * - with no space, the generic "ERR " code is prepended; otherwise the token
+ *   before the first space is the error code, taken as-is (no case check);
+ * - the text after the code is trimmed of '\r'/'\n' at both ends (sdstrim). */
 static int l_redis_error_reply(lua_State *L) {
-  size_t len = 0;
-  const char *msg = luaL_checklstring(L, 1, &len);
-  // Real Redis prepends the default "ERR " code when the message does not already
-  // begin with an uppercase error code (the leading token before the first space).
-  if (!has_error_code(msg, len)) {
-    lua_pushliteral(L, "ERR ");
-    lua_pushvalue(L, 1);
-    lua_concat(L, 2);
-    msg = lua_tolstring(L, -1, &len);
+  if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+    static const char bad_args[] = "ERR wrong number or type of arguments";
+    return push_error_table(L, (const uint8_t *)bad_args, (uint32_t)(sizeof(bad_args) - 1));
   }
-  return push_error_table(L, (const uint8_t *)msg, (uint32_t)len);
+  const char *err = lua_tostring(L, 1);
+  size_t len = strlen(err);
+  if (err[0] == '-') {
+    err++;
+    len--;
+  }
+
+  const char *code = "ERR";
+  size_t code_len = 3;
+  const char *msg = err;
+  size_t msg_len = len;
+  const char *space = memchr(err, ' ', len);
+  if (space != NULL) {
+    code = err;
+    code_len = (size_t)(space - err);
+    msg = space + 1;
+    msg_len = len - code_len - 1;
+  }
+  while (msg_len > 0 && is_crlf(msg[0])) {
+    msg++;
+    msg_len--;
+  }
+  while (msg_len > 0 && is_crlf(msg[msg_len - 1])) {
+    msg_len--;
+  }
+
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  luaL_addlstring(&b, code, code_len);
+  luaL_addchar(&b, ' ');
+  luaL_addlstring(&b, msg, msg_len);
+  luaL_pushresult(&b);
+  size_t out_len = 0;
+  const char *out = lua_tolstring(L, -1, &out_len);
+  return push_error_table(L, (const uint8_t *)out, (uint32_t)out_len);
 }
 
 static int l_redis_status_reply(lua_State *L) {
