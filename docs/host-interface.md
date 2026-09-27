@@ -127,10 +127,53 @@ If an exception still escapes the WASM module, the engine becomes unusable; see
 
 ### Nested evaluation
 A handler must not evaluate another script on the same engine: while a script
-is running, `eval` / `evalWithArgs` reply
+is running, `eval` / `evalWithArgs` / `compile` reply
 `ERR nested eval is not supported: a script is already running` (Redis likewise
-refuses `EVAL` from inside a script), and `reset()` / `dispose()` throw. Use a
-second engine, or run the script after the current one returns.
+refuses `EVAL` and `SCRIPT LOAD` from inside a script), and `reset()` /
+`dispose()` throw. Use a second engine, or run the script after the current
+one returns.
+
+## SCRIPT LOAD and compile
+
+`engine.compile(script)` compiles a script without running it: it returns
+`null` when the script is valid Lua, or the compile error reply `eval` would
+give (`meta.kind` `"compile"`, see
+[errors.md](errors.md#compile-errors)). No script code runs, so no host
+callback is called, no global is set and no fuel is spent; the Lua VM is left
+as it was. It works in standalone engines too. No limit applies to the
+script's size other than the WASM heap, as for `eval` (`maxArgBytes` covers
+`KEYS`/`ARGV` only).
+
+The engine keeps no script cache: the host keeps the scripts by SHA1 and runs
+them with `eval`, which compiles the script again. A host's `SCRIPT LOAD`:
+
+```ts
+import { createHash } from "node:crypto";
+
+const scripts = new Map<string, Buffer>();
+
+function scriptLoad(body: Buffer): string {
+  const reply = engine.compile(body);
+  if (reply) {
+    if (reply.meta?.kind === "compile") {
+      throw new Error(`ERR Error compiling script (new function): ${reply.err}`);
+    }
+    throw new Error(`${reply.code ?? "ERR"} ${reply.err}`); // no VM, nested call
+  }
+  const sha = createHash("sha1").update(body).digest("hex");
+  scripts.set(sha, body);
+  return sha;
+}
+```
+
+For `EVAL` / `EVALSHA`, render a reply whose `meta.kind` is `"compile"` the
+same way: `-ERR Error compiling script (new function): <err>`, without the
+`script: <sha>, on @user_script:<line>.` suffix other script errors get. This
+is Redis's wording on every version (6.2 to 8.x, Valkey 8.0 and 9.0).
+
+A reply from `compile` without `meta` means nothing was compiled: `compile` was
+called from a host callback (see above), or there is no Lua VM
+(`ERR Lua VM not initialized`, after a failed `reset()`).
 
 ## ReplyValue
 

@@ -136,7 +136,8 @@ for (const profile of ALL_PROFILES) {
     // in its message (#93).
     assertErr(engine.eval("error('ERR foo', 0)"), "ERR", "ERR foo");
     assertErr(engine.eval("error('ERRX foo', 0)"), "ERR", "ERRX foo");
-    // Load errors take the same path.
+    // Compile errors have the same code and message (flagged meta.kind
+    // "compile", see compile.test.ts).
     assertErr(engine.eval("return +"), "ERR", "user_script:1: unexpected symbol near '+'", 1);
     assertUsable(engine);
   });

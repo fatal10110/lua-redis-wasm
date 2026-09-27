@@ -5,6 +5,7 @@ export type {
   EngineLimits,
   LoadOptions,
   ReplyValue,
+  ReplyError,
   ReplyErrorMeta,
   RedisCallHandler,
   RedisCallContext,

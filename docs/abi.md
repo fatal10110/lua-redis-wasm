@@ -52,8 +52,8 @@ Encoding details:
 - All string-like payloads are raw bytes and may include null bytes.
 
 ### Script errors
-A script error (0x06) is an error that aborted the script: a load or runtime
-error, including one that propagated out of `redis.call`. Error *values* the
+A script error (0x06) is an error that aborted the script: a compile (load) or
+runtime error, including one that propagated out of `redis.call`. Error *values* the
 script returns (e.g. `return redis.pcall(...)`) are plain errors (0x05).
 `count_or_len` covers the whole payload:
 
@@ -71,8 +71,8 @@ struct ScriptErrorPayload {
 }
 ```
 
-- `line` 0 means the error handler did not run (load/syntax errors); the line
-  is then parsed from the message's `user_script:N:` prefix.
+- `line` 0 means the error handler did not run (compile errors); the line is
+  then parsed from the message's `user_script:N:` prefix.
 - `flags` is set by the engine and never inferred from the message text, which
   scripts and host command errors control:
   - `0x01` `SCRIPT_ERROR_ENGINE`: the engine raised the error itself (globals
@@ -101,7 +101,17 @@ struct ScriptErrorPayload {
     sends it as-is (`-<err>`), so the host must not add a default error code.
     Set only in the Redis 7 error model (compat flag `0x10`): Redis 6.2 sends
     `-ERR ...` for every script error.
-  - neither: a string (or other value) error, or any error in the Redis 6.2
+  - `0x04` `SCRIPT_ERROR_COMPILE`: the script failed to compile
+    (`luaL_loadbuffer` rejected it), so none of it ran. `message` is Lua's
+    (`user_script:1: unexpected symbol near '+'`, or `not enough memory` when
+    the heap ran out while loading), sent as a string error (code `ERR`, as
+    below). Redis replies `-ERR Error compiling script (new function):
+    <message>` for any load failure, with no `script: <sha>, on
+    @user_script:N.` suffix; the host adds that wording. Set where the load
+    fails, by `eval`, `eval_with_args` and `compile`, never with the other
+    flags, and never for a runtime error, whatever its text (a `loadstring`
+    failure inside the script is the script's runtime error).
+  - none of these: a string (or other value) error, or any error in the Redis 6.2
     error model. Redis sends it as `-ERR <message>` (Redis 7's error handler
     wraps it as `{err='ERR ' .. tostring(err)}`; Redis 6.2 replies
     `-ERR Error running script ...`), so the host reports code `ERR` and the
@@ -181,6 +191,16 @@ The WASM module exports the following functions:
 - `eval_with_args(script_ptr, script_len, args_ptr, args_len, keys_count) -> ptr_len`
   - Evaluates a Lua script buffer with binary-safe KEYS/ARGV provided by the host.
 
+- `compile(ptr, len) -> ptr_len`
+  - Compiles a Lua script buffer without running it (`LuaEngine.compile()`,
+    for a host's `SCRIPT LOAD`). Returns an encoded null (0x00) when it
+    compiles, else the script error `eval` would give for it (0x06 with
+    `SCRIPT_ERROR_COMPILE`). The compiled function is dropped: no script code
+    runs, no fuel is charged, KEYS/ARGV and the Lua stack are untouched. Like
+    `eval`, it replies with a plain error (0x05) while an eval is active
+    (`ERR nested eval is not supported: a script is already running`) or when
+    there is no VM (`ERR Lua VM not initialized`).
+
 - `alloc(size) -> ptr`
   - Allocates `size` bytes in linear memory. The heap is fixed-size (64 MB)
     and the module is linked with `-sABORTING_MALLOC=0`, so an exhausted heap
@@ -230,7 +250,9 @@ struct ArgEntry {
 - Host-side failures must map to `error` replies with Redis-like error strings.
 
 ## Versioning
-- ABI version: 3
+- ABI version: 4
+  - 4: compile errors carry `SCRIPT_ERROR_COMPILE` (`0x04`), and the `compile`
+    export compiles a script without running it.
   - 3: an engine error (`SCRIPT_ERROR_ENGINE`) carries its kind and name in
     fields of their own, and its message is the Redis-worded one.
   - 2: the script error (0x06) payload carries a `flags` byte after `line`.

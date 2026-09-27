@@ -125,6 +125,27 @@ engine.evalWithArgs(
 );
 ```
 
+### Check a script without running it
+
+`engine.compile(script)` only compiles the script, as Redis does for
+`SCRIPT LOAD`. It returns `null` when the script is valid Lua, or the same
+error reply `eval` would give. Nothing runs: no `redis.call`, no globals, no
+fuel spent.
+
+```typescript
+engine.compile("return 1"); // null
+engine.compile("return +");
+// {
+//   err: Buffer.from("user_script:1: unexpected symbol near '+'"),
+//   code: Buffer.from("ERR"),
+//   meta: { kind: "compile", line: 1, sha: "..." },
+// }
+```
+
+Redis replies `-ERR Error compiling script (new function): <err>` for a script
+that does not compile, both to `SCRIPT LOAD` and `EVAL`; see
+[Handle errors](#handle-errors).
+
 ### Connect `redis.call` to your data
 
 The `host` object you pass to `LuaEngine.create` is how scripts reach your
@@ -179,10 +200,14 @@ engine.eval("return redis.call('NOPE')");
 - `meta` tells you where the script failed: `line` and the script's `sha`.
   Redis adds them to the message as
   `<message> script: <sha>, on @user_script:<line>.`
-- `meta.kind` is set for errors the engine raises itself, such as reading an
-  undefined global (`global-read`, with the variable in `meta.name`). For these
-  `err` is just the kind; replace it with Redis's wording (listed in
-  [docs/errors.md](docs/errors.md#meta)).
+- `meta.kind` is `compile` when the script is not valid Lua, so none of it ran.
+  `err` is Lua's message (`user_script:1: unexpected symbol near '+'`); Redis
+  sends `-ERR Error compiling script (new function): <err>`, without the line
+  and sha.
+- Otherwise `meta.kind` is set for errors the engine raises itself, such as
+  reading an undefined global (`global-read`, with the variable in
+  `meta.name`). For these `err` is just the kind; replace it with Redis's
+  wording (listed in [docs/errors.md](docs/errors.md#meta)).
 - An error the script *returns* (for example `return redis.pcall(...)`) comes
   back as `{ err, code }` without `meta`, unchanged.
 
@@ -192,7 +217,11 @@ To render a script error the way Redis does:
 const reply = engine.eval("return redis.call('NOPE')");
 if (reply && typeof reply === "object" && "err" in reply && reply.meta) {
   const message = reply.code ? `${reply.code} ${reply.err}` : `${reply.err}`;
-  console.log(`-${message} script: ${reply.meta.sha}, on @user_script:${reply.meta.line}.`);
+  if (reply.meta.kind === "compile") {
+    console.log(`-ERR Error compiling script (new function): ${reply.err}`);
+  } else {
+    console.log(`-${message} script: ${reply.meta.sha}, on @user_script:${reply.meta.line}.`);
+  }
 }
 ```
 
@@ -331,8 +360,8 @@ It takes the same options as `LuaEngine.create`, without `host`.
   `redisProps` and host callbacks are kept, and so is the `math.random`
   sequence, as on a real server.
 - `engine.dispose()` releases the engine and its 64 MB of WebAssembly memory.
-  Afterwards `eval`, `evalWithArgs` and `reset` throw. Calling `dispose()` twice
-  is fine.
+  Afterwards `eval`, `evalWithArgs`, `compile` and `reset` throw. Calling
+  `dispose()` twice is fine.
 
 ```typescript
 const engine = await LuaEngine.createStandalone();
@@ -478,6 +507,7 @@ function describe(reply: ReplyValue): string {
 | `LuaEngine.createStandalone(options?)` | Same, without host callbacks. |
 | `engine.eval(script)` | Run a script; returns a `ReplyValue`. |
 | `engine.evalWithArgs(script, keys, args)` | Run a script with `KEYS` and `ARGV`. |
+| `engine.compile(script)` | Compile a script without running it; returns `null` or the compile error reply. |
 | `engine.reset()` | Replace the Lua VM with a fresh one. |
 | `engine.dispose()` | Release the engine. |
 | `engine.getLimits()` | The limits the engine was created with. |
@@ -490,7 +520,7 @@ function describe(reply: ReplyValue): string {
 
 Types: `EngineOptions`, `StandaloneOptions`, `LoadOptions`, `EngineLimits`,
 `RedisHost`, `RedisCallHandler`, `RedisCallContext`, `RedisLogHandler`,
-`ReplyValue`, `ReplyErrorMeta`, `CompatProfile`, `CompatOverrides`,
+`ReplyValue`, `ReplyError`, `ReplyErrorMeta`, `CompatProfile`, `CompatOverrides`,
 `RedisProp`, `RedisProps`.
 
 ## Included Lua libraries

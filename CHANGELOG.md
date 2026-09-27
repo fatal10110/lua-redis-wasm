@@ -6,7 +6,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`LuaEngine.compile(script)`** (#94): compiles a script without running it,
+  for a host's `SCRIPT LOAD`. It returns `null` when the script is valid Lua,
+  or the compile error reply `eval` would give. No script code runs and the
+  Lua VM is left as it was. See
+  [docs/host-interface.md](docs/host-interface.md#script-load-and-compile).
+- The `ReplyError` type (`{ err, code?, meta? }`), which `compile` returns.
+- **WASM ABI version 4**: the `compile` export and the `SCRIPT_ERROR_COMPILE`
+  (`0x04`) script error flag. A custom `.wasm` built from an earlier release
+  still runs scripts, but `compile()` throws with it; rebuild it from this
+  release. The bundled files need no action.
+
 ### Fixed
+
+- **Compile errors can be told apart from runtime errors** (#94). A script
+  that is not valid Lua now returns `meta.kind: "compile"`, with Lua's message
+  as `err` (`user_script:1: unexpected symbol near '+'`) and code `ERR`, as
+  before. Redis replies `-ERR Error compiling script (new function): <err>`
+  for it on every version, without the `script: <sha>, on @user_script:<line>.`
+  suffix, so a host can now add that wording. A runtime error with the same
+  text (`error("user_script:1: ...", 0)`) is not flagged. Running out of
+  memory while compiling a very large script is a compile error too, as in
+  Redis.
 
 - **An uncaught string error keeps a leading `ERR`** (#93).
   `error('ERR x', 0)` now reaches the host as `{ err: "ERR x", code: "ERR" }`

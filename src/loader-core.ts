@@ -68,6 +68,17 @@ export type WasmExports = {
   ) => void;
 
   /**
+   * Compile a Lua script buffer without running it (ABI 4). The PtrLen result
+   * is written at `retPtr`, as for `_eval`: an encoded null when the script
+   * compiles, else an error reply. Optional: absent from custom binaries
+   * built before it existed.
+   * @param retPtr - Pointer to an 8-byte slot receiving the PtrLen result
+   * @param ptr - Pointer to script bytes in linear memory
+   * @param len - Script byte length
+   */
+  _compile?: (retPtr: number, ptr: number, len: number) => void;
+
+  /**
    * Configure runtime limits.
    * @param maxFuel - Instruction budget (0 = keep the current budget,
    *   10,000,000 by default; the fuel limit cannot be disabled)

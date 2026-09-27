@@ -65,9 +65,17 @@
  *
  * - `line` (1-based script line) and `sha` (the script's SHA1, already computed
  *   by the engine) are always present.
- * - `kind`/`name` are present only for errors the engine itself originates (the
- *   globals protection, a bad redis.call argument), which the engine flags
- *   itself: error text from a script or a host command never gets a `kind`,
+ * - `kind: "compile"` marks a script that failed to compile (a syntax error, or
+ *   running out of memory while loading it), so none of it ran; `compile()`
+ *   returns the same reply. Unlike the engine kinds below, `err` keeps Lua's
+ *   message (`user_script:1: unexpected symbol near '+'`, code `ERR`, no
+ *   `name`): Redis (6.2 to 8.x, Valkey) sends it as `-ERR Error compiling
+ *   script (new function): <err>`, with no `script: <sha>, on
+ *   @user_script:<line>.` suffix. The engine sets it where the load fails,
+ *   never from the text: a runtime `error("user_script:1: ...", 0)` has none.
+ * - Any other `kind`, and `name`, are present only for errors the engine
+ *   itself raises while the script runs (the globals protection, a bad
+ *   redis.call argument), which the engine flags itself: error text from a script or a host command never gets a `kind`,
  *   except a string equal to the exact message of an engine error raised
  *   earlier in the same eval, which cannot be told apart from rethrowing it
  *   (see `SCRIPT_ERROR_ENGINE` in docs/abi.md). `kind` is an opaque machine
@@ -96,6 +104,14 @@ export type ReplyErrorMeta = {
   sha: string;
 };
 
+/**
+ * An error reply: `err` is the message and `code` its leading error code, if
+ * any (the wire form is `-<code> <err>`). `meta` is set only on the errors that
+ * aborted a script (see `ReplyErrorMeta`). `LuaEngine.compile()` returns one of
+ * these, or `null`.
+ */
+export type ReplyError = { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta };
+
 export type ReplyValue =
   | null
   | number
@@ -103,7 +119,7 @@ export type ReplyValue =
   | boolean
   | Buffer
   | { ok: Buffer }
-  | { err: Buffer; code?: Buffer; meta?: ReplyErrorMeta }
+  | ReplyError
   | { double: number }
   | { big_number: Buffer }
   | { verbatim_string: { format: Buffer; string: Buffer } }

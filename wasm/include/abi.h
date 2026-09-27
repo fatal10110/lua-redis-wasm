@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define REDIS_LUA_WASM_ABI_VERSION 3
+#define REDIS_LUA_WASM_ABI_VERSION 4
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,7 +17,8 @@ typedef enum ReplyType {
   REPLY_STATUS = 0x04,
   REPLY_ERROR = 0x05,
   /* Error that aborted the script (uncaught runtime error or an error that
-   * propagated out of redis.call). The host decorates these with the script
+   * propagated out of redis.call), or kept it from running (a compile error,
+   * SCRIPT_ERROR_COMPILE). The host decorates these with the script
    * sha / source context; plain REPLY_ERROR values returned by the script
    * (e.g. `return redis.pcall(...)`) are left undecorated. */
   REPLY_SCRIPT_ERROR = 0x06,
@@ -50,6 +51,14 @@ typedef enum ReplyType {
  * its first word ("ERR x" too: Redis 7 sends "-ERR ERR x"). The engine's own
  * string errors therefore carry no "ERR " of their own (#93). */
 #define SCRIPT_ERROR_FROM_TABLE 0x02u
+/* The script failed to compile (luaL_loadbuffer rejected it: a syntax error, or
+ * running out of memory while loading), so none of it ran. Redis replies
+ * "-ERR Error compiling script (new function): <message>" for these, with no
+ * "script: <sha>, on @user_script:N." suffix; the host adds that wording. The
+ * message is Lua's (e.g. "user_script:1: unexpected symbol near '+'"), sent as
+ * a string error (code ERR). Never set together with the other flags, and
+ * never for a runtime error, whatever its text. */
+#define SCRIPT_ERROR_COMPILE 0x04u
 
 #if defined(__GNUC__)
 typedef struct __attribute__((packed)) ReplyHeader {
@@ -103,6 +112,11 @@ int32_t close_vm(void);
 PtrLen eval(uint32_t ptr, uint32_t len);
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count);
+/* Compiles a script without running it or changing the VM: an encoded
+ * REPLY_NULL when it compiles, else the compile error eval would give
+ * (REPLY_SCRIPT_ERROR, SCRIPT_ERROR_COMPILE), or a REPLY_ERROR when it cannot
+ * compile anything (no VM, or a script is running), as eval replies then. */
+PtrLen compile(uint32_t ptr, uint32_t len);
 void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes);
 void set_compat(uint32_t flags);
 uint32_t current_call_source(void);
