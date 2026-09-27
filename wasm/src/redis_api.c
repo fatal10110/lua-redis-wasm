@@ -387,9 +387,11 @@ static int l_redis_pcall(lua_State *L) {
   return redis_call_common(L, 0);
 }
 
-/* Raises `msg` as-is, without luaL_error's "user_script:N:" position prefix:
- * Redis's luaPushError + luaError raise the bare "ERR ..." message, and the
- * script line reaches the host through the error handler instead. */
+/* Raises `msg` as a plain string, without luaL_error's "user_script:N:"
+ * position prefix, the same way this engine currently raises redis.call errors;
+ * the script line reaches the host through the error handler instead. Redis 7
+ * (luaPushError + luaError) raises a table {err="ERR ..."} here; switching to
+ * table errors is tracked in #48. */
 static int raise_bare_error(lua_State *L, const char *msg) {
   lua_pushstring(L, msg);
   return lua_error(L);

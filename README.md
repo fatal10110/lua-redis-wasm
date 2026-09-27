@@ -218,11 +218,21 @@ Hosts should return plain, undecorated error messages.
 ### log
 
 Called when Lua executes `redis.log(level, ...)`. Level is a numeric Redis log level
-(0..3, `redis.LOG_DEBUG`..`redis.LOG_WARNING`). As in Redis, every argument after the
-level is joined with a space into `message`. Arguments `lua_tolstring` cannot convert
-(nil, booleans, tables) are skipped and get no separator of their own. A level outside 0..3 raises `ERR Invalid log level.`,
-and fewer than two arguments raise `ERR redis.log() requires two arguments or more.`.
+(`redis.LOG_DEBUG`..`redis.LOG_WARNING`), truncated to an integer, which must be
+0..3. As in Redis, every argument after the level is joined with a space into
+`message`. Arguments `lua_tolstring` cannot convert (nil, booleans, tables) are
+skipped and get no separator of their own. Errors raised:
+
+- fewer than two arguments: `ERR redis.log() requires two arguments or more.`
+- a level that is not a number: `ERR First argument must be a number (log level).`
+- a level outside 0..3: `ERR Invalid log level.`
+
 The handler receives every message, and filtering by verbosity is up to the host.
+
+`redis.log` and `redis.error_reply` follow Redis 7.4+ / Valkey semantics and wording
+whatever the `profile` compat option. Older versions differ: Redis 7.0/7.2 say
+`Invalid debug level.`, and Redis 6.2 returns the `error_reply` string unchanged and
+omits the `ERR` prefix on `redis.log` errors.
 
 ## Reply Types
 
@@ -257,17 +267,14 @@ bulk string for `double`, `big_number` and `verbatim_string`, a flat
 key/value array for `map`, and a plain array for `set`.
 
 On decode, an error payload of the form `CODE message` is split into `err` (the
-message) and `code`. For error values a script returns (e.g. `redis.error_reply`,
-`return redis.pcall(...)`), `code` is the token before the first space, taken as-is,
-the way Redis counts error codes (only if that space is within Redis's 32-byte search
-window). A payload with no such space is left whole in `err` with no `code`. For errors
-that abort the script, only a leading `[A-Z][A-Z0-9]*` token (e.g. a propagated
-`WRONGTYPE`) is split out, and anything else gets `ERR`. On encode the `code` is
-prepended back, so the wire form is always Redis's `CODE message`.
+message) and `code` (the leading `[A-Z][A-Z0-9]*` token, when present). On encode the
+`code` is prepended back, so the wire form is always Redis's `CODE message`.
 
 `redis.error_reply(msg)` follows Redis: one leading `-` is dropped. With no space, `ERR `
-is prepended (`'foo'` → `ERR foo`). Otherwise the first token is the code as-is
-(`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
+is prepended (`'foo'` → `ERR foo`). Otherwise the message is kept and its first token
+is the code, whatever its case (`'My Error'` stays `My Error`, `'-ERR x'` → `ERR x`).
+On decode, a token that is not uppercase, like `My`, stays in `err` with no `code`.
+The wire bytes are the same either way.
 
 ### Determining the Response Type
 
