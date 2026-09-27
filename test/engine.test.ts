@@ -436,14 +436,31 @@ test("eval: multi-value return replies with the first value (issue #36)", async 
   assert.equal(engine.eval("return 5, function() end"), 5);
 });
 
-test("eval: unsupported return type error has no trailing NUL byte", async () => {
+test("eval: reply-limit error reply is exact (no trailing NUL byte)", async () => {
   await resolveWasmPath();
-  const module = await load();
+  // The limit is large enough for the error reply itself, so it is the C error
+  // reply that reaches the decoder (not the host-side limit fallback).
+  const module = await load({ limits: { maxReplyBytes: 64 } });
   const engine = module.create(createTestHost());
-  const result = engine.eval("return function() end") as { err: Buffer; code?: Buffer };
+  const result = engine.eval("return string.rep('x', 100)") as { err: Buffer; code?: Buffer };
   assert.ok(result && typeof result === "object" && "err" in result);
   assert.equal(result.code?.toString("latin1"), "ERR");
-  assert.equal(result.err.toString("latin1"), "unsupported Lua return type");
+  assert.equal(result.err.toString("latin1"), "reply exceeds configured limit");
+});
+
+test("eval: ~11 MB bulk string reply fits the 64 MB heap (issue #42)", async () => {
+  await resolveWasmPath();
+  // Fresh module: the reply buffer (16 MB capacity) plus the Lua string and the
+  // garbage string.rep leaves behind fit only if the reply is not copied again
+  // when handed to the host (the old rb_finalize malloc+memcpy ran out of heap).
+  const module = await load();
+  const engine = module.create(createTestHost());
+  const size = 11 * 1024 * 1024;
+  const big = engine.eval(`return string.rep('ab', ${size / 2})`) as Buffer;
+  assert.ok(Buffer.isBuffer(big));
+  assert.equal(big.length, size);
+  assert.equal(big.subarray(0, 4).toString(), "abab");
+  assert.equal(big.subarray(size - 4).toString(), "abab");
 });
 
 test("eval: large replies are returned intact and released (issue #42)", async () => {

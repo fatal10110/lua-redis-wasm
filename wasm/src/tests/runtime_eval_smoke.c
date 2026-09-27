@@ -72,8 +72,6 @@ int main(void) {
   expect_null("return");
   expect_null("local a = 1");
 
-  expect_error("return function() end", "ERR unsupported Lua return type");
-
   set_limits(0, 8, 0);
   expect_error("return 'this reply is too long'", "ERR reply exceeds configured limit");
   set_limits(0, 0, 0);
