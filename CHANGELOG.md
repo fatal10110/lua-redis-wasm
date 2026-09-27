@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-27
+
 ### Added
 
 - **`LuaEngine.compile(script)`** (#94): compiles a script without running it,
@@ -621,7 +623,8 @@ Each item says what changed and what to do. Details are in the entries below.
   `redis.pcall` / `redis.log` host integration, `cjson` / `cmsgpack` / `struct` / `bit`
   modules, resource limits, and binary-safe replies.
 
-[Unreleased]: https://github.com/fatal10110/lua-redis-wasm/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/fatal10110/lua-redis-wasm/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.5.0...v2.0.0
 [1.5.0]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/fatal10110/lua-redis-wasm/compare/v1.4.0...v1.4.1
