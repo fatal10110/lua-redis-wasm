@@ -21,9 +21,6 @@ export type WasmExports = {
   /** Direct access to WASM linear memory */
   HEAPU8: Uint8Array;
 
-  /** Legacy Emscripten helper for multi-value returns */
-  getTempRet0?: () => number;
-
   /** Initialize the Lua VM. Returns 0 on success. */
   _init: () => number;
 
@@ -31,37 +28,33 @@ export type WasmExports = {
   _reset: () => number;
 
   /**
-   * Evaluate a Lua script buffer.
+   * Evaluate a Lua script buffer. The PtrLen result is returned through the
+   * struct-return pointer (clang's wasm32 C ABI): the 8-byte `{ptr, len}`
+   * reply descriptor is written at `retPtr`.
+   * @param retPtr - Pointer to an 8-byte slot receiving the PtrLen result
    * @param ptr - Pointer to script bytes in linear memory
    * @param len - Script byte length
-   * @param retPtr - Optional sret pointer for return value (ABI-dependent)
-   * @returns PtrLen result in various formats depending on ABI
    */
-  _eval: (ptr: number, len: number, retPtr?: number) =>
-    | bigint
-    | number[]
-    | { ptr: number; len: number }
-    | number
-    | void;
+  _eval: (retPtr: number, ptr: number, len: number) => void;
 
   /**
-   * Evaluate a Lua script with KEYS/ARGV injection.
+   * Evaluate a Lua script with KEYS/ARGV injection. The PtrLen result is
+   * written at `retPtr`, as for `_eval`.
+   * @param retPtr - Pointer to an 8-byte slot receiving the PtrLen result
    * @param scriptPtr - Pointer to script bytes
    * @param scriptLen - Script byte length
    * @param argsPtr - Pointer to encoded ArgArray (KEYS + ARGV)
    * @param argsLen - ArgArray byte length
    * @param keysCount - Number of KEYS entries (rest are ARGV)
-   * @param retPtr - Optional sret pointer
-   * @returns PtrLen result
    */
   _eval_with_args: (
+    retPtr: number,
     scriptPtr: number,
     scriptLen: number,
     argsPtr: number,
     argsLen: number,
-    keysCount: number,
-    retPtr?: number
-  ) => bigint | number[] | { ptr: number; len: number } | number | void;
+    keysCount: number
+  ) => void;
 
   /**
    * Configure runtime limits.
@@ -102,9 +95,10 @@ export type WasmExports = {
 
 /**
  * Type for host-side callback functions imported by WASM (redis.call/pcall/
- * log/sha1hex). The signature varies with the ABI's sret convention.
+ * log/setresp/sha1hex/props). Every import returns its PtrLen result through a
+ * struct-return pointer passed as the first argument (see docs/abi.md).
  */
-export type HostImport = (...args: number[]) => number | void | bigint;
+export type HostImport = (...args: number[]) => void;
 
 /**
  * Factory function type for Emscripten module instantiation.
