@@ -13,7 +13,9 @@ all of this third-party code are reproduced below.
     derived from Valkey / Redis 7.2.4 (`src/script_lua.c`, `src/eval.c`, `src/util.c`
     in Valkey 8.0): the scripting sandbox (globals allow/deny lists,
     readonly table and basic-type metatable protection), the Lua <-> RESP value
-    conversions, the `redis.*` API bindings and `double2ll`.
+    conversions, the `redis.*` API bindings, the error model (`{err=...}` error
+    tables, error reply parsing, `pcall` unwrapping, the script error handler
+    and its `ERR unknown error` fallback) and `double2ll`.
   - Redis and Valkey modifications to the Lua 5.1 core in `vendor/valkey/deps/lua/src`
     (readonly tables, string hashing, security fixes).
   - `vendor/valkey/src/rand.c` (see [rand.c](#randc) below).

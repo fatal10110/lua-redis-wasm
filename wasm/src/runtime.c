@@ -253,9 +253,10 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
  * - a table is a Redis 7 error object ({err=...}, as raised by redis.call or
  *   error(redis.error_reply(...))): its `err` field, like
  *   luaExtractErrorInformation, or "ERR unknown error" when that is not a
- *   string (that fallback is derived from Valkey src/script_lua.c,
- *   valkey-io/valkey#2229, BSD-3-Clause). Its `source`/`line` fields are not read: Redis's handler overwrites
- *   both with the error point, which is the line recorded here (#37);
+ *   string (that fallback is derived from luaExtractErrorInformation in
+ *   Valkey 8.0's src/script_lua.c, valkey-io/valkey#2229, BSD-3-Clause). Its
+ *   `source`/`line` fields are not read: Redis's handler overwrites both with
+ *   the error point, which is the line recorded here (#37);
  * - a number becomes its string form;
  * - anything else becomes what Lua's tostring gives ("nil", "true", ...), which
  *   Redis's handler turns into "ERR <tostring(err)>" (the host adds the code). */
