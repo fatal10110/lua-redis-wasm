@@ -57,18 +57,12 @@ export type WasmExports = {
   ) => void;
 
   /**
-   * Configure runtime limits. Call before _init.
-   * @param maxFuel - Instruction budget (0 = keep the default)
-   * @param maxReplyBytes - Maximum encoded reply size (0 = unlimited)
-   * @param maxArgBytes - Maximum encoded KEYS/ARGV size (0 = unlimited)
-   * @param maxMemoryBytes - Lua heap cap (0 = unlimited)
+   * Configure runtime limits.
+   * @param maxFuel - Instruction budget (0 = unlimited)
+   * @param maxReplyBytes - Maximum reply size (0 = unlimited)
+   * @param maxArgBytes - Maximum argument size (0 = unlimited)
    */
-  _set_limits?: (
-    maxFuel: number,
-    maxReplyBytes: number,
-    maxArgBytes: number,
-    maxMemoryBytes: number,
-  ) => void;
+  _set_limits?: (maxFuel: number, maxReplyBytes: number, maxArgBytes: number) => void;
 
   /**
    * Select the compatibility profile (which Redis/Valkey version's Lua sandbox

@@ -1,7 +1,6 @@
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "redis_math.h"
-#include "lua_modules.h"
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -35,16 +34,6 @@ static int64_t g_fuel_remaining = DEFAULT_FUEL_LIMIT;
 static int64_t g_fuel_limit = DEFAULT_FUEL_LIMIT;
 static uint32_t g_max_reply_bytes = 0;
 static uint32_t g_max_arg_bytes = 0;
-
-/* Lua heap accounting for maxMemoryBytes. Every allocation of the Lua state
- * goes through capped_lua_alloc, which tracks the bytes in use and, while
- * `enforce` is set, refuses to grow past `limit` (0 = no cap). */
-typedef struct LuaMemory {
-  size_t used;
-  size_t limit;
-  int enforce;
-} LuaMemory;
-static LuaMemory g_lua_mem = {0, 0, 0};
 /* Script line captured by script_error_handler at the last error point. */
 static uint32_t g_error_line = 0;
 
@@ -732,15 +721,6 @@ LUALIB_API int luaopen_struct(lua_State *L);
 LUALIB_API int luaopen_cmsgpack(lua_State *L);
 LUALIB_API int luaopen_bit(lua_State *L);
 
-/* Frees the buffers cmsgpack / cjson calls abandoned when a Lua error unwound
- * them, and shrinks cjson's kept encode buffer (see lua_modules.h). Called
- * after the script's protected call and before the VM is closed, when no
- * module C frame can be live. */
-static void release_module_buffers(void) {
-  cmsgpack_release_buffers();
-  cjson_release_buffers();
-}
-
 static void load_redis_modules(lua_State *L) {
   luaLoadLib(L, "cjson", luaopen_cjson);
   luaLoadLib(L, "struct", luaopen_struct);
@@ -780,55 +760,12 @@ static void reset_fuel(void) {
   g_fuel_remaining = g_fuel_limit;
 }
 
-void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes,
-                uint32_t max_memory_bytes) {
+void set_limits(uint32_t max_fuel, uint32_t max_reply_bytes, uint32_t max_arg_bytes) {
   if (max_fuel > 0) {
     g_fuel_limit = (int64_t)max_fuel;
   }
   g_max_reply_bytes = max_reply_bytes;
   g_max_arg_bytes = max_arg_bytes;
-  g_lua_mem.limit = max_memory_bytes;
-}
-
-/* lua_Alloc for the Lua state (ud = &g_lua_mem). Counts the bytes Lua holds
- * and, while a script runs (g_lua_mem.enforce), refuses any growth that would
- * take the total past maxMemoryBytes. A refused allocation returns NULL, which
- * Lua turns into an ordinary "not enough memory" error. Enforcement is limited
- * to the script's protected call. State setup, KEYS/ARGV injection and reply
- * encoding are protected too, but are host-sized (and KEYS/ARGV bounded by
- * maxArgBytes); refusing there would, for instance, fail a large ARGV while the
- * previous call's ARGV is still referenced. Their memory still counts toward
- * the cap for the script. Shrinking never fails, as Lua requires. */
-static void *capped_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
-  LuaMemory *mem = (LuaMemory *)ud;
-  if (nsize == 0) {
-    free(ptr);
-    mem->used -= osize;
-    return NULL;
-  }
-  if (nsize > osize && mem->enforce && mem->limit > 0 &&
-      mem->used - osize + nsize > mem->limit) {
-    return NULL;
-  }
-  void *out = realloc(ptr, nsize);
-  if (!out) {
-    if (nsize > osize) {
-      return NULL;
-    }
-    out = ptr; /* a failed shrink keeps the (larger) block */
-  }
-  mem->used = mem->used - osize + nsize;
-  return out;
-}
-
-void *lua_heap_alloc(void *ptr, size_t osize, size_t nsize) {
-  return capped_lua_alloc(&g_lua_mem, ptr, osize, nsize);
-}
-
-static lua_State *new_lua_state(void) {
-  g_lua_mem.used = 0;
-  g_lua_mem.enforce = 0;
-  return lua_newstate(capped_lua_alloc, &g_lua_mem);
 }
 
 static int set_keys_argv(lua_State *L, const uint8_t *buf, size_t len, uint32_t keys_count) {
@@ -1029,7 +966,7 @@ static int setup_state_body(lua_State *L) {
 // setup runs in protected mode, so running out of memory fails it (-1, no
 // state) instead of reaching the panic handler.
 static int32_t setup_state(void) {
-  g_state = new_lua_state(); /* also resets the maxMemoryBytes accounting */
+  g_state = luaL_newstate();
   if (!g_state) {
     return -1;
   }
@@ -1060,7 +997,6 @@ int32_t init(void) {
     return -1;
   }
   if (g_state) {
-    release_module_buffers();
     lua_close(g_state);
     g_state = NULL;
   }
@@ -1071,15 +1007,13 @@ int32_t reset(void) {
   if (g_eval_active || !g_state) {
     return -1;
   }
-  release_module_buffers();
   lua_close(g_state);
   g_state = NULL;
   return setup_state();
 }
 
 /* Lua memory in use (KB) above which a run is followed by a full collection:
- * a quarter of the fixed 64 MB heap, or half of maxMemoryBytes when that is
- * lower. */
+ * a quarter of the fixed 64 MB heap. */
 #define GC_AFTER_RUN_KB (16 * 1024)
 
 /* Lua 5.1 has no emergency collection, and its GC pacing (next cycle at 2x the
@@ -1099,11 +1033,7 @@ int32_t reset(void) {
  * every time and the cycle that would free them never starts. Only discarding
  * the VM gets that memory back (see run_guarded). */
 static int collect_if_heap_high(void) {
-  int threshold_kb = GC_AFTER_RUN_KB;
-  if (g_lua_mem.limit > 0 && g_lua_mem.limit / 2048 < (size_t)threshold_kb) {
-    threshold_kb = (int)(g_lua_mem.limit / 2048);
-  }
-  if (!g_state || lua_gc(g_state, LUA_GCCOUNT, 0) <= threshold_kb) {
+  if (!g_state || lua_gc(g_state, LUA_GCCOUNT, 0) <= GC_AFTER_RUN_KB) {
     return 0;
   }
   int top = lua_gettop(g_state);
@@ -1145,12 +1075,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_error_line = 0;
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
-  // maxMemoryBytes is enforced for the duration of the protected call only.
-  g_lua_mem.enforce = 1;
   int status = lua_pcall(g_state, 0, 1, errfunc);
-  g_lua_mem.enforce = 0;
-  // No cjson/cmsgpack C frame is live any more: free what failed calls abandoned.
-  release_module_buffers();
   // Free the script's garbage before allocating the reply: a script that
   // filled the heap and caught the error would otherwise leave no room for it.
   // run_guarded acts on the result once the reply is built.
@@ -1167,7 +1092,9 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   int rc = encode_reply(g_state, -1, &rb);
   lua_settop(g_state, 0);
   if (rc != 0) {
-    // The reply buffer records why a write failed: maxReplyBytes or the heap.
+    // The reply buffer records whether a write crossed maxReplyBytes; any
+    // other failure is the heap (a buffer that could not grow, or a Lua memory
+    // error in encode_reply).
     int status = rb.status;
     free(rb.data);
     if (status == RB_OVER_LIMIT) {
@@ -1189,7 +1116,6 @@ static int32_t rebuild_vm(void) {
   lua_State *old = g_state;
   g_state = NULL;
   if (old) {
-    release_module_buffers();
     lua_close(old);
   }
   return setup_state();
@@ -1212,7 +1138,6 @@ static PtrLen run_guarded(GuardedFn fn, void *arg) {
     g_panic_armed = 1;
     out = fn(arg);
     g_panic_armed = 0;
-    g_lua_mem.enforce = 0; /* run_script clears it; keep it off on every path */
     // Collect here only if run_script returned before its own collection.
     gc_status = g_script_gc_status >= 0 ? g_script_gc_status : collect_if_heap_high();
   } else {

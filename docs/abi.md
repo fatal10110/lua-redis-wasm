@@ -114,29 +114,20 @@ The WASM module exports the following functions:
     returns 0, which callers must treat as an allocation failure (the engine
     throws a recoverable `RangeError`). A Lua script exhausting the heap gets
     an ordinary `not enough memory` error; the runtime runs a full garbage
-    collection after any `eval` that leaves more than 16 MB (or half of
-    `max_memory_bytes`) of Lua memory in use (and rebuilds the VM if that
-    collection runs out of memory). Every Lua call on the eval path runs
-    protected; a `lua_atpanic` handler turns an error that still escapes into
-    an error reply and a rebuilt VM. `cmsgpack` allocates without NULL checks,
-    so it is compiled (`wasm/src/lua_cmsgpack_checked.c`) against an allocator
-    that raises Lua's `not enough memory` error instead of returning NULL; the
-    pack buffers a failed call abandons are freed when the script ends. An
-    exception thrown *from* `alloc` (or any other export) unwound WASM frames
-    without their cleanup, so the engine treats it as fatal and refuses further
-    evaluations.
+    collection after any `eval` that leaves more than 16 MB of Lua memory in
+    use (and rebuilds the VM if that collection runs out of memory). Every Lua
+    call on the eval path runs protected; a `lua_atpanic` handler turns an
+    error that still escapes into an error reply and a rebuilt VM. `cmsgpack` allocates without NULL checks, so it is compiled
+    (`wasm/src/lua_cmsgpack_checked.c`) against an allocator that aborts on
+    OOM, like Redis's. An exception thrown *from* `alloc` (or any other
+    export) unwound WASM frames without their cleanup, so the engine treats it
+    as fatal and refuses further evaluations.
 
 - `free_mem(ptr)`
   - Frees memory allocated by `alloc` or reply buffers.
 
-- `set_limits(max_fuel, max_reply_bytes, max_arg_bytes, max_memory_bytes) -> void`
-  - Sets optional runtime limits; call before `init`. Values of 0 disable the
-    corresponding limit (`max_fuel` = 0 keeps the default budget).
-    `max_reply_bytes` bounds the encoded reply and is checked on every write
-    while encoding. `max_arg_bytes` bounds the `eval_with_args` ArgArray.
-    `max_memory_bytes` caps the bytes held by the Lua allocator (the Lua state
-    plus cmsgpack buffers); it is enforced during the protected script call,
-    where a refused allocation raises Lua's `not enough memory` error.
+- `set_limits(max_fuel, max_reply_bytes, max_arg_bytes) -> void`
+  - Sets optional runtime limits. Values of 0 disable the corresponding limit.
 
 ## Argument Encoding
 Arguments to `host_redis_call`, `host_redis_pcall`, and `eval_with_args` are encoded as:

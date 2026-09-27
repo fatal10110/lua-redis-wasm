@@ -58,25 +58,6 @@ static void expect_error(const char *script, const char *message) {
   free_mem(reply.ptr);
 }
 
-/* A script-aborting error whose message contains `needle`. */
-static void expect_script_error(const char *script, const char *needle) {
-  PtrLen reply = eval_str(script);
-  const uint8_t *buf = (const uint8_t *)(uintptr_t)reply.ptr;
-  assert(buf[0] == REPLY_SCRIPT_ERROR);
-  uint32_t len = read_u32_le(buf + 1);
-  assert(len >= 4 && reply.len == 5 + len);
-  size_t needle_len = strlen(needle);
-  int found = 0;
-  for (uint32_t i = 9; i + needle_len <= reply.len; i++) {
-    if (memcmp(buf + i, needle, needle_len) == 0) {
-      found = 1;
-      break;
-    }
-  }
-  assert(found);
-  free_mem(reply.ptr);
-}
-
 int main(void) {
   assert(init() == 0);
 
@@ -91,30 +72,20 @@ int main(void) {
   expect_null("return");
   expect_null("local a = 1");
 
-  set_limits(0, 8, 0, 0);
+  set_limits(0, 8, 0);
   expect_error("return 'this reply is too long'", "ERR reply exceeds configured limit");
   /* The limit is inclusive: an integer reply is 13 bytes. */
-  set_limits(0, 13, 0, 0);
+  set_limits(0, 13, 0);
   expect_int("return 42", 42);
-  set_limits(0, 12, 0, 0);
+  set_limits(0, 12, 0);
   expect_error("return 42", "ERR reply exceeds configured limit");
   /* Enforced while encoding: a small value expanding into a huge reply
    * (2^24 leaves) fails at the limit instead of exhausting the heap. */
-  set_limits(0, 1000, 0, 0);
+  set_limits(0, 1000, 0);
   expect_error("local t = {} for i = 1, 24 do t = {t, t} end return t",
                "ERR reply exceeds configured limit");
-  set_limits(0, 0, 0, 0);
+  set_limits(0, 0, 0);
   expect_int("return 42", 42);
-
-  /* maxMemoryBytes: a script growing past the cap gets Lua's memory error and
-   * the engine stays usable. */
-  set_limits(0, 0, 0, 1024 * 1024);
-  expect_script_error("local t = {} for i = 1, 64 do t[i] = string.rep('x', 65536) .. i end",
-                      "not enough memory");
-  expect_int("local t = {} for i = 1, 1000 do t[i] = i end return #t", 1000);
-  set_limits(0, 0, 0, 0);
-  expect_int("local t = {} for i = 1, 64 do t[i] = string.rep('x', 65536) .. i end return #t",
-             64);
 
   return 0;
 }

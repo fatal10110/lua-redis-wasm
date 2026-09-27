@@ -106,10 +106,10 @@ int main(void) {
   expect_error(eval_args("return 1", args, (uint32_t)sizeof(args), 3),
                "ERR invalid KEYS/ARGV encoding");
 
-  set_limits(0, 0, 8, 0);
+  set_limits(0, 0, 8);
   expect_error(eval_args("return 1", args, (uint32_t)sizeof(args), 1),
                "ERR KEYS/ARGV exceeds configured limit");
-  set_limits(0, 0, 0, 0);
+  set_limits(0, 0, 0);
 
   return 0;
 }

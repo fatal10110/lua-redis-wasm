@@ -256,7 +256,6 @@ export type RedisProps = Record<string, RedisProp>;
  * ```typescript
  * const limits: EngineLimits = {
  *   maxFuel: 10_000_000,              // ~10M instructions
- *   maxMemoryBytes: 32 * 1024 * 1024, // 32 MB of Lua heap
  *   maxReplyBytes: 2 * 1024 * 1024,   // 2 MB replies
  *   maxArgBytes: 1 * 1024 * 1024      // 1 MB of KEYS + ARGV
  * };
@@ -265,23 +264,6 @@ export type RedisProps = Record<string, RedisProp>;
 export type EngineLimits = {
   /** Maximum instruction count (fuel) for script execution. */
   maxFuel?: number;
-
-  /**
-   * Cap on the memory the engine's Lua state may hold, in bytes: every Lua
-   * object (including KEYS/ARGV, the ~20 KB the standard libraries take, and
-   * not-yet-collected garbage) plus the cjson and cmsgpack output buffers.
-   * A script whose allocation would cross it fails with Lua's
-   * `not enough memory` error, like one that exhausts the fixed 64 MB WASM
-   * heap, and the engine stays usable.
-   *
-   * Lua 5.1 has no emergency garbage collection, so garbage counts until the
-   * next collection cycle reclaims it: allow roughly twice a script's live
-   * data. The encoded reply (bounded by `maxReplyBytes`) is not a Lua
-   * allocation and is not counted, and the cap is only checked while a script
-   * runs. cjson's buffers count too; any a failing cjson/cmsgpack call
-   * abandons are freed when the evaluation ends.
-   */
-  maxMemoryBytes?: number;
 
   /**
    * Maximum size in bytes of the encoded script reply (see docs/abi.md). The

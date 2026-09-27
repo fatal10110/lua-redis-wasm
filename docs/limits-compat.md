@@ -8,7 +8,6 @@ Limits are optional and all enforced by the WASM runtime (see the README's
 | Limit | Meaning | Enforced |
 | --- | --- | --- |
 | `maxFuel` | Instruction budget for a script | Yes |
-| `maxMemoryBytes` | Cap on the Lua state's memory (Lua objects, garbage not yet collected, cmsgpack buffers) | Yes, while a script runs |
 | `maxReplyBytes` | Max encoded reply size, checked while encoding | Yes |
 | `maxArgBytes` | Max encoded KEYS + ARGV size | Yes |
 
@@ -19,7 +18,6 @@ const engine = await LuaWasmEngine.create({
   host,
   limits: {
     maxFuel: 10_000_000,
-    maxMemoryBytes: 32 * 1024 * 1024,
     maxReplyBytes: 2 * 1024 * 1024,
     maxArgBytes: 1 * 1024 * 1024
   }

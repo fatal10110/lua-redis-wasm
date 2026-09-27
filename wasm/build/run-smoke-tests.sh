@@ -10,10 +10,7 @@ LUA_SRC_DIR="$REDIS_LUA_DEPS"
 
 LUA_CORE="lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c"
 LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c loslib.c"
-# lua_cjson.c, strbuf.c and lua_cmsgpack.c are compiled through the checked
-# wrappers in wasm/src (lua_cjson_checked.c, strbuf_checked.c,
-# lua_cmsgpack_checked.c) instead.
-REDIS_LUA_MODULES="lua_struct.c lua_bit.c fpconv.c"
+REDIS_LUA_MODULES="lua_cjson.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
 
 CORE_FILES=""
 for file in $LUA_CORE; do
@@ -31,7 +28,7 @@ for file in $REDIS_LUA_MODULES; do
 done
 MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/redis/deps/fpconv/fpconv_dtoa.c" # redis.call number args
 
-COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/redis_math.c $ROOT_DIR/wasm/src/lua_cmsgpack_checked.c $ROOT_DIR/wasm/src/lua_cjson_checked.c $ROOT_DIR/wasm/src/strbuf_checked.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $REDIS_SRC/rand.c $CORE_FILES $LIB_FILES $MODULE_FILES"
+COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/redis_math.c $ROOT_DIR/wasm/src/lua_cmsgpack_checked.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $REDIS_SRC/rand.c $CORE_FILES $LIB_FILES $MODULE_FILES"
 
 mkdir -p "$OUT_DIR"
 

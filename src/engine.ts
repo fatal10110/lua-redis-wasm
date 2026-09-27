@@ -625,7 +625,7 @@ function resolveCompatFlags(
   );
 }
 
-const LIMIT_NAMES = ["maxFuel", "maxMemoryBytes", "maxReplyBytes", "maxArgBytes"] as const;
+const LIMIT_NAMES = ["maxFuel", "maxReplyBytes", "maxArgBytes"] as const;
 const U32_MAX = 0xffff_ffff;
 
 /**
@@ -764,7 +764,6 @@ export class LuaWasmModule {
         toU32Limit(limits.maxFuel),
         toU32Limit(limits.maxReplyBytes),
         toU32Limit(limits.maxArgBytes),
-        toU32Limit(limits.maxMemoryBytes),
       );
     }
 

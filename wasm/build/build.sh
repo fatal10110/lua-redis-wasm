@@ -20,10 +20,7 @@ REDIS_SRC="$ROOT_DIR/vendor/redis/src"
 LUA_SRC_DIR="$REDIS_LUA_DEPS"
 LUA_CORE="lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c"
 LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c loslib.c"
-# lua_cjson.c, strbuf.c and lua_cmsgpack.c are compiled through the checked
-# wrappers in wasm/src (lua_cjson_checked.c, strbuf_checked.c,
-# lua_cmsgpack_checked.c) instead.
-REDIS_LUA_MODULES="lua_struct.c lua_bit.c fpconv.c"
+REDIS_LUA_MODULES="lua_cjson.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
 
 CORE_FILES=""
 for file in $LUA_CORE; do
@@ -51,7 +48,6 @@ emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat','_current_call_source','_current_call_line']" \
   -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
   "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" "$SRC_DIR/redis_math.c" "$SRC_DIR/lua_cmsgpack_checked.c" \
-  "$SRC_DIR/lua_cjson_checked.c" "$SRC_DIR/strbuf_checked.c" \
   "$REDIS_SRC/rand.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
   -o "$OUT_DIR/redis_lua.mjs"
 
