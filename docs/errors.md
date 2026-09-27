@@ -52,7 +52,7 @@ uppercase token (`[A-Z][A-Z0-9]*`) into `code`; write `-<code> <err>`, or
   Lua's `tostring` renders them (`error(nil)` → `nil`). This applies to every
   profile, `redis-6.2` included, although Redis 6.2 itself fails on a table
   error (its error handler concatenates it as a string).
-- The fuel-limit kill is `{ err: "Script killed by fuel limit", code: "ERR" }`.
+- The fuel-limit kill has code `ERR` and `err` `Script killed by fuel limit`.
 - Script-aborting messages are cut at the first NUL, have trailing CR/LF trimmed
   and every other CR/LF mapped to a space, so they can be written into RESP as
   is.
@@ -164,6 +164,11 @@ script:
 | other `Error` | a WASM trap or abort (e.g. `cmsgpack.pack` running out of heap aborts, as in Redis) | unusable |
 | `Error: LuaEngine is unusable: ...` | an earlier call failed as in the two rows above (`cause` holds the original error) | unusable |
 | `Error: LuaEngine has been disposed` | `dispose()` was called | disposed |
+
+`reset()` throws the same way (and also when called from a host callback). If
+it cannot build the new Lua VM (out of memory, or the `redisProps` cannot be
+applied), it throws and the engine keeps no VM: every `eval` replies
+`ERR Lua VM not initialized` until a later `reset()` succeeds.
 
 An unusable engine cannot be trusted any more: create a new one. Host callback
 exceptions never make an engine unusable; see

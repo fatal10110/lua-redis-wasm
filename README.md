@@ -222,7 +222,11 @@ const engine = await LuaEngine.create({
 });
 
 engine.eval("while true do end");
-// { err: "Script killed by fuel limit", code: "ERR", meta: { ... } }
+// {
+//   err: Buffer.from("Script killed by fuel limit"),
+//   code: Buffer.from("ERR"),
+//   meta: { line: 1, sha: "..." },
+// }
 ```
 
 | Limit | Default | When exceeded, the script replies |
@@ -306,8 +310,10 @@ arguments and returns the given value (`null` returns nothing). When the
 ### Run pure Lua without a host
 
 `LuaEngine.createStandalone()` creates an engine with no host callbacks, for
-scripts that only compute. `redis.call` and `redis.pcall` fail with
-`ERR redis.call is not available in standalone mode`:
+scripts that only compute. `redis.call` raises
+`ERR redis.call is not available in standalone mode`, and `redis.pcall`
+returns `ERR redis.pcall is not available in standalone mode` as an error
+table:
 
 ```typescript
 const calc = await LuaEngine.createStandalone({ limits: { maxFuel: 1_000_000 } });
@@ -338,7 +344,9 @@ try {
 ```
 
 Both throw when called from inside one of the engine's host callbacks; call
-them after `eval` returns.
+them after `eval` returns. If `reset()` cannot build the new VM (out of memory),
+it throws, and every `eval` replies `ERR Lua VM not initialized` until a later
+`reset()` succeeds.
 
 ### Load the WASM module yourself
 
@@ -366,10 +374,25 @@ const engine = module.create(host); // or module.createStandalone()
 ### Use in the browser
 
 Bundlers such as Vite, webpack and Rollup pick the package's browser build
-automatically (through the `browser` export condition). It has no `node:*`
-imports and fetches `redis_lua.wasm` from next to the module; if your bundler
-does not copy that file, serve it yourself and pass its URL as `wasmPath`, or
-fetch it and pass `wasmBytes`.
+automatically (through the `browser` export condition). The build itself has
+no `node:*` imports and fetches `redis_lua.wasm` from next to the module; if
+your bundler does not copy that file, serve it yourself and pass its URL as
+`wasmPath`, or fetch it and pass `wasmBytes`.
+
+The Emscripten glue it loads (`redis_lua.mjs`) is shared with Node, so it
+still mentions `node:module`, `node:fs`, `node:path`, `node:url` and
+`node:crypto`, behind a check that only runs them in Node. Bundlers only need
+to leave them alone:
+
+- **Vite** builds as is. It prints a "Module "node:module" has been
+  externalized for browser compatibility" warning that you can ignore.
+- **webpack 5** fails with `UnhandledSchemeError: Reading from "node:module"`
+  unless you ignore those imports:
+
+  ```js
+  // webpack.config.js
+  plugins: [new webpack.IgnorePlugin({ resourceRegExp: /^node:/ })],
+  ```
 
 The API uses `Buffer`, so provide it as a global, for example with the
 [`buffer`](https://www.npmjs.com/package/buffer) package:
@@ -457,7 +480,9 @@ function describe(reply: ReplyValue): string {
 | `engine.getLimits()` | The limits the engine was created with. |
 | `LuaEngine.defaultWasmPath()`, `LuaEngine.defaultModulePath()` | Location of the bundled `redis_lua.wasm` / `redis_lua.mjs`. |
 | `load(options?)` | Load the module; returns a `LuaWasmModule` with `create(host)` and `createStandalone()`. |
+| `LuaWasmModule` | What `load()` returns: `create(host)` / `createStandalone()` make its one engine; static `defaultWasmPath()` / `defaultModulePath()`. |
 | `WasmFault` | Error class for a fault inside the WebAssembly module. |
+| `encodeReply(value)`, `decodeReplyBuffer(buffer)`, `encodeArgs(args)` | Low-level helpers for the [binary ABI](docs/abi.md) encoding of replies and argument arrays. Most applications don't need them. |
 | `LuaWasmEngine` | Deprecated alias of `LuaEngine`; use `LuaEngine` instead. |
 
 Types: `EngineOptions`, `StandaloneOptions`, `LoadOptions`, `EngineLimits`,
@@ -474,8 +499,8 @@ Types: `EngineOptions`, `StandaloneOptions`, `LoadOptions`, `EngineLimits`,
 - Lua 5.1's `base`, `table`, `string` and `math` libraries, plus `coroutine`
   and, depending on the profile, a sandboxed `os` (`os.clock` only)
 
-As in Redis, there is no file, network or clock access, and scripts cannot
-create or change globals.
+As in Redis, there is no file or network access, `os` (where the profile
+enables it) has only `os.clock`, and scripts cannot create or change globals.
 
 ## Compatibility
 

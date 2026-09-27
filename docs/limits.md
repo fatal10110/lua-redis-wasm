@@ -37,7 +37,7 @@ All limits are enforced by the WASM runtime.
   C functions such as `string.rep` is not charged.
 - Each evaluation starts with the full budget.
 - A script that spends the budget aborts with
-  `{ err: "Script killed by fuel limit", code: "ERR" }` plus the usual `meta`
+  code `ERR` and `err` `Script killed by fuel limit`, plus the usual `meta`
   (`line`, `sha`), where a killed Redis script reports
   `ERR Script killed by user with SCRIPT KILL...`.
 - Like a Redis `SCRIPT KILL`, it cannot be caught: after a `pcall`/`xpcall`

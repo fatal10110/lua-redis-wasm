@@ -854,7 +854,7 @@ const U32_MAX = 0xffff_ffff;
  * Rejects limit values the WASM runtime cannot represent: every limit is a
  * non-negative integer count of instructions or bytes (0 = not set). A
  * fraction is rejected rather than rounded, so a value in (0, 1) can never
- * turn into 0, i.e. no limit.
+ * turn into 0, i.e. no limit (or, for `maxFuel`, the default budget).
  */
 function validateLimits(limits: EngineLimits | undefined): void {
   if (!limits) {
