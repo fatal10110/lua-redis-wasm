@@ -2,7 +2,7 @@
 #include "redis_api.h"
 #include "redis_math.h"
 #include <lauxlib.h>
-#include <lstate.h> /* lua_State internals: allowhook, see fuel_hook */
+#include <lstate.h> /* lua_State internals: errfunc, see fuel_hook */
 #include <lua.h>
 #include <lualib.h>
 #include <setjmp.h>
@@ -247,7 +247,8 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
  * - a table is a Redis 7 error object ({err=...}, as raised by redis.call or
  *   error(redis.error_reply(...))): its `err` field, like
  *   luaExtractErrorInformation, or "ERR unknown error" when that is not a
- *   string. Its `source`/`line` fields are not read: Redis's handler overwrites
+ *   string (that fallback is derived from Valkey src/script_lua.c,
+ *   valkey-io/valkey#2229, BSD-3-Clause). Its `source`/`line` fields are not read: Redis's handler overwrites
  *   both with the error point, which is the line recorded here (#37);
  * - a number becomes its string form;
  * - anything else becomes what Lua's tostring gives ("nil", "true", ...), which
@@ -786,6 +787,26 @@ static void open_allowed_libs(lua_State *L, uint32_t flags) {
 }
 
 #define FUEL_KILL_MASK (LUA_MASKLINE | LUA_MASKCOUNT)
+#define FUEL_KILL_MSG "ERR Script killed by fuel limit"
+
+/* Set once the budget is spent; cleared by reset_fuel. run_script then replies
+ * with the kill whatever the script did afterwards, e.g. a coroutine.resume
+ * that returned the kill as a value. g_fuel_kill_line is the script line at
+ * the kill point. */
+static int g_fuel_killed = 0;
+static uint32_t g_fuel_kill_line = 0;
+
+/* Line of the innermost Lua frame of L (0 if none): the running function,
+ * as a hook runs without a frame of its own. */
+static uint32_t current_script_line(lua_State *L) {
+  lua_Debug ar;
+  for (int level = 0; lua_getstack(L, level, &ar); level++) {
+    if (lua_getinfo(L, "Sl", &ar) && ar.currentline > 0) {
+      return (uint32_t)ar.currentline;
+    }
+  }
+  return 0;
+}
 
 /* Charges FUEL_HOOK_STEP instructions per call and kills the script once the
  * budget is spent. Like Redis's luaMaskCountHook after SCRIPT KILL, the kill
@@ -793,31 +814,39 @@ static void open_allowed_libs(lua_State *L, uint32_t flags) {
  * is raised again right after any pcall that catches it and keeps propagating
  * until it escapes every pcall. Raised only every FUEL_HOOK_STEP instructions,
  * it would always land inside a pcall'd loop and be caught there forever
- * (#38). A coroutine keeps the hook it was created with, so each thread is
- * switched the first time it runs out. reset_fuel restores the counting hook
- * before the next script. */
+ * (#38). A coroutine has a hook of its own: when one runs out, the main thread
+ * is switched too, so it stops as soon as it resumes. reset_fuel restores the
+ * counting hook before the next script.
+ *
+ * No message handler runs for the kill (errfunc is cleared; luaD_pcall
+ * restores it on unwind): xpcall just returns false, and the next instruction
+ * raises again. A handler would run with hooks disabled (an error raised from
+ * a hook keeps them off until it is caught), so it could loop forever, and
+ * run_script's own handler is not needed as the kill line is recorded here. */
 static void fuel_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
-  if (g_fuel_remaining > 0) {
+  if (!g_fuel_killed) {
     g_fuel_remaining -= FUEL_HOOK_STEP;
     if (g_fuel_remaining > 0) {
       return;
     }
+    g_fuel_killed = 1;
+    g_fuel_kill_line = current_script_line(L);
   }
   if (lua_gethookmask(L) != FUEL_KILL_MASK || lua_gethookcount(L) != 1) {
     lua_sethook(L, fuel_hook, FUEL_KILL_MASK, 1);
   }
-  /* Hooks run with hooks disabled, and an error raised from one leaves them
-   * disabled until it reaches a pcall boundary. An xpcall message handler runs
-   * before that, so it could loop forever unhooked. Re-enable them: the
-   * handler is killed too (and a handler that keeps failing ends in "error in
-   * error handling"). Redis has the same gap. */
-  L->allowhook = 1;
-  redis_raise_error(L, "ERR Script killed by fuel limit");
+  if (L != g_state) {
+    lua_sethook(g_state, fuel_hook, FUEL_KILL_MASK, 1);
+  }
+  L->errfunc = 0;
+  redis_raise_error(L, FUEL_KILL_MSG);
 }
 
 static void reset_fuel(void) {
   g_fuel_remaining = g_fuel_limit;
+  g_fuel_killed = 0;
+  g_fuel_kill_line = 0;
   if (g_state) {
     lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   }
@@ -1143,6 +1172,12 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   // filled the heap and caught the error would otherwise leave no room for it.
   // run_guarded acts on the result once the reply is built.
   g_script_gc_status = collect_if_heap_high();
+  if (g_fuel_killed) {
+    // Whether the kill escaped (status != 0) or was swallowed as a value.
+    PtrLen out = reply_script_error(FUEL_KILL_MSG, g_fuel_kill_line);
+    lua_settop(g_state, 0);
+    return out;
+  }
   if (status != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);

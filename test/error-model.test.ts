@@ -192,10 +192,19 @@ test("error model: the tableErrors override is merged over the profile", async (
 
 const KILL = ["ERR", "Script killed by fuel limit"] as const;
 
+// A regression hangs rather than fails, so these tests carry a timeout.
+const FUEL_TEST = { timeout: 30_000 };
+const WITHIN_BUDGET = "local n = 0 for i = 1, 10000 do n = n + i end return n";
+
+// `n` levels of string.gsub callbacks (C frames) around `body`.
+function inGsubNest(n: number, body: string): string {
+  return `local function f(n) if n == 0 then ${body} end return (string.gsub('x', 'x', function() return f(n - 1) end)) end return f(${n})`;
+}
+
 for (const profile of [undefined, "redis-6.2"] as const) {
   const name = profile ?? "default";
 
-  test(`fuel (${name}): a kill cannot be caught by pcall`, async () => {
+  test(`fuel (${name}): a kill cannot be caught by pcall`, FUEL_TEST, async () => {
     const engine = await engineFor(profile, { maxFuel: 100_000 });
     const scripts = [
       "while true do end",
@@ -203,17 +212,42 @@ for (const profile of [undefined, "redis-6.2"] as const) {
       "while true do pcall(function() while true do end end) end",
       "local ok, e = pcall(function() while true do end end)\nreturn e",
       "while true do xpcall(function() while true do end end, function(e) return e end) end",
-      // An xpcall handler run for the kill is itself killed.
+      // No message handler runs for the kill, so a looping one cannot hang.
       "while true do xpcall(function() while true do end end, function(e) while true do end end) end",
-      // A coroutine keeps its own hook; both threads are killed.
       "local co = coroutine.wrap(function() while true do pcall(function() while true do end end) end end)\nwhile true do pcall(co) end",
       "local function f() return pcall(f) end\nwhile true do f() end",
     ];
     for (const script of scripts) {
       assertErr(engine.eval(script), ...KILL);
       // The counting hook is restored: a script within budget runs again.
-      assert.equal(engine.eval("local n = 0 for i = 1, 10000 do n = n + i end return n"), 50005000, script);
+      assert.equal(engine.eval(WITHIN_BUDGET), 50005000, script);
     }
     assertUsable(engine);
+  });
+
+  test(`fuel (${name}): a kill inside a coroutine is not swallowed by resume`, FUEL_TEST, async () => {
+    const engine = await engineFor(profile, { maxFuel: 100_000 });
+    const swallowed = "local co = coroutine.create(function() while true do end end)\nlocal ok, e = coroutine.resume(co)\nreturn {tostring(ok), 'returned normally'}";
+    assertErr(engine.eval(swallowed), ...KILL, 1);
+    // The resumer is stopped right away too, even inside its own pcall loop.
+    const resumer = "while true do pcall(coroutine.resume, coroutine.create(function() while true do end end)) end";
+    assertErr(engine.eval(resumer), ...KILL);
+    assert.equal(engine.eval(WITHIN_BUDGET), 50005000);
+    assertUsable(engine);
+  });
+
+  test(`fuel (${name}): the kill line is where the budget ran out`, FUEL_TEST, async () => {
+    const engine = await engineFor(profile, { maxFuel: 100_000 });
+    assertErr(engine.eval("local x = 1\n\nwhile true do end"), ...KILL, 3);
+    assertErr(engine.eval("local x = 1\nlocal ok = pcall(function()\n  while true do end\nend)"), ...KILL, 3);
+  });
+
+  test(`fuel (${name}): an xpcall kill under nested C calls stays within the C stack`, FUEL_TEST, async () => {
+    const engine = await engineFor(profile, { maxFuel: 100_000 });
+    const loop = "while true do xpcall(function() while true do end end, function(e) return e end) end";
+    for (const depth of [29, 30, 31, 40]) {
+      assertErr(engine.eval(inGsubNest(depth, loop)), ...KILL);
+      assertUsable(engine);
+    }
   });
 }
