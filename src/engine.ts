@@ -630,7 +630,9 @@ const U32_MAX = 0xffff_ffff;
 
 /**
  * Rejects limit values the WASM runtime cannot represent: every limit is a
- * non-negative number of instructions or bytes (0 = not set).
+ * non-negative integer count of instructions or bytes (0 = not set). A
+ * fraction is rejected rather than rounded, so a value in (0, 1) can never
+ * turn into 0, i.e. no limit.
  */
 function validateLimits(limits: EngineLimits | undefined): void {
   if (!limits) {
@@ -638,20 +640,20 @@ function validateLimits(limits: EngineLimits | undefined): void {
   }
   for (const name of LIMIT_NAMES) {
     const value = limits[name];
-    if (value !== undefined && (typeof value !== "number" || !(value >= 0))) {
+    if (value !== undefined && !(Number.isInteger(value) && value >= 0)) {
       throw new RangeError(
-        `limits.${name} must be a non-negative number, got ${String(value)}`,
+        `limits.${name} must be a non-negative integer, got ${String(value)}`,
       );
     }
   }
 }
 
 /**
- * A validated limit as the u32 `set_limits` takes. Fractions are truncated and
- * values beyond u32 (including Infinity) saturate instead of wrapping.
+ * A validated limit as the u32 `set_limits` takes; values beyond u32
+ * saturate instead of wrapping.
  */
 function toU32Limit(value: number | undefined): number {
-  return value === undefined ? 0 : Math.min(Math.floor(value), U32_MAX);
+  return value === undefined ? 0 : Math.min(value, U32_MAX);
 }
 
 export class LuaWasmModule {

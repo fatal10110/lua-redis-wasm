@@ -1,6 +1,7 @@
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "redis_math.h"
+#include "lua_modules.h"
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -730,15 +731,14 @@ LUALIB_API int luaopen_cjson(lua_State *L);
 LUALIB_API int luaopen_struct(lua_State *L);
 LUALIB_API int luaopen_cmsgpack(lua_State *L);
 LUALIB_API int luaopen_bit(lua_State *L);
-/* Frees pack buffers a cmsgpack call abandoned when it raised an error (see
- * lua_cmsgpack_checked.c). Called once no script is running. */
-void cmsgpack_release_buffers(void);
 
-/* Frees the buffers C modules abandoned when a Lua error unwound them. Called
+/* Frees the buffers cmsgpack / cjson calls abandoned when a Lua error unwound
+ * them, and shrinks cjson's kept encode buffer (see lua_modules.h). Called
  * after the script's protected call and before the VM is closed, when no
  * module C frame can be live. */
 static void release_module_buffers(void) {
   cmsgpack_release_buffers();
+  cjson_release_buffers();
 }
 
 static void load_redis_modules(lua_State *L) {
@@ -819,6 +819,10 @@ static void *capped_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   }
   mem->used = mem->used - osize + nsize;
   return out;
+}
+
+void *lua_heap_alloc(void *ptr, size_t osize, size_t nsize) {
+  return capped_lua_alloc(&g_lua_mem, ptr, osize, nsize);
 }
 
 static lua_State *new_lua_state(void) {
@@ -1145,7 +1149,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_lua_mem.enforce = 1;
   int status = lua_pcall(g_state, 0, 1, errfunc);
   g_lua_mem.enforce = 0;
-  // No cmsgpack C frame is live any more: free what a failed call abandoned.
+  // No cjson/cmsgpack C frame is live any more: free what failed calls abandoned.
   release_module_buffers();
   // Free the script's garbage before allocating the reply: a script that
   // filled the heap and caught the error would otherwise leave no room for it.

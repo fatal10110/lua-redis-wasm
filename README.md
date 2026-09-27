@@ -197,9 +197,8 @@ unchanged.
 If an exception still escapes the WASM module, the VM can no longer be trusted:
 that call throws, and every later `eval` / `evalWithArgs` throws
 `LuaEngine is unusable: ...` (with the original error as `cause`). Create a new
-engine to continue. This covers a WASM trap or abort (e.g. `cjson.encode`
-running out of heap for its output buffer) and a throwing `_alloc`, which is
-reported as the exported `WasmFault` error class:
+engine to continue. This covers a WASM trap or abort and a throwing `_alloc`,
+which is reported as the exported `WasmFault` error class:
 
 ```typescript
 import { WasmFault } from "lua-redis-wasm";
@@ -426,8 +425,10 @@ const engine = module.create(host);
 | `maxReplyBytes`  | Size of the encoded script reply              | `ERR reply exceeds configured limit`        |
 | `maxArgBytes`    | Size of the encoded KEYS + ARGV array         | `ERR KEYS/ARGV exceeds configured limit`    |
 
-All limits are enforced by the WASM runtime; unset or 0 means no limit, and
-negative values make `load()` throw a `RangeError`. `maxReplyBytes` is checked
+All limits are enforced by the WASM runtime; unset or 0 means no limit. Each
+must be a non-negative integer: `load()` throws a `RangeError` for negative,
+fractional or non-finite values (so e.g. `0.5` cannot silently mean "no
+limit"), and values above 2^32 - 1 are capped to it. `maxReplyBytes` is checked
 while the reply is encoded, so a small value that expands into a huge reply
 (e.g. a table referencing the same subtable many times) fails as soon as it
 crosses the limit. It covers the script's return value (including returned
@@ -437,14 +438,16 @@ each key and argument.
 
 `maxMemoryBytes` caps every byte the Lua allocator hands out for the engine's
 Lua state: Lua objects (including KEYS/ARGV and the ~20 KB the standard
-libraries take) and `cmsgpack`'s pack buffers. A script whose allocation would
-cross it fails with Lua's `not enough memory` error (catchable with `pcall`),
-and the engine stays usable. Because Lua 5.1 has no emergency garbage
-collection, garbage counts until the next collection cycle frees it, so allow
-roughly twice a script's live data. The cap is checked while the script runs;
-the encoded reply (bounded by `maxReplyBytes`) and `cjson`'s scratch buffers are
-not Lua allocations and are not counted. A full collection runs after any
-evaluation that leaves more than half the cap in use.
+libraries take) and the buffers `cjson` and `cmsgpack` build their output in.
+A script whose allocation would cross it fails with Lua's `not enough memory`
+error (catchable with `pcall`), and the engine stays usable: buffers a failing
+`cjson` / `cmsgpack` call abandons are freed when the evaluation ends, and
+`cjson`'s reusable encode buffer is shrunk back to 1 KB. Because Lua 5.1 has no
+emergency garbage collection, garbage counts until the next collection cycle
+frees it, so allow roughly twice a script's live data. The cap is checked while
+the script runs; the encoded reply (bounded by `maxReplyBytes`) is not a Lua
+allocation and is not counted. A full collection runs after any evaluation that
+leaves more than half the cap in use.
 
 The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
 `not enough memory` error and the engine stays usable. Because Lua 5.1 has no

@@ -11,7 +11,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `EngineLimits.maxMemoryBytes` is now enforced (it was documented but never
   read): the Lua state uses a counting allocator that refuses, while a script
   runs, any allocation that would take the engine's Lua memory (Lua objects,
-  uncollected garbage, cmsgpack pack buffers) past the cap. The script gets
+  uncollected garbage, cjson and cmsgpack buffers) past the cap. The script gets
   Lua's `not enough memory` error and the engine stays usable. `set_limits`
   takes the cap as a fourth argument (#54).
 
@@ -53,13 +53,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   duplicate checks in `LuaEngine` are gone (#53). KEYS/ARGV over `maxArgBytes`
   are now copied into the heap before being rejected, so ones too large for the
   heap throw `RangeError` rather than returning the limit error.
-- `load()` throws a `RangeError` for a negative or non-numeric limit, and limits
-  above 2^32 - 1 saturate instead of wrapping around in the WASM call.
+- `load()` throws a `RangeError` for a limit that is not a non-negative integer
+  (negative, fractional, `NaN`, `Infinity`, non-numeric), and limits above
+  2^32 - 1 saturate instead of wrapping around in the WASM call.
 - The script's SHA1 is computed only when a script error is built, not on every
   `eval` / `evalWithArgs` (#57).
 - `cmsgpack` allocation failures raise Lua's `not enough memory` error instead
   of aborting the module, and the pack buffers a failed call abandons are freed
   when the evaluation ends.
+- `cjson` is built against `wasm/src/strbuf_checked.c` instead of the vendored
+  `strbuf.c`: its buffers come from the Lua allocator (and count toward
+  `maxMemoryBytes`), an allocation failure raises `not enough memory` instead
+  of aborting the module, buffers a failed `cjson.decode` / `cjson.encode`
+  abandons are freed when the evaluation ends, and the reusable encode buffer
+  is shrunk back to 1 KB after each evaluation. `cjson.encode` of a value that
+  expands past the heap (a table holding the same subtable many times) is now
+  an ordinary error instead of killing the engine. `redis.sha1hex` frees the
+  host's digest before pushing it, so a memory error cannot leak it.
 
 ### Fixed
 

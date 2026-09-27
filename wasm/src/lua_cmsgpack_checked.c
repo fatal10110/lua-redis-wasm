@@ -26,6 +26,7 @@
 #include <stdlib.h>
 
 #include "lua.h"
+#include "lua_modules.h"
 
 /* Lua core (ldo.c): raises `errcode` on L like a failed allocation does.
  * Declared here rather than via ldo.h to keep Lua's internal headers out of

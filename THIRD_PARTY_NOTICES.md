@@ -34,7 +34,9 @@ THE SOFTWARE.
 ```
 
 ## lua_cjson.c
-- File: `vendor/redis/deps/lua/src/lua_cjson.c`
+- File: `vendor/redis/deps/lua/src/lua_cjson.c` (with its `strbuf.h`; compiled through
+  `wasm/src/lua_cjson_checked.c`, with `strbuf.c` replaced by this project's
+  `wasm/src/strbuf_checked.c`)
 - Copyright: Mark Pulford (2010–2012)
 - License: MIT
 

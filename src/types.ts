@@ -248,9 +248,9 @@ export type RedisProps = Record<string, RedisProp>;
  *
  * These limits protect against runaway scripts and resource exhaustion.
  * All limits are optional - unset (or 0) limits are not enforced. All are
- * enforced by the WASM runtime. Values must be non-negative numbers (`load()`
- * throws a RangeError otherwise); fractions are truncated and values above
- * 2^32 - 1 are capped to it.
+ * enforced by the WASM runtime. Values must be non-negative integers (`load()`
+ * throws a RangeError for negative, fractional, non-finite or non-numeric
+ * values); values above 2^32 - 1 are capped to it.
  *
  * @example
  * ```typescript
@@ -269,16 +269,17 @@ export type EngineLimits = {
   /**
    * Cap on the memory the engine's Lua state may hold, in bytes: every Lua
    * object (including KEYS/ARGV, the ~20 KB the standard libraries take, and
-   * not-yet-collected garbage) plus cmsgpack's pack buffers.
+   * not-yet-collected garbage) plus the cjson and cmsgpack output buffers.
    * A script whose allocation would cross it fails with Lua's
    * `not enough memory` error, like one that exhausts the fixed 64 MB WASM
    * heap, and the engine stays usable.
    *
    * Lua 5.1 has no emergency garbage collection, so garbage counts until the
    * next collection cycle reclaims it: allow roughly twice a script's live
-   * data. Allocations outside the Lua allocator (the encoded reply, bounded by
-   * `maxReplyBytes`; cjson's scratch buffers) are not counted, and the cap is
-   * only checked while a script runs.
+   * data. The encoded reply (bounded by `maxReplyBytes`) is not a Lua
+   * allocation and is not counted, and the cap is only checked while a script
+   * runs. cjson's buffers count too; any a failing cjson/cmsgpack call
+   * abandons are freed when the evaluation ends.
    */
   maxMemoryBytes?: number;
 

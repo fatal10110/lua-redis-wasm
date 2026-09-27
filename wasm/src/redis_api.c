@@ -172,6 +172,9 @@ static int arg_to_bytes(lua_State *L, int idx, char numbuf[NUMBER_ARG_BUF], cons
   }
 }
 
+/* Must not allocate through Lua (or otherwise raise) between ab_init and the
+ * caller's free: a Lua memory error would longjmp past it and leak the buffer.
+ * arg_to_bytes only reads strings in place and formats numbers into numbuf. */
 static int encode_args(lua_State *L, int start, int argc, ArgBuffer *ab) {
   ab_init(ab, (uint32_t)argc);
   if (!ab->data) {
@@ -534,11 +537,20 @@ static int l_redis_sha1hex(lua_State *L) {
   size_t len = 0;
   const char *data = luaL_checklstring(L, 1, &len);
   PtrLen out = host_sha1hex((uint32_t)(uintptr_t)data, (uint32_t)len);
-  if (out.ptr == 0 || out.len == 0) {
+  /* Copy the digest out and free the host buffer before pushing it: a memory
+   * error from lua_pushlstring (e.g. at maxMemoryBytes) would skip the free. */
+  char digest[40];
+  int ok = out.ptr != 0 && out.len == sizeof(digest);
+  if (ok) {
+    memcpy(digest, (const void *)(uintptr_t)out.ptr, sizeof(digest));
+  }
+  if (out.ptr != 0) {
+    free_mem(out.ptr);
+  }
+  if (!ok) {
     return luaL_error(L, "ERR sha1hex failed");
   }
-  lua_pushlstring(L, (const char *)(uintptr_t)out.ptr, out.len);
-  free_mem(out.ptr);
+  lua_pushlstring(L, digest, sizeof(digest));
   return 1;
 }
 
