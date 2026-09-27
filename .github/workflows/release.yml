@@ -48,9 +48,13 @@ jobs:
             exit 1
           fi
 
-      # dist/ is already built above; --ignore-scripts skips the prepublishOnly
-      # rebuild (which would run the docker WASM build again).
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@^11.5.1
+
+      # Authenticates through npm trusted publishing (OIDC, id-token: write
+      # above), so no NPM_TOKEN secret is needed; provenance is attached
+      # automatically. dist/ is already built above; --ignore-scripts skips the
+      # prepublishOnly rebuild (which would run the docker WASM build again).
       - name: Publish to npm
-        run: npm publish --ignore-scripts --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --ignore-scripts --access public
