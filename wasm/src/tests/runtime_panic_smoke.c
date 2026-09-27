@@ -41,7 +41,28 @@ static void expect_int(const char *script, int64_t expected) {
   free_mem(reply.ptr);
 }
 
-_Static_assert(REDIS_LUA_WASM_ABI_VERSION == 3, "script error payload layout below is ABI 3");
+_Static_assert(REDIS_LUA_WASM_ABI_VERSION == 4, "script error payload layout below is ABI 4");
+
+static PtrLen compile_str(const char *script) {
+  uint32_t len = (uint32_t)strlen(script);
+  uint32_t ptr = alloc(len);
+  memcpy((void *)(uintptr_t)ptr, script, len);
+  PtrLen reply = compile(ptr, len);
+  free_mem(ptr);
+  assert(reply.ptr != 0);
+  assert(reply.len >= 5);
+  return reply;
+}
+
+/* compile() of a script that compiles replies nil. */
+static void expect_compiles(const char *script) {
+  PtrLen reply = compile_str(script);
+  const uint8_t *buf = (const uint8_t *)(uintptr_t)reply.ptr;
+  assert(reply.len == 5);
+  assert(buf[0] == REPLY_NULL);
+  assert(read_u32_le(buf + 1) == 0);
+  free_mem(reply.ptr);
+}
 
 /* Checks an error reply: its type, a script error's flags and, for an engine
  * error, its kind and name (NULL for none), and that the message contains
@@ -97,6 +118,8 @@ static void expect_error_reply_flags(PtrLen reply, uint8_t type, const char *nee
 static const char GLOBAL_READ_MSG[] =
     "user_script:1: Script attempted to access nonexistent global variable 'undefined_global'";
 
+static const char SYNTAX_MSG[] = "user_script:1: unexpected symbol near '+'";
+
 static void expect_error_reply(PtrLen reply, uint8_t type, const char *needle) {
   expect_error_reply_flags(reply, type, needle, 0);
 }
@@ -129,6 +152,20 @@ int main(void) {
                      REPLY_SCRIPT_ERROR, GLOBAL_READ_MSG);
   expect_error_reply_flags(eval_str("error({err='boom'})"), REPLY_SCRIPT_ERROR, "boom",
                            SCRIPT_ERROR_FROM_TABLE);
+  /* A script that fails to load is flagged as a compile error, by eval and by
+   * compile; a runtime error with the same text is not (#94). compile runs
+   * nothing: the global write below would fail if it ran. */
+  expect_error_reply_flags(eval_str("return +"), REPLY_SCRIPT_ERROR, SYNTAX_MSG,
+                           SCRIPT_ERROR_COMPILE);
+  expect_error_reply_flags(compile_str("return +"), REPLY_SCRIPT_ERROR, SYNTAX_MSG,
+                           SCRIPT_ERROR_COMPILE);
+  expect_error_reply_flags(compile_str("local a = 1\nreturn +"), REPLY_SCRIPT_ERROR,
+                           "user_script:2: unexpected symbol near '+'", SCRIPT_ERROR_COMPILE);
+  expect_error_reply(eval_str("error(\"user_script:1: unexpected symbol near '+'\", 0)"),
+                     REPLY_SCRIPT_ERROR, SYNTAX_MSG);
+  expect_compiles("x = 1 error('boom')");
+  expect_compiles("while true do end");
+  expect_int("return 4", 4);
 
   /* And the handler still works after a rebuild. */
   expect_error_reply(test_unprotected_error(), REPLY_ERROR, "the Lua VM was reset");

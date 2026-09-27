@@ -233,15 +233,16 @@ typedef struct EngineErrorInfo {
 } EngineErrorInfo;
 
 /* Like reply_error, but tags the reply as a script-aborting error so the host
- * decorates it with the script sha / source context. Used for load and runtime
- * (lua_pcall) failures, including errors that propagated out of redis.call.
+ * decorates it with the script sha / source context. Used for load (compile,
+ * SCRIPT_ERROR_COMPILE) and runtime (lua_pcall) failures, including errors that
+ * propagated out of redis.call.
  *
  * The payload is prefixed with a u32le `line` (the script line at the error
  * point, or 0 if unknown) and a u8 `flags` (SCRIPT_ERROR_*, see abi.h).
  * Command errors propagated out of redis.call carry no `user_script:N:` text
  * prefix, so the line cannot be recovered from the message alone; the host
  * reads it from this field. 0 means "parse from the message prefix"
- * (load/syntax errors, which never run the error handler). An engine error
+ * (compile errors, which never run the error handler). An engine error
  * (`engine` non-NULL, SCRIPT_ERROR_ENGINE) then has its kind and name, each a
  * u32le length and the bytes (name length ENGINE_ERROR_NO_NAME for none), so
  * the host never reads them from the message. */
@@ -1355,6 +1356,28 @@ static int collect_if_heap_high(void) {
   return status;
 }
 
+/* Loads the script as the chunk "@user_script", like Redis (luaCreateFunction
+ * in Valkey 8.0's src/eval.c, same in Redis 7.2.4; Redis 6.2 loads the body
+ * wrapped in a function, under the same chunk name), pushing the compiled
+ * function or, on failure (non-zero), the error message. Runs no script code,
+ * so neither the fuel hook nor the error handler runs. */
+static int load_script(lua_State *L, const char *script, size_t script_len) {
+  return luaL_loadbuffer(L, script, script_len, "@user_script");
+}
+
+/* The script error reply for a script load_script rejected, its message on top
+ * of L. Every load failure is a compile error (SCRIPT_ERROR_COMPILE), running
+ * out of memory while loading (LUA_ERRMEM, "not enough memory") included:
+ * Redis replies "Error compiling script (new function): <message>" for any
+ * non-zero luaL_loadbuffer status (luaCreateFunction in Valkey 8.0's
+ * src/eval.c, same in Redis 7.2.4 and 6.2). The message is a string error, sent
+ * as "-ERR ...", in every error model. `line` is 0: the host parses it from the
+ * message's "user_script:N:" prefix. */
+static PtrLen reply_compile_error(lua_State *L) {
+  const char *err = lua_tostring(L, -1);
+  return reply_script_error(err ? err : "script load failed", 0, SCRIPT_ERROR_COMPILE, NULL);
+}
+
 // Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
 // decoded from `args` (see set_keys_argv) after the maxArgBytes check;
 // otherwise both are set to empty tables.
@@ -1379,9 +1402,8 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   clear_engine_error(g_state);
   lua_rawgeti(g_state, LUA_REGISTRYINDEX, g_error_handler_ref);
   int errfunc = lua_gettop(g_state);
-  if (luaL_loadbuffer(g_state, script, script_len, "@user_script") != 0) {
-    const char *err = lua_tostring(g_state, -1);
-    PtrLen out = reply_script_error(err ? err : "script load failed", 0, 0, NULL);
+  if (load_script(g_state, script, script_len) != 0) {
+    PtrLen out = reply_compile_error(g_state);
     lua_settop(g_state, 0);
     return out;
   }
@@ -1532,6 +1554,36 @@ PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_pt
   ScriptRun run = {(const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
                    (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count};
   return run_guarded(run_script_guarded, &run);
+}
+
+/* Body of compile(): loads the script and drops the compiled function. Nothing
+ * else is touched: no fuel reset (loading runs no hook), no KEYS/ARGV, no RESP
+ * version or random seed, and the Lua stack is left as it was. The garbage the
+ * load made is collected by run_guarded like an eval's. */
+static PtrLen compile_script_guarded(void *arg) {
+  ScriptRun *run = (ScriptRun *)arg;
+  if (!g_state) {
+    return REPLY_ERROR_LIT("ERR Lua VM not initialized");
+  }
+  int top = lua_gettop(g_state);
+  PtrLen out;
+  if (load_script(g_state, run->script, run->script_len) != 0) {
+    out = reply_compile_error(g_state);
+  } else {
+    // Every reply is non-empty (see run_guarded): success is an encoded nil.
+    ReplyBuffer rb;
+    rb_init(&rb);
+    out = rb_write_header(&rb, REPLY_NULL, 0) == 0 ? rb_finalize(&rb) : (PtrLen){0, 0};
+  }
+  lua_settop(g_state, top);
+  return out;
+}
+
+/* Compiles a script without running it, for a host's SCRIPT LOAD (see abi.h).
+ * Refused while an eval is active, like eval. */
+PtrLen compile(uint32_t ptr, uint32_t len) {
+  ScriptRun run = {(const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0};
+  return run_guarded(compile_script_guarded, &run);
 }
 
 #ifdef LUA_REDIS_WASM_TESTING

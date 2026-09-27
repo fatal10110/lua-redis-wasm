@@ -82,7 +82,7 @@ const ENGINE_ERROR_NO_NAME = 0xffff_ffff;
 
 /**
  * Reads an engine error's `[kind_len u32][kind][name_len u32][name]` fields
- * (ABI 3) from `payload`, returning them and the rest (the message).
+ * (since ABI 3) from `payload`, returning them and the rest (the message).
  */
 function readEngineError(payload: Buffer): {
   engine: { kind: string; name?: string };
@@ -123,6 +123,16 @@ function readEngineError(payload: Buffer): {
  * in the Redis 7 error model.
  */
 export const SCRIPT_ERROR_FROM_TABLE = 0x02;
+
+/**
+ * REPLY_SCRIPT_ERROR flag (ABI 4): the script failed to compile, so none of it
+ * ran. The message is Lua's (`user_script:1: unexpected symbol near '+'`), a
+ * string error with code `ERR`; Redis words it `Error compiling script (new
+ * function): <message>`, which the host adds (#94). Set by the engine where the
+ * load fails, never inferred from the text: a runtime error with the same text
+ * is not flagged.
+ */
+export const SCRIPT_ERROR_COMPILE = 0x04;
 
 /**
  * An uncaught string (non-table) script error, or any script error in the
@@ -437,7 +447,7 @@ export function decodeReply(
   }
 
   if (type === REPLY_SCRIPT_ERROR) {
-    // Payload (ABI 3) is a u32le `line` (0 = unknown, parse from message
+    // Payload (ABI 4) is a u32le `line` (0 = unknown, parse from message
     // prefix), a u8 `flags` (SCRIPT_ERROR_*), an engine error's kind and name
     // (SCRIPT_ERROR_ENGINE only) and the message bytes. See
     // reply_script_error in wasm/src/runtime.c.
@@ -450,7 +460,7 @@ export function decodeReply(
     cursor += countOrLen;
     // An engine error's kind and name come from their own fields, never from
     // the message; a table error's `err` is split like an error reply, with no
-    // default code.
+    // default code. A compile error (SCRIPT_ERROR_COMPILE) is a string error.
     let error: { err: Buffer; code?: Buffer; engine?: { kind: string; name?: string } };
     if (flags & SCRIPT_ERROR_ENGINE) {
       const { engine, message } = readEngineError(payload);

@@ -33,6 +33,7 @@
  * │                      LuaEngine                              │
  * │  - eval(script)                                             │
  * │  - evalWithArgs(script, keys, args)                         │
+ * │  - compile(script) (check only, for SCRIPT LOAD)            │
  * │  - reset() (fresh Lua VM), dispose() (release the instance) │
  * └─────────────────────────────────────────────────────────────┘
  * ```
@@ -54,6 +55,7 @@ import type {
   EngineLimits,
   LoadOptions,
   ReplyValue,
+  ReplyError,
   ReplyErrorMeta,
   RedisHost,
   RedisCallHandler,
@@ -73,6 +75,7 @@ import {
   ensureBuffer,
   failureErrorReply,
   REPLY_SCRIPT_ERROR,
+  SCRIPT_ERROR_COMPILE,
   SCRIPT_ERROR_ENGINE,
 } from "./codec.js";
 import {
@@ -254,8 +257,8 @@ export class LuaEngine {
   /**
    * Releases the engine: closes the Lua VM and drops this engine's references
    * to its WASM instance (with its linear memory) and to the host callbacks,
-   * so they can be garbage collected. Afterwards eval, evalWithArgs and reset
-   * throw. Calling it again does nothing.
+   * so they can be garbage collected. Afterwards eval, evalWithArgs, compile
+   * and reset throw. Calling it again does nothing.
    *
    * @throws Error if a script is running (i.e. when called from one of this
    *   engine's host callbacks); the engine is left untouched, so dispose it
@@ -384,6 +387,62 @@ export class LuaEngine {
       } finally {
         this.release(argsPtr);
       }
+    } finally {
+      this.release(scriptPtr);
+    }
+  }
+
+  /**
+   * Compiles a Lua script without running it, as Redis does for `SCRIPT LOAD`:
+   * `null` when the script compiles, else the error reply `eval` would give
+   * for it, `meta.kind` `"compile"` (see `ReplyErrorMeta`). A host builds
+   * Redis's `-ERR Error compiling script (new function): <err>` from it.
+   *
+   * Nothing runs and the Lua VM is left as it was: no global is set, the
+   * script's side effects and `redis.call`s do not happen, and the fuel budget
+   * is not charged. It works in standalone engines too. No limit applies to
+   * the script's size beyond the WASM heap, as for `eval` (`maxArgBytes`
+   * covers KEYS/ARGV only). The compiled function is not kept: a later `eval`
+   * compiles the script again.
+   *
+   * Like `eval`, it replies `ERR nested eval is not supported: a script is
+   * already running` when called while a script runs (from a host callback),
+   * and `ERR Lua VM not initialized` when there is no VM (see `reset()`);
+   * these errors have no `meta`.
+   *
+   * @param script - Lua source code as string, Buffer, or Uint8Array
+   * @returns `null` if the script compiles, else an error reply
+   * @throws RangeError if the WASM heap cannot hold the script (the engine
+   *   stays usable)
+   * @throws Error if an exception escaped the WASM module, now or in a
+   *   previous call; the engine is then unusable
+   * @throws Error if the engine has been disposed
+   * @throws Error if the loaded WASM binary has no `compile` export (a custom
+   *   build older than ABI 4)
+   *
+   * @example
+   * ```typescript
+   * engine.compile("return 1");  // null
+   * engine.compile("return +");
+   * // { err: Buffer.from("user_script:1: unexpected symbol near '+'"),
+   * //   code: Buffer.from("ERR"), meta: { kind: "compile", line: 1, sha } }
+   * ```
+   */
+  compile(script: Buffer | Uint8Array | string): ReplyError | null {
+    this.assertUsable();
+    const compileExport = this.exports._compile;
+    if (!compileExport) {
+      throw new Error(
+        "LuaEngine.compile() is not supported by this WASM binary (built before ABI 4)",
+      );
+    }
+    const scriptBuf = ensureBuffer(script, "script");
+    const scriptPtr = this.write(scriptBuf);
+    try {
+      // Only null or an error reply comes back (see compile in abi.h).
+      return this.run(scriptBuf, (retPtr) =>
+        compileExport(retPtr, scriptPtr, scriptBuf.length),
+      ) as ReplyError | null;
     } finally {
       this.release(scriptPtr);
     }
@@ -539,6 +598,10 @@ export class LuaEngine {
 /**
  * Builds a script-aborting error reply. The engine composes no user-facing prose:
  *
+ * - Compile errors are flagged by the WASM runtime where the load fails
+ *   (`SCRIPT_ERROR_COMPILE`), never from the text: `meta.kind` is `"compile"`
+ *   and `err` keeps Lua's message (code `ERR`), which the host wraps in
+ *   Redis's `Error compiling script (new function): ` wording (#94).
  * - Engine-originated errors (globals protection, a bad redis.call argument)
  *   are flagged by the WASM runtime (`SCRIPT_ERROR_ENGINE`), which sends their
  *   kind and name in fields of their own (`value.engine`); we forward
@@ -555,7 +618,7 @@ export class LuaEngine {
  * The line comes from the WASM error handler (`value.line`), which captures the
  * script frame at the error point — including command errors propagated out of
  * redis.call, which carry no `user_script:N:` text prefix. When the handler did
- * not run (load/syntax errors), `value.line` is absent and the line is parsed
+ * not run (compile errors), `value.line` is absent and the line is parsed
  * from the message's `user_script:N:` prefix, defaulting to 1.
  *
  * The script's SHA1 is computed here, for script errors only, rather than on
@@ -594,10 +657,13 @@ function buildScriptError(
   }
 
   // The codec already applied the code rule (a table error keeps a propagated
-  // code such as WRONGTYPE, or none; any other error has ERR).
+  // code such as WRONGTYPE, or none; any other error, a compile error
+  // included, has ERR).
+  const meta: ReplyErrorMeta =
+    flags & SCRIPT_ERROR_COMPILE ? { kind: "compile", line, sha } : { line, sha };
   return value.code === undefined
-    ? { err: value.err, meta: { line, sha } }
-    : { err: value.err, code: value.code, meta: { line, sha } };
+    ? { err: value.err, meta }
+    : { err: value.err, code: value.code, meta };
 }
 
 /**

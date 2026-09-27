@@ -14,8 +14,8 @@ reply:
 ```
 
 - A script that **aborts** (an uncaught `error(...)`, a runtime error, a
-  `redis.call` error that propagates, the fuel-limit kill) returns an error
-  reply with `meta`.
+  `redis.call` error that propagates, the fuel-limit kill) or does not compile
+  (see [Compile errors](#compile-errors)) returns an error reply with `meta`.
 - An error **value** the script returns (`return redis.pcall(...)`,
   `return redis.error_reply('x')`) is passed through untouched, with no `meta`,
   as in Redis.
@@ -75,10 +75,13 @@ Hosts should return plain, undecorated error messages from their callbacks.
 
 - `line` (1-based script line) and `sha` (the script's SHA1) are always set.
   Decorate the message with them as Redis does:
-  `<message> script: <sha>, on @user_script:<line>.`
-- `kind` and `name` are set only for errors the engine itself raises. For
-  these, `err` is the bare `kind`, a machine default the host replaces with
-  Redis's wording:
+  `<message> script: <sha>, on @user_script:<line>.` (not for a compile
+  error, see below).
+- `kind` `compile` marks a script that did not compile; see
+  [Compile errors](#compile-errors). Its `err` is Lua's message.
+- Any other `kind`, and `name`, are set only for errors the engine itself
+  raises while the script runs. For these, `err` is the bare `kind`, a machine
+  default the host replaces with Redis's wording:
 
   | `kind` | Raised for | Redis wording |
   |---|---|---|
@@ -101,6 +104,37 @@ reports it).
 Writing a global has no `kind`: it is blocked by Lua's native readonly flag (as
 in real Redis), which recursively locks the whole globals tree, so the VM itself
 raises `Attempt to modify a readonly table`, which passes through in `err`.
+
+### Compile errors
+
+A script that is not valid Lua fails before any of it runs. `eval`,
+`evalWithArgs` and [`compile`](host-interface.md#script-load-and-compile)
+return the same reply for it:
+
+```ts
+engine.eval("local a = 1\nreturn +");
+// {
+//   err: Buffer.from("user_script:2: unexpected symbol near '+'"),
+//   code: Buffer.from("ERR"),
+//   meta: { kind: "compile", line: 2, sha: "..." },
+// }
+```
+
+- `err` is Lua's message, `user_script:<line>: ...`, and `code` is `ERR`, in
+  every profile. `meta.line` is the line from that message (1 when the
+  message has no `user_script:N:` prefix, as for `not enough memory`).
+- Redis (6.2 to 8.x, Valkey 8.0 and 9.0) replies
+  `-ERR Error compiling script (new function): <err>` to `EVAL` and
+  `SCRIPT LOAD` alike, with no `script: <sha>, on @user_script:<line>.` suffix
+  (and no `Error running script` wrapper on Redis 6.2). Add that wording in the
+  host.
+- Running out of memory while compiling (a script of many megabytes) is a
+  compile error too, with `err` `not enough memory`, as Redis reports any
+  failure to load a script with this wording.
+- The engine flags the error where the load fails (`SCRIPT_ERROR_COMPILE` in
+  [abi.md](abi.md)), never from the text: a runtime error with the same text,
+  such as `error("user_script:1: unexpected symbol near '+'", 0)` or the error
+  of a `loadstring` inside the script, has no `kind`.
 
 ## Errors inside the script
 
@@ -184,8 +218,8 @@ the Redis 6.2 form above with `profile: "redis-6.2"` /
 
 ## Exceptions thrown by the engine
 
-`eval` / `evalWithArgs` throw only when the engine itself cannot run the
-script:
+`eval` / `evalWithArgs` / `compile` throw only when the engine itself cannot
+run the script:
 
 | Exception | Cause | Engine afterwards |
 |---|---|---|
@@ -194,6 +228,9 @@ script:
 | other `Error` | a WASM trap or abort (e.g. `cmsgpack.pack` running out of heap aborts, as in Redis) | unusable |
 | `Error: LuaEngine is unusable: ...` | an earlier call failed as in the two rows above (`cause` holds the original error) | unusable |
 | `Error: LuaEngine has been disposed` | `dispose()` was called | disposed |
+
+`compile` also throws when a custom WASM binary built before it existed (ABI
+version 3 or older) has no `compile` export; the engine stays usable.
 
 `reset()` throws the same way (and also when called from a host callback). If
 it cannot build the new Lua VM (out of memory, or the `redisProps` cannot be
