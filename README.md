@@ -394,18 +394,21 @@ to leave them alone:
   plugins: [new webpack.IgnorePlugin({ resourceRegExp: /^node:/ })],
   ```
 
-The API uses `Buffer`, so provide it as a global, for example with the
-[`buffer`](https://www.npmjs.com/package/buffer) package:
+The API uses `Buffer`, which browsers don't have. Install one as a global,
+for example from the [`buffer`](https://www.npmjs.com/package/buffer)
+package, before you create an engine:
 
 ```typescript
 import { Buffer } from "buffer";
+import { LuaEngine } from "lua-redis-wasm";
+
 Object.assign(globalThis, { Buffer });
 
-// Import the engine after Buffer is in place.
-const { LuaEngine } = await import("lua-redis-wasm");
+const engine = await LuaEngine.createStandalone();
+engine.eval("return 1 + 1"); // 2
 ```
 
-A bundler plugin that provides Node's `Buffer` works too.
+A bundler plugin that provides Node's `Buffer` globally works too.
 
 ## Reply values
 
