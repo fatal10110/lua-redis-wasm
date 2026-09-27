@@ -433,7 +433,7 @@ test("eval: multi-value return replies with the first value (issue #36)", async 
   assert.equal(engine.eval("return nil, 2"), null);
   assert.deepEqual(engine.eval("return {1, 2}, 3"), [1, 2]);
   assert.equal(engine.eval("local function f() return 7, 8 end return f()"), 7);
-  // A dropped trailing value is never encoded, even if it is not encodable.
+  // A dropped trailing value is never encoded (a function would reply nil).
   assert.equal(engine.eval("return 5, function() end"), 5);
 });
 

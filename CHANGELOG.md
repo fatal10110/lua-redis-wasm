@@ -91,6 +91,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out of memory. `cmsgpack.pack` still aborts when it runs out of heap (as with
   Redis's aborting allocator), which marks the engine unusable, instead of
   writing through a NULL buffer.
+- Returning a function, coroutine or userdata (e.g. `cjson.null`) now replies
+  nil in its place, at any depth (array elements, `{map=}` keys/values, `{set=}`
+  members), like Redis, instead of failing the whole script with
+  `ERR unsupported Lua return type`. That error is gone; the only remaining
+  reply encoding failure (out of memory) reports `ERR reply encoding failed`
+  (#66).
+- Number arguments to `redis.call`/`redis.pcall` are formatted like Redis 7.4+
+  instead of with Lua's lossy `%.14g`: integral values up to 2^62 in magnitude as
+  integers (`1e15` → `1000000000000000`), others in the shortest round-trip form
+  via Redis's `fpconv_dtoa` (`0.1+0.2` → `0.30000000000000004`). The same for
+  every compat profile; the `redis-7.2` profile thus matches Redis 7.2.5+
+  (7.2.0–7.2.4 sent `1e15` as `1e+15`) (#68).
 
 ## [1.3.0] - 2026-06-08
 

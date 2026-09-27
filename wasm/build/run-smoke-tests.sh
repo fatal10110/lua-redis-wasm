@@ -26,6 +26,7 @@ MODULE_FILES=""
 for file in $REDIS_LUA_MODULES; do
   MODULE_FILES="$MODULE_FILES $REDIS_LUA_DEPS/$file"
 done
+MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/redis/deps/fpconv/fpconv_dtoa.c" # redis.call number args
 
 COMMON_SRC="$ROOT_DIR/wasm/src/runtime.c $ROOT_DIR/wasm/src/redis_api.c $ROOT_DIR/wasm/src/lua_cmsgpack_checked.c $ROOT_DIR/wasm/src/tests/test_host_stubs.c $CORE_FILES $LIB_FILES $MODULE_FILES"
 
