@@ -11,7 +11,7 @@ import v8 from "node:v8";
 import vm from "node:vm";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { load, LuaEngine, LuaWasmEngine } from "../src/index.js";
+import { load, LuaEngine, LuaWasmEngine, WasmFault } from "../src/index.js";
 import type { RedisHost, ReplyValue } from "../src/types.js";
 import type { WasmExports } from "../src/loader-core.js";
 
@@ -361,6 +361,62 @@ test("lifecycle: reset() recovers from a failed rebuild", async () => {
   exports._reset = realReset;
   engine.reset();
   assert.equal(engine.eval("return 1"), 1);
+});
+
+test("lifecycle: reset() leaves no VM when the redisProps cannot be fetched", async () => {
+  const engine = await LuaEngine.createStandalone({
+    redisProps: { REDIS_VERSION: { value: "7.4.0" } },
+  });
+  const exports = exportsOf(engine);
+  const realAlloc = exports._alloc;
+  // The props import allocates the blob during _reset: the heap is "full".
+  exports._alloc = () => 0;
+  assert.throws(() => engine.reset(), RangeError);
+  exports._alloc = realAlloc;
+  // Not a VM built without the props: none at all, until reset() succeeds.
+  assert.match(errText(engine.eval("return redis.REDIS_VERSION")), /Lua VM not initialized/);
+  engine.reset();
+  assert.deepEqual(engine.eval("return redis.REDIS_VERSION"), Buffer.from("7.4.0"));
+});
+
+test("lifecycle: a WasmFault while reset() fetches the redisProps makes the engine unusable", async () => {
+  const engine = await LuaEngine.createStandalone({
+    redisProps: { REDIS_VERSION: { value: "7.4.0" } },
+  });
+  const exports = exportsOf(engine);
+  const realAlloc = exports._alloc;
+  const abort = new Error("abort");
+  exports._alloc = () => {
+    throw abort;
+  };
+  assert.throws(
+    () => engine.reset(),
+    (err: unknown) => err instanceof WasmFault && err.cause === abort,
+  );
+  exports._alloc = realAlloc;
+  assert.throws(() => engine.eval("return 1"), /LuaEngine is unusable/);
+  assert.throws(() => engine.reset(), /LuaEngine is unusable/);
+  engine.dispose();
+  assert.throws(() => engine.eval("return 1"), /LuaEngine has been disposed/);
+});
+
+test("lifecycle: wasmBytes may be an ArrayBuffer, cached by identity", async () => {
+  const file = await fs.readFile(await wasmFile());
+  const arrayBuffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
+  // A view into a larger buffer compiles only its own bytes.
+  const padded = new Uint8Array(file.length + 16);
+  padded.set(file, 8);
+  const view = padded.subarray(8, 8 + file.length);
+  await countingCompiles(async (compiles) => {
+    const a = (await load({ wasmBytes: arrayBuffer })).createStandalone();
+    const b = await LuaEngine.createStandalone({ wasmBytes: arrayBuffer });
+    assert.equal(compiles(), 1);
+    const c = await LuaEngine.createStandalone({ wasmBytes: view });
+    assert.equal(compiles(), 2);
+    assert.equal(a.eval("return 1"), 1);
+    assert.equal(b.eval("return 2"), 2);
+    assert.equal(c.eval("return 3"), 3);
+  });
 });
 
 test("lifecycle: a module hands its instance over and cannot be reused", async () => {
