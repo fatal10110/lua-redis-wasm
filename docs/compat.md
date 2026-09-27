@@ -66,7 +66,7 @@ through `redisProps`.
   the other `redis.*` functions raise `{err=...}` tables, and the global `pcall`
   returns the `err` string of a caught error table. `redis-6.2` raises plain
   strings. Override with `compat.tableErrors`.
-- `redis.error_reply`, `redis.status_reply`, `redis.pcall` and `redis.log`
+- `redis.error_reply`, `redis.status_reply`, `redis.call` / `redis.pcall` and `redis.log`
   follow the profile, checked against each version's source (`src/scripting.c`
   in 6.2, `src/script_lua.c` later):
   - with the Redis 7.0+ error model, `redis.error_reply` derives the code
@@ -83,8 +83,15 @@ through `redisProps`.
     integers'}` (Redis 7.x/8.0 profiles, no profile), `{err='ERR Command
     arguments must be strings or integers'}` (Valkey profiles), or, without
     table errors, `{err='@user_script: <line>: Lua redis() command arguments
-    must be strings or integers'}` (Redis 6.2). `redis.call` raises the
-    `command-arg-type` engine error instead, worded by the host.
+    must be strings or integers'}` (Redis 6.2). `redis.call` raises that error
+    instead (the table, or Redis 6.2's string), so a script that catches it
+    (`pcall(redis.call, 'set', 'k', {})`) sees the same message, `=[C]: -1: ...`
+    in Redis 6.2 when `pcall` calls `redis.call` directly. Uncaught, the host
+    gets it as the `command-arg-type` engine error, which it words.
+  - a read of a nonexistent global raises
+    `user_script:<line>: Script attempted to access nonexistent global variable
+    '<name>'` in every profile, which is what a script that catches it sees;
+    uncaught, the host gets the `global-read` engine error.
   - an invalid `redis.log` level is `Invalid debug level.` on `redis-6.2`,
     `redis-7.0` and `redis-7.2`, and `Invalid log level.` on `redis-7.4`,
     `redis-8.0` and the Valkey profiles (redis/redis#12636);

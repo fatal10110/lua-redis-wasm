@@ -69,8 +69,11 @@
  *   itself: error text from a script or a host command never gets a `kind`.
  *   `kind` is an opaque machine tag the host maps to wording; `name` is the
  *   variable involved, raw (it may contain CR/LF). The reply's `err` carries
- *   the bare `kind`. Known kinds:
- *   - `global-read`: read of a nonexistent global. Redis >= 7.0:
+ *   the bare `kind`. A script that catches the error sees Redis's message, not
+ *   the kind; rethrown unchanged (`error(e, 0)`, or the error table itself) it
+ *   keeps its `kind`, while `error(e)` raises a new, position-prefixed error
+ *   with none. Known kinds:
+ *   - `global-read`: read of a nonexistent global. Redis (6.2 to 8.x):
  *     "Script attempted to access nonexistent global variable '<name>'".
  *   - `command-arg-type`: a redis.call argument was not a string or number
  *     (no `name`). Redis 7.0+: "Lua redis lib command arguments must be strings
@@ -388,8 +391,9 @@ export type EngineOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
-   * argument says "Lua redis lib command arguments ..." (Redis wording).
+   * (Redis wording) instead of `server.log()`, and a bad `redis.call` /
+   * `redis.pcall` argument says "Lua redis lib command arguments ..." (Redis
+   * wording).
    */
   profile?: CompatProfile;
 
@@ -440,8 +444,9 @@ export type StandaloneOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
-   * argument says "Lua redis lib command arguments ..." (Redis wording).
+   * (Redis wording) instead of `server.log()`, and a bad `redis.call` /
+   * `redis.pcall` argument says "Lua redis lib command arguments ..." (Redis
+   * wording).
    */
   profile?: CompatProfile;
 
@@ -491,8 +496,9 @@ export type LoadOptions = {
   /**
    * Redis/Valkey version whose Lua sandbox behavior to emulate. Default:
    * ≈ valkey-8.0, except that the `redis.log` arity error names `redis.log()`
-   * (Redis wording) instead of `server.log()`, and a bad `redis.pcall`
-   * argument says "Lua redis lib command arguments ..." (Redis wording).
+   * (Redis wording) instead of `server.log()`, and a bad `redis.call` /
+   * `redis.pcall` argument says "Lua redis lib command arguments ..." (Redis
+   * wording).
    */
   profile?: CompatProfile;
 

@@ -319,9 +319,15 @@ lets the host render. When a script aborts, the reply carries:
   `kind` is an opaque machine tag the host maps to wording;
   `name` is the variable involved, raw (it may contain CR/LF). The engine flags
   these errors itself; error text a script or a host command error produces never
-  gets a `kind`, whatever it contains. Writing a global has no `kind`: it is blocked by
-  Lua's native readonly flag (as in real Redis), which recursively locks the whole
-  globals tree, so the VM itself raises "Attempt to modify a readonly table".
+  gets a `kind`, whatever it contains. A script that catches one of these errors sees
+  Redis's message, never the `kind` (see
+  [Error objects inside the script](#error-objects-inside-the-script)); rethrown
+  unchanged (`error(e, 0)`, or the error table an `xpcall` handler got), it still
+  reaches the host with its `kind`, while `error(e)` raises a new, position-prefixed
+  error, reported like any other string error (as Redis reports it). Writing a global
+  has no `kind`: it is blocked by Lua's native readonly flag (as in real Redis), which
+  recursively locks the whole globals tree, so the VM itself raises "Attempt to modify
+  a readonly table".
 - `err` — for engine-originated errors, the bare `kind` (a machine default). For Lua
   runtime / `redis.call` errors, the original message, passed through untouched.
   An error object that is a table (`error({err='MY custom'})`,
@@ -368,7 +374,15 @@ integers'}` (Redis 7.x/8.0 profiles and no profile), `{err='ERR Command argument
 be strings or integers'}` (Valkey profiles), and, without table errors,
 `{err='@user_script: <line>: Lua redis() command arguments must be strings or integers'}`
 (Redis 6.2). Returned or rethrown, it is an ordinary error with no `meta.kind`.
-`redis.call` still raises the `command-arg-type` engine error, which the host words.
+`redis.call` raises the same error (the table, or the plain string without table
+errors), so a script that catches it sees Redis's message:
+`pcall(redis.call, 'set', 'k', {})` returns `false` and
+`ERR Lua redis lib command arguments must be strings or integers` (Valkey profiles:
+`ERR Command arguments ...`; Redis 6.2: `=[C]: -1: Lua redis() command arguments ...`).
+Likewise a caught read of a nonexistent global gives
+`user_script:<line>: Script attempted to access nonexistent global variable '<name>'`.
+Uncaught, these reach the host as the `command-arg-type` and `global-read` engine
+errors, which the host words (see `meta` above).
 
 ### log
 

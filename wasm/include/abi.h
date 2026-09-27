@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define REDIS_LUA_WASM_ABI_VERSION 2
+#define REDIS_LUA_WASM_ABI_VERSION 3
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,13 +29,18 @@ typedef enum ReplyType {
   REPLY_VERBATIM = 0x0c
 } ReplyType;
 
-/* REPLY_SCRIPT_ERROR payload: u32le `line`, u8 `flags`, then the message.
- * `line` is the script line at the error point (0 = unknown, parse it from the
- * message's "user_script:N:" prefix). `flags` tells the host how to read the
- * message; it is set by the engine, never inferred from the message text. */
-/* Engine-originated error (globals protection, a bad redis.call argument): the
- * message is "<kind>" or "<kind>:<name>", unsanitized. */
+/* REPLY_SCRIPT_ERROR payload: u32le `line`, u8 `flags`, the engine error fields
+ * (with SCRIPT_ERROR_ENGINE only), then the message. `line` is the script line
+ * at the error point (0 = unknown, parse it from the message's
+ * "user_script:N:" prefix). `flags` tells the host how to read the message; it
+ * is set by the engine, never inferred from the message text. */
+/* Engine-originated error (globals protection, a bad redis.call argument). The
+ * payload has its kind (u32le length, bytes) and name (u32le length or
+ * ENGINE_ERROR_NO_NAME, bytes, unsanitized) before the message, which is the
+ * Redis-worded error the script saw. */
 #define SCRIPT_ERROR_ENGINE 0x01u
+/* Name length of an engine error that has no name. */
+#define ENGINE_ERROR_NO_NAME 0xFFFFFFFFu
 /* The message is the `err` field of an error table, which Redis 7 sends as-is
  * ("-<err>"): its leading word is the error code only if it has one, and no
  * default code is added. Set only in the Redis 7 error model (COMPAT_TABLE_ERRORS);

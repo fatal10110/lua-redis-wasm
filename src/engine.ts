@@ -540,10 +540,11 @@ export class LuaEngine {
  * Builds a script-aborting error reply. The engine composes no user-facing prose:
  *
  * - Engine-originated errors (globals protection, a bad redis.call argument)
- *   are flagged by the WASM runtime (`SCRIPT_ERROR_ENGINE`) with a
- *   `<kind>[:<name>]` message; we forward `{ kind, name }` in `meta` and the host
- *   chooses the wording. `err` carries the bare `kind` as a machine-readable
- *   default. The message text alone never makes an engine error (#59).
+ *   are flagged by the WASM runtime (`SCRIPT_ERROR_ENGINE`), which sends their
+ *   kind and name in fields of their own (`value.engine`); we forward
+ *   `{ kind, name }` in `meta` and the host chooses the wording. `err` carries
+ *   the bare `kind` as a machine-readable default. The message text alone never
+ *   makes an engine error (#59), and the kind is never read from it (#87).
  * - Lua runtime / redis.call errors already carry their own message (and code);
  *   they pass through untouched, with only `line`/`sha` attached for the host to
  *   decorate. A table error's `err` (`SCRIPT_ERROR_FROM_TABLE`, Redis 7 error
@@ -561,7 +562,13 @@ export class LuaEngine {
  * every evaluation.
  */
 function buildScriptError(
-  value: { err: Buffer; code?: Buffer; line?: number; flags?: number },
+  value: {
+    err: Buffer;
+    code?: Buffer;
+    line?: number;
+    flags?: number;
+    engine?: { kind: string; name?: string };
+  },
   script: Buffer,
 ): { err: Buffer; code?: Buffer; meta: ReplyErrorMeta } {
   const sha = computeSha1Hex(script).toString("utf8");
@@ -577,8 +584,8 @@ function buildScriptError(
     }
   }
 
-  if (flags & SCRIPT_ERROR_ENGINE) {
-    const { kind, name } = parseEngineError(value.err.toString("utf8"));
+  if (flags & SCRIPT_ERROR_ENGINE && value.engine) {
+    const { kind, name } = value.engine;
     return {
       err: Buffer.from(kind, "utf8"),
       code: Buffer.from("ERR", "utf8"),
@@ -727,18 +734,6 @@ function writeSha1Import(
 }
 
 /**
- * Splits an engine error message (`<kind>` or `<kind>:<name>`, see
- * SCRIPT_ERROR_ENGINE) into the opaque `kind` and the `name`. The library
- * forwards them and never interprets the kind.
- */
-function parseEngineError(message: string): { kind: string; name?: string } {
-  const sep = message.indexOf(":");
-  return sep < 0
-    ? { kind: message }
-    : { kind: message.slice(0, sep), name: message.slice(sep + 1) };
-}
-
-/**
  * Mutable handlers that can be swapped after WASM instantiation. The WASM
  * imports built in `load()` own the memory marshalling and exception
  * containment and delegate the host-facing work to these, which may throw.
@@ -817,11 +812,11 @@ const COMPAT_DEFAULT: Required<CompatOverrides> = COMPAT_PROFILES["valkey-8.0"];
  * Error wording that differs by version but is no behavior of its own, so it
  * follows the profile only (no override): `redis.log` says "Invalid debug
  * level." up to Redis 7.2, and Valkey names `server.log()` in its arity error
- * and says "Command arguments must be ..." for a bad `redis.pcall` argument.
- * No profile keeps the historical Redis 7.4+ wording. Only these bits are
- * profile-only: the Redis 6.2 forms (e.g. redis.pcall's "@user_script: <line>:
- * Lua redis() ..." text) follow `compat.tableErrors`, so the override changes
- * them.
+ * and says "Command arguments must be ..." for a bad `redis.call` /
+ * `redis.pcall` argument. No profile keeps the historical Redis 7.4+ wording.
+ * Only these bits are profile-only: the Redis 6.2 forms (e.g. the bad-argument
+ * "@user_script: <line>: Lua redis() ..." text) follow `compat.tableErrors`,
+ * so the override changes them.
  */
 const COMPAT_PROFILE_WORDING: Record<CompatProfile, number> = {
   "redis-6.2": COMPAT_LOG_DEBUG_LEVEL,

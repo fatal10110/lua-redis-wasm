@@ -333,6 +333,229 @@ for (const profile of ALL_PROFILES) {
 }
 
 // =============================================================================
+// A caught engine error reads like Redis's, never like the kind (#87)
+// =============================================================================
+
+type EngineErrorCase = {
+  label: string;
+  profile?: CompatProfile;
+  compat?: CompatOverrides;
+  /** Redis 7 error model ({err=...} tables, unwrapping pcall). */
+  table: boolean;
+  /** Valkey's "Command arguments ..." wording. */
+  valkey: boolean;
+};
+
+const ENGINE_ERROR_CASES: EngineErrorCase[] = [
+  { label: "default", table: true, valkey: false },
+  { label: "redis-6.2", profile: "redis-6.2", table: false, valkey: false },
+  { label: "redis-7.0", profile: "redis-7.0", table: true, valkey: false },
+  { label: "redis-7.2", profile: "redis-7.2", table: true, valkey: false },
+  { label: "redis-7.4", profile: "redis-7.4", table: true, valkey: false },
+  { label: "redis-8.0", profile: "redis-8.0", table: true, valkey: false },
+  { label: "valkey-8.0", profile: "valkey-8.0", table: true, valkey: true },
+  { label: "valkey-9.0", profile: "valkey-9.0", table: true, valkey: true },
+  { label: "default, tableErrors: false", compat: { tableErrors: false }, table: false, valkey: false },
+  { label: "valkey-8.0, tableErrors: false", profile: "valkey-8.0", compat: { tableErrors: false }, table: false, valkey: true },
+  { label: "redis-6.2, tableErrors: true", profile: "redis-6.2", compat: { tableErrors: true }, table: true, valkey: false },
+];
+
+const MARKER = "__RLUA_E__";
+
+/**
+ * The command-arg-type message a script sees, as each version's luaPushError
+ * builds it: "ERR <msg>" in the Redis 7 model, "<source>: <line>: <msg>" in
+ * Redis 6.2's (`at` is that position: "=[C]: -1" when pcall calls redis.call
+ * directly, "@user_script: <line>" from script code).
+ */
+function argTypeError(c: EngineErrorCase, at: string): string {
+  if (!c.table) {
+    return `${at}: Lua redis() command arguments must be strings or integers`;
+  }
+  return c.valkey
+    ? "ERR Command arguments must be strings or integers"
+    : "ERR Lua redis lib command arguments must be strings or integers";
+}
+
+function globalReadError(line: number, name = "nope"): string {
+  return `user_script:${line}: Script attempted to access nonexistent global variable '${name}'`;
+}
+
+function bulk(value: ReplyValue): string {
+  assert.ok(Buffer.isBuffer(value), `expected a bulk string, got ${JSON.stringify(value)}`);
+  const text = value.toString("utf8");
+  assert.ok(!text.includes(MARKER), `marker visible to the script: ${text}`);
+  return text;
+}
+
+function assertEngineError(value: ReplyValue, kind: string, line: number, name?: string): void {
+  const reply = assertErr(value, "ERR", kind, line);
+  assert.equal(reply.meta?.kind, kind);
+  assert.equal((reply.meta as { name?: string }).name, name);
+  assert.equal("name" in (reply.meta ?? {}), name !== undefined);
+}
+
+function assertNotEngineError(value: ReplyValue, code: string | undefined, message: string, line?: number): void {
+  const reply = assertErr(value, code, message, line);
+  assert.equal(reply.meta?.kind, undefined, "not an engine error");
+}
+
+async function engineForCase(c: EngineErrorCase, redisHost: RedisHost = host): Promise<LuaEngine> {
+  return (await load({ profile: c.profile, compat: c.compat })).create(redisHost);
+}
+
+for (const c of ENGINE_ERROR_CASES) {
+  test(`engine errors (${c.label}): a caught bad redis.call argument reads like Redis`, async () => {
+    const engine = await engineForCase(c);
+    for (const arg of ["{}", "true", "nil", "function() end"]) {
+      const script = `return {pcall(redis.call, 'set', 'k', ${arg})}`;
+      const reply = engine.eval(script);
+      assert.ok(Array.isArray(reply) && reply.length === 2, `${script} -> ${JSON.stringify(reply)}`);
+      assert.equal(reply[0], null, script); // false
+      assert.equal(bulk(reply[1]), argTypeError(c, "=[C]: -1"), script);
+    }
+    // From script code, Redis 6.2's message names the calling line.
+    assert.equal(
+      bulk(engine.eval("local ok, e = pcall(function()\n\nreturn redis.call('set', 'k', {}) end)\nreturn e")),
+      argTypeError(c, "@user_script: 3"),
+    );
+    // An xpcall handler gets the raw error: Redis 7's {err=...} table, Redis
+    // 6.2's string.
+    assert.deepEqual(
+      strings(
+        engine.eval(
+          "local t = {}\n" +
+            "xpcall(function() redis.call('set', 'k', {}) end, function(e)\n" +
+            "  t[1] = type(e)\n" +
+            "  if type(e) == 'table' then for k, v in pairs(e) do t[#t + 1] = tostring(k) .. '=' .. tostring(v) end\n" +
+            "  else t[2] = e end\n" +
+            "end)\n" +
+            "return t",
+        ),
+      ),
+      c.table ? ["table", `err=${argTypeError(c, "")}`] : ["string", argTypeError(c, "@user_script: 2")],
+    );
+    // The script goes on and the engine error is not reported.
+    assert.deepEqual(engine.eval("pcall(redis.call, 'set', 'k', {})\nreturn redis.call('set', 'k', 'v')"), {
+      ok: Buffer.from("OK"),
+    });
+    assertUsable(engine);
+  });
+
+  test(`engine errors (${c.label}): a caught global read reads like Redis`, async () => {
+    const engine = await engineForCase(c);
+    assert.equal(bulk(engine.eval("local ok, e = pcall(function() return nope end) return e")), globalReadError(1));
+    assert.equal(
+      bulk(engine.eval("local ok, e = pcall(function()\n\n  return nope\nend)\nreturn e")),
+      globalReadError(3),
+    );
+    assert.deepEqual(strings(engine.eval("return {pcall(function() return nope end)}")).slice(1), [globalReadError(1)]);
+    assert.equal(
+      bulk(engine.eval("return select(2, xpcall(function() return nope end, function(e) return e end))")),
+      globalReadError(1),
+    );
+    // The name is Redis's %s: a number key reads as its string form, and CR/LF
+    // stay in the message the script sees (only the host's copy is sanitized).
+    assert.equal(bulk(engine.eval("return select(2, pcall(function() return _G[42] end))")), globalReadError(1, "42"));
+    assert.equal(
+      bulk(engine.eval("return select(2, pcall(function() return _G['a\\r\\nb'] end))")),
+      globalReadError(1, "a\r\nb"),
+    );
+    assertUsable(engine);
+  });
+
+  test(`engine errors (${c.label}): uncaught or rethrown unchanged, the host still gets the kind`, async () => {
+    const engine = await engineForCase(c);
+    assertEngineError(engine.eval("\nreturn redis.call('set', 'k', {})"), "command-arg-type", 2);
+    assertEngineError(engine.eval("\n\nreturn nope"), "global-read", 3, "nope");
+    const read = engine.eval("return _G['a\\r\\nb']");
+    assertEngineError(read, "global-read", 1, "a\r\nb"); // CR/LF only in meta.name
+    // error(e, 0) rethrows the very message.
+    assertEngineError(
+      engine.eval("local ok, e = pcall(redis.call, 'set', 'k', {})\nerror(e, 0)"),
+      "command-arg-type",
+      2,
+    );
+    assertEngineError(
+      engine.eval("local ok, e = pcall(function() return nope end)\nerror(e, 0)"),
+      "global-read",
+      2,
+      "nope",
+    );
+    // The error table an xpcall handler got, rethrown, is the engine's too.
+    const table = engine.eval(
+      "local err\nxpcall(function() redis.call('set', 'k', {}) end, function(e) err = e end)\nerror(err)",
+    );
+    if (c.table) {
+      assertEngineError(table, "command-arg-type", 3);
+    } else {
+      // Redis 6.2 raises a string, which error() prefixes with a position.
+      assertNotEngineError(table, "ERR", `user_script:3: ${argTypeError(c, "@user_script: 2")}`, 3);
+    }
+    // error(e) raises a new error: the position-prefixed message, reported
+    // as an ordinary string error, as Redis reports it.
+    assertNotEngineError(
+      engine.eval("local ok, e = pcall(redis.call, 'set', 'k', {})\nerror(e)"),
+      "ERR",
+      `user_script:2: ${argTypeError(c, "=[C]: -1")}`,
+      2,
+    );
+    assertNotEngineError(
+      engine.eval("local ok, e = pcall(function() return nope end)\nerror(e)"),
+      "ERR",
+      `user_script:2: ${globalReadError(1)}`,
+      2,
+    );
+    // So is any later error.
+    assertNotEngineError(engine.eval("pcall(function() return nope end)\nerror('boom', 0)"), "ERR", "boom", 2);
+    assertUsable(engine);
+  });
+
+  test(`engine errors (${c.label}): Redis's wording raised by the script is not an engine error`, async () => {
+    const failing: RedisHost = {
+      ...host,
+      redisCall(args) {
+        return args[0]?.toString("utf8") === "fail" ? { err: args[1] ?? Buffer.alloc(0) } : { ok: Buffer.from("OK") };
+      },
+    };
+    const engine = await engineForCase(c, failing);
+    const argType = argTypeError(c, "=[C]: -1");
+    const lua = (text: string) => JSON.stringify(text);
+    // With no engine error in the eval, the exact text is only text.
+    assertNotEngineError(engine.eval(`error(${lua(argType)}, 0)`), "ERR", argType.replace(/^ERR /, ""));
+    assertNotEngineError(engine.eval(`error(${lua(globalReadError(1))}, 0)`), "ERR", globalReadError(1));
+    // A lookalike error table is never the engine's, even after a real one:
+    // only the very table raised is.
+    if (c.table) {
+      assertNotEngineError(
+        engine.eval(`pcall(redis.call, 'set', 'k', {})\nerror({err=${lua(argType)}})`),
+        "ERR",
+        argType.replace(/^ERR /, ""),
+        2,
+      );
+      assertNotEngineError(
+        engine.eval(`pcall(redis.call, 'set', 'k', {})\nredis.call('fail', ${lua(argType)})`),
+        "ERR",
+        argType.replace(/^ERR /, ""),
+        2,
+      );
+    }
+    // The very message the engine raised in this eval, raised again as a
+    // string, is indistinguishable from rethrowing it: reported as the engine's.
+    assertEngineError(
+      engine.eval(`pcall(function() return nope end)\nerror(${lua(globalReadError(1))}, 0)`),
+      "global-read",
+      2,
+      "nope",
+    );
+    // Never one from a previous eval.
+    engine.eval("return nope");
+    assertNotEngineError(engine.eval(`error(${lua(globalReadError(1))}, 0)`), "ERR", globalReadError(1));
+    assertUsable(engine);
+  });
+}
+
+// =============================================================================
 // Fuel kill escapes pcall (#38)
 // =============================================================================
 
