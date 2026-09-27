@@ -1149,7 +1149,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
 /**
  * @deprecated Use `LuaEngine.create()` / `LuaEngine.createStandalone()`.
  * `LuaWasmEngine` is now an alias of `LuaEngine` (same statics, instances are
- * `LuaEngine`s) and will be removed in the next major version.
+ * `LuaEngine`s) and will be removed in a future major version.
  *
  * @example
  * ```typescript
@@ -1161,7 +1161,7 @@ export async function load(options: LoadOptions = {}): Promise<LuaWasmModule> {
  */
 export const LuaWasmEngine = LuaEngine;
 /**
- * @deprecated Use `LuaEngine`. Will be removed in the next major version.
+ * @deprecated Use `LuaEngine`. Will be removed in a future major version.
  */
 export type LuaWasmEngine = LuaEngine;
 
