@@ -172,7 +172,8 @@ THE SOFTWARE.
 ```
 
 ## lua_cjson.c
-- File: `vendor/valkey/deps/lua/src/lua_cjson.c`
+- File: `vendor/valkey/deps/lua/src/lua_cjson.c` (compiled through
+  `wasm/src/lua_cjson_checked.c`)
 - Copyright: Mark Pulford (2010–2012)
 - License: MIT
 
@@ -203,7 +204,10 @@ THE SOFTWARE.
 ```
 
 ## strbuf.c
-- File: `vendor/valkey/deps/lua/src/strbuf.c` (string buffers used by lua_cjson)
+- Files: `vendor/valkey/deps/lua/src/strbuf.h` (string buffers used by lua_cjson),
+  and the replacement for `vendor/valkey/deps/lua/src/strbuf.c` in
+  `wasm/src/lua_cjson_checked.c`, derived from it (the vendored `strbuf.c` itself
+  is not compiled)
 - Copyright: Mark Pulford (2010–2012)
 - License: MIT
 

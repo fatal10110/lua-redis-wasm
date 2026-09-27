@@ -559,8 +559,9 @@ evaluation starts with the full budget. Known gap: a coroutine that finishes
 within 1000 instructions is never charged, so a script that runs its work in
 many short coroutines is not bounded by `maxFuel` (#75).
 
-The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
-`not enough memory` error and the engine stays usable. Because Lua 5.1 has no
+The WASM heap is fixed at 64 MB (of which 2 MB is the C stack). A script that exhausts it fails with an ordinary
+`not enough memory` error and the engine stays usable; this includes `cjson.encode`
+of a value that expands into a document too large for the heap. Because Lua 5.1 has no
 emergency garbage collection, the engine runs a full collection after any
 evaluation that leaves more than 16 MB of Lua memory in use, so a heavy script's
 garbage (whether it succeeded, failed, or caught and rethrew an out-of-memory
@@ -569,6 +570,17 @@ itself runs out of memory, the Lua VM is discarded and rebuilt. A script, KEYS
 or ARGV too large to copy into the heap makes `eval` / `evalWithArgs` throw a
 `RangeError`; KEYS/ARGV that fit as bytes but not as Lua strings reply
 `ERR not enough memory to set KEYS/ARGV`. In both cases the engine stays usable.
+
+Nested C calls (`string.gsub` callbacks, `pcall`, metamethods, `table.sort`
+comparators, coroutines) are limited to 200 levels as in Redis; past that the
+script gets Lua's `C stack overflow` error and the engine stays usable. The
+module's C stack (2 MB, taken from the fixed 64 MB heap) has room for that
+limit. `cjson.encode` / `cjson.decode` nest once per level of the value, up to
+`encode_max_depth` / `decode_max_depth` (1000 by default). A script may raise
+those limits, but the engine additionally stops cjson at about 4000 levels
+(about 2000 for objects) with the same catchable nesting error, because a few
+thousand more would exhaust the JavaScript engine's own stack, which throws a
+`RangeError` and leaves the engine unusable.
 
 ## Included Lua Libraries
 
