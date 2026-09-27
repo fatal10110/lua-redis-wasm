@@ -8,6 +8,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `redisCall`/`redisPcall` handlers receive a second `ctx` argument with the
+  calling script `line` (new WASM export `current_call_line`), so hosts can build
+  Redis 6.2's `@user_script: N:` prefix for `redis.pcall` errors (#28).
+
 - Dedicated **browser** build with no `node:*` imports, selected automatically via
   the `browser` condition in `package.json` `exports`. Browser bundlers (Vite,
   webpack, Rollup) now resolve the package without aliasing or stubbing `node:fs`,

@@ -154,8 +154,8 @@ The host must implement three callbacks:
 
 ```typescript
 type RedisHost = {
-  redisCall: (args: Buffer[]) => ReplyValue; // For redis.call()
-  redisPcall: (args: Buffer[]) => ReplyValue; // For redis.pcall()
+  redisCall: (args: Buffer[], ctx?: { line: number }) => ReplyValue; // For redis.call()
+  redisPcall: (args: Buffer[], ctx?: { line: number }) => ReplyValue; // For redis.pcall()
   log: (level: number, message: Buffer) => void; // For redis.log()
 };
 ```
@@ -173,6 +173,13 @@ by the engine.
 
 Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
 instead of throwing to match Redis behavior.
+
+### Call context
+
+Both handlers receive `ctx.line`: the script line of the `redis.call`/`redis.pcall`
+(the nearest Lua frame, so calls inside nested functions report their own line; 0
+if unknown). Use it e.g. to emit Redis 6.2's `@user_script: N: ...` pcall error
+prefix.
 
 ### Error metadata
 

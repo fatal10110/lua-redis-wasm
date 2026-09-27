@@ -639,10 +639,11 @@ export class LuaWasmModule {
     const exports = this.exports;
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
+      const ctx = { line: exports._current_call_line?.() ?? 0 };
       try {
         return isPcall
-          ? host.redisPcall.call(host, args)
-          : host.redisCall.call(host, args);
+          ? host.redisPcall.call(host, args, ctx)
+          : host.redisCall.call(host, args, ctx);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { err: Buffer.from(message, "utf8") };

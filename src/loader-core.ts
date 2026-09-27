@@ -79,6 +79,12 @@ export type WasmExports = {
   _set_compat?: (flags: number) => void;
 
   /**
+   * Script line of the redis.call/pcall currently dispatched to the host
+   * (0 when unknown). Only meaningful inside host_redis_call/pcall.
+   */
+  _current_call_line?: () => number;
+
+  /**
    * Allocate memory in WASM linear memory.
    * @param size - Number of bytes to allocate
    * @returns Pointer to allocated memory

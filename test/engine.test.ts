@@ -1561,3 +1561,33 @@ test("compat: default (no profile) keeps historical behavior", async () => {
   assert.equal(engine.eval("return server == redis"), 1);
   assertGlobalAbsent(engine, "print");
 });
+
+test("redis.call/pcall: handler receives the calling script line", async () => {
+  const lines: Array<[string, number | undefined]> = [];
+  const record = (kind: string) => (args: Buffer[], ctx?: { line: number }) => {
+    lines.push([`${kind} ${args[0].toString()}`, ctx?.line]);
+    return { err: Buffer.from("ERR nope") };
+  };
+  const module = await load();
+  const engine = module.create(createTestHost({ redisCall: record("call"), redisPcall: record("pcall") }));
+  engine.eval(
+    [
+      "local x = 1",
+      "redis.pcall('a')",
+      "local function f()",
+      "  return redis.pcall('b')",
+      "end",
+      "f()",
+      "pcall(function()",
+      "  redis.call('c')",
+      "end)",
+      "pcall(redis.call, 'd')"
+    ].join("\n")
+  );
+  assert.deepEqual(lines, [
+    ["pcall a", 2],
+    ["pcall b", 4],
+    ["call c", 8],
+    ["call d", 10] // C frame (pcall) skipped: reports the script line
+  ]);
+});

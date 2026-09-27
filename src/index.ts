@@ -6,6 +6,7 @@ export type {
   ReplyValue,
   ReplyErrorMeta,
   RedisCallHandler,
+  RedisCallContext,
   RedisHost,
   RedisLogHandler,
   StandaloneOptions,

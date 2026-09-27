@@ -104,6 +104,8 @@ export type ReplyValue =
  *
  * @param args - Command arguments as binary-safe Buffers.
  *               First element is the command name (e.g., "GET", "SET").
+ * @param ctx - Call-site context (e.g. the calling script line). Always
+ *              supplied by the engine; optional so handlers can call each other.
  * @returns Redis-compatible reply value
  * @throws Error to return an error reply to Lua
  *
@@ -117,7 +119,20 @@ export type ReplyValue =
  * };
  * ```
  */
-export type RedisCallHandler = (args: Buffer[]) => ReplyValue;
+export type RedisCallHandler = (args: Buffer[], ctx?: RedisCallContext) => ReplyValue;
+
+/**
+ * Call-site context passed to {@link RedisCallHandler}.
+ */
+export type RedisCallContext = {
+  /**
+   * Script line of the `redis.call`/`redis.pcall` (the nearest Lua frame, so a
+   * call made from a nested function reports that function's line). 0 when
+   * unknown. Lets a host build Redis 6.2's `@user_script: N: ...` prefix for
+   * pcall errors, which it returns as an error table rather than raising.
+   */
+  line: number;
+};
 
 /**
  * Handler function for redis.log() invocations from Lua.
