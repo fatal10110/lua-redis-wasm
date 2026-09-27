@@ -64,9 +64,10 @@ test("host boundary: a throwing log handler raises a Lua error; the engine stays
   assert.equal(reply.meta?.line, 1);
 
   // It is an ordinary Lua error: pcall catches it and the script continues.
+  // Like a redisCall throw, it gets the ERR code in the Redis 7 model (#93).
   assert.deepEqual(
     engine.eval("local ok, e = pcall(redis.log, redis.LOG_NOTICE, 'x') return {tostring(ok), e}"),
-    [Buffer.from("false"), Buffer.from("log sink down")],
+    [Buffer.from("false"), Buffer.from("ERR log sink down")],
   );
   assertUsable(engine);
 });
@@ -101,10 +102,62 @@ test("host boundary: a throwing onSetResp raises a Lua error and keeps the proto
   // The switch was refused: a RESP null still decodes as false (RESP2), not nil.
   assert.deepEqual(
     engine.eval("local ok, e = pcall(redis.setresp, 3) return {tostring(ok), e, redis.call('GET', 'k') == false}"),
-    [Buffer.from("false"), Buffer.from("setresp rejected"), 1],
+    [Buffer.from("false"), Buffer.from("ERR setresp rejected"), 1],
   );
   assertUsable(engine);
 });
+
+// A log / onSetResp exception is raised like a redisCall one (#93): in the
+// Redis 7 model an {err=...} table, ERR added when the message has no code, so
+// the host never gets "ERR ERR"; in Redis 6.2's the message as it is.
+for (const profile of ["redis-6.2", "redis-7.0", "redis-8.0", "valkey-9.0"] as const) {
+  test(`host boundary (${profile}): a log / onSetResp exception is raised like a redisCall one`, async () => {
+    let message = "";
+    const engine = (await load({ profile })).create(
+      host({
+        redisCall: () => {
+          throw new Error(message);
+        },
+        log() {
+          throw new Error(message);
+        },
+        onSetResp() {
+          throw new Error(message);
+        },
+      }),
+    );
+    const v62 = profile === "redis-6.2";
+    // [thrown message, uncaught code, uncaught err, what a pcall sees]
+    const cases: Array<[string, string, string, string]> = v62
+      ? [
+          ["ERR log failed", "ERR", "ERR log failed", "ERR log failed"],
+          ["WRONGTYPE x", "ERR", "WRONGTYPE x", "WRONGTYPE x"],
+          ["log sink down", "ERR", "log sink down", "log sink down"],
+        ]
+      : [
+          ["ERR log failed", "ERR", "log failed", "ERR log failed"],
+          ["WRONGTYPE x", "WRONGTYPE", "x", "WRONGTYPE x"],
+          ["log sink down", "ERR", "log sink down", "ERR log sink down"],
+        ];
+    for (const [thrown, code, err, caught] of cases) {
+      message = thrown;
+      for (const script of ["redis.log(redis.LOG_NOTICE, 'x')", "redis.setresp(3)", "redis.call('get', 'k')"]) {
+        // The one difference: a redisCall throw with no code always gets ERR
+        // (failureErrorReply), which Redis 6.2's redis.call then raises whole.
+        const callPrefix = v62 && thrown === "log sink down" && script.startsWith("redis.call") ? "ERR " : "";
+        const reply = assertErr(engine.eval(script), callPrefix + err);
+        assert.equal(reply.code?.toString("utf8"), code, `${script}: ${thrown}`);
+        assert.equal(reply.meta?.line, 1);
+        assert.deepEqual(
+          engine.eval(`return select(2, pcall(function() ${script} end))`),
+          Buffer.from(callPrefix + caught),
+          `${script}: ${thrown}`,
+        );
+      }
+    }
+    assertUsable(engine);
+  });
+}
 
 // =============================================================================
 // Malformed host replies

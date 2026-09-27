@@ -727,6 +727,15 @@ for (const profile of WORDING_PROFILES) {
     // One argument still hashes, a number through its string form.
     assert.deepEqual(engine.eval("return redis.sha1hex('a')"), Buffer.from("86f7e437faa5a7fce15d1ddcb9eaeaea377667b8"));
     assert.deepEqual(engine.eval("return redis.sha1hex(1)"), Buffer.from("356a192b7913b04c54574d18c28d46e6395428ab"));
+    // A value with no string form hashes as the empty string: Redis reads it
+    // with lua_tolstring, which gives NULL and length 0.
+    for (const arg of ["nil", "{}", "true", "false", "function() end"]) {
+      assert.deepEqual(
+        engine.eval(`return redis.sha1hex(${arg})`),
+        Buffer.from("da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        arg,
+      );
+    }
     assertUsable(engine);
   });
 

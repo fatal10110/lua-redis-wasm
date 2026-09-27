@@ -4,7 +4,7 @@
  * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and double2ll
  * from src/util.c, and from Redis 6.2's src/scripting.c (BSD-3-Clause) for the
  * redis-6.2 profile's error_reply / status_reply / log / setresp / call / pcall
- * errors. */
+ * / sha1hex errors. */
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
@@ -618,10 +618,34 @@ static int stash_host_failure(lua_State *L) {
   return 0;
 }
 
+/* Whether `msg` starts with a Redis error code followed by a space: a token
+ * matching [A-Z][A-Z0-9]*, as the host side reads a thrown host exception's
+ * message (failureErrorReply / isErrorCode in src/codec.ts). */
+static int has_error_code(const char *msg, size_t len) {
+  if (len == 0 || msg[0] < 'A' || msg[0] > 'Z') {
+    return 0;
+  }
+  for (size_t i = 1; i < len; i++) {
+    char c = msg[i];
+    if (c == ' ') {
+      return 1;
+    }
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+      return 0;
+    }
+  }
+  return 0;
+}
+
 /* Raises the failure returned by a void-result host import (log, setresp) as
  * a normal Lua error. See the host import contract in abi.h. The message is
  * copied into Lua in protected mode so a memory error cannot skip freeing the
- * host's buffer; if the copy fails, that memory error is raised instead. */
+ * host's buffer; if the copy fails, that memory error is raised instead.
+ * With table errors it is raised like a host exception thrown from redis.call
+ * (#93): the generic ERR code is added when the message has none, and the
+ * error is push_error_reply's {err="CODE message"} table, so a message that
+ * starts with "ERR " is not reported as "ERR ERR ...". Without table errors
+ * the message is raised as the string it is, like a Redis 6.2 host error. */
 static int raise_host_failure(lua_State *L, PtrLen failure) {
   if (failure.ptr == 0) {
     return raise_api_error(L, "host callback failed");
@@ -639,6 +663,18 @@ static int raise_host_failure(lua_State *L, PtrLen failure) {
   lua_pushlightuserdata(L, &g_host_failure_key);
   lua_pushnil(L);
   lua_rawset(L, LUA_REGISTRYINDEX);
+  if (!g_table_errors) {
+    return lua_error(L);
+  }
+  size_t len = 0;
+  const char *msg = lua_tolstring(L, -1, &len);
+  if (!has_error_code(msg, len)) {
+    lua_pushliteral(L, "ERR ");
+    lua_insert(L, -2);
+    lua_concat(L, 2);
+    msg = lua_tolstring(L, -1, &len);
+  }
+  push_error_reply(L, msg, len); /* the message stays below it on the stack */
   return lua_error(L);
 }
 
@@ -696,10 +732,10 @@ static int l_redis_log(lua_State *L) {
 /* redis.sha1hex(s). Like luaRedisSha1hexCommand, anything but exactly one
  * argument raises "wrong number of arguments" (#95): {err="ERR ..."} with
  * table errors, the bare string in Redis 6.2 (lua_pushstring + lua_error, no
- * position). The one argument is read with luaL_checklstring: a number
- * converts as with Redis's lua_tolstring, while a value with no string form
- * (nil, a table) raises Lua's bad-argument error, where Redis hashes it as the
- * empty string.
+ * position). The one argument is read with lua_tolstring, as Redis does: a
+ * number hashes its string form, and a value with no string form (nil, a
+ * boolean, a table) hashes as the empty string (lua_tolstring gives NULL and
+ * length 0, and Redis's sha1hex hashes zero bytes).
  * Derived from luaRedisSha1hexCommand in Valkey 8.0's src/script_lua.c (same
  * in Redis 7.2.4) and Redis 6.2's src/scripting.c, BSD-3-Clause. */
 static int l_redis_sha1hex(lua_State *L) {
@@ -707,7 +743,11 @@ static int l_redis_sha1hex(lua_State *L) {
     return raise_api_error(L, "wrong number of arguments");
   }
   size_t len = 0;
-  const char *data = luaL_checklstring(L, 1, &len);
+  const char *data = lua_tolstring(L, 1, &len);
+  if (!data) {
+    data = "";
+    len = 0;
+  }
   PtrLen out = host_sha1hex((uint32_t)(uintptr_t)data, (uint32_t)len);
   if (out.ptr == 0 || out.len == 0) {
     return raise_api_error(L, "sha1hex failed");

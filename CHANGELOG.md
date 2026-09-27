@@ -14,16 +14,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Valkey. Redis 6.2 keeps the whole message too. In the `redis-6.2` model this
   also applies to a host error that `redis.call` raises: `ERR unknown command`
   → `err` `ERR unknown command` (Redis 6.2:
-  `... @user_script:1: ERR unknown command`). The engine's own errors still
-  never read `ERR ERR`: in the Redis 7 model they are raised as `{err='ERR ...'}`
-  tables, and with `redis-6.2` as bare strings (`reached lua stack limit`,
-  `Script killed by fuel limit`, `unknown error`, ...), which is what a
-  `redis-6.2` script that catches one now sees.
+  `... @user_script:1: ERR unknown command`). Likewise, in the `redis-6.2`
+  model an error table whose `err` starts with `ERR ` keeps it:
+  `error({err='ERR x'})` → `err` `ERR x` (was `x`), and
+  `error(redis.pcall('nope'))` → `err` `ERR unknown command 'nope'`.
+- **The engine's own errors never read `ERR ERR`** (#93). The failures a
+  script can catch (`reached lua stack limit` for a host reply nested too
+  deeply, `reply decoding failed`, `empty reply from host`,
+  `host callback failed`, `sha1hex failed`) are raised as `{err='ERR ...'}`
+  tables in the Redis 7 model, so an `xpcall` handler now receives a table for
+  them (was a string; `pcall` still returns the `ERR ...` string), and as bare
+  strings with `redis-6.2`, which is what a `redis-6.2` script that catches one
+  now sees (was `ERR ...`). The fuel-limit kill and the `unknown error`
+  fallback, which no script can catch, still reach the host as code `ERR` and
+  their bare message.
+- **A `log` / `onSetResp` exception is raised like a `redisCall` one** (#93).
+  In the Redis 7 model it gets the `ERR` code when its message has none and is
+  raised as an `{err=...}` table: `throw new Error("ERR log failed")` reaches
+  the host as code `ERR`, `err` `log failed` (not `ERR ERR log failed`),
+  `throw new Error("WRONGTYPE x")` as code `WRONGTYPE`, and a script that
+  catches `log sink down` sees `ERR log sink down` (was `log sink down`). With
+  `redis-6.2` the message is raised as it is, like any 6.2 host error.
 - **`redis.sha1hex` checks its arity** (#95). No argument or more than one
   raises `wrong number of arguments`, as in Redis (was Lua's `bad argument #1`
   error, or the hash of the first argument). A script that catches it sees
   `ERR wrong number of arguments`, or `wrong number of arguments` with
-  `redis-6.2`.
+  `redis-6.2`. A single argument with no string form (`nil`, a boolean, a
+  table) now hashes as the empty string, as in Redis (was Lua's
+  `bad argument #1` error).
 
 ## [2.0.0] - 2026-09-27
 

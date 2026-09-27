@@ -141,7 +141,8 @@ and the C side raises them as ordinary Lua errors.
   - Input: log level and message bytes.
   - Output: `{0,0}` on success. On failure `len != 0` and `ptr` is an
     `alloc`'d error message (or 0 when none could be allocated); WASM frees it
-    and raises it as a Lua error.
+    and raises it as a Lua error (in the Redis 7 error model an `{err=...}`
+    table, with `ERR ` added when the message does not start with a code).
 
 - `host_redis_setresp(version) -> ptr_len`
   - Input: the RESP version the script switched to (2 or 3).

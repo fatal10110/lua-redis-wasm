@@ -34,8 +34,9 @@ uppercase token (`[A-Z][A-Z0-9]*`) into `code`; write `-<code> <err>`, or
   `MY boom`), because Redis sends it as `-ERR <message>`. That includes `ERR`
   itself: `error('ERR x', 0)` → code `ERR`, `err` `ERR x`, which the host writes
   as `-ERR ERR x` like Redis 7.0+ (Redis 6.2: `... @user_script:1: ERR x`).
-  The engine's own errors never read `ERR ERR`: they are raised without a code
-  of their own, or as an error table in the Redis 7 error model.
+  The engine's own errors, and exceptions thrown by host callbacks, never read
+  `ERR ERR`: they are raised as an error table in the Redis 7 error model, and
+  the engine's own without a code of their own with `redis-6.2`.
 - In the Redis 7 error model (every profile but `redis-6.2`, see
   `compat.tableErrors`), an error **table**'s `err` is what Redis sends as-is,
   so a table error has a `code` only when its `err` starts with one:
@@ -57,9 +58,10 @@ uppercase token (`[A-Z][A-Z0-9]*`) into `code`; write `-<code> <err>`, or
   profile, `redis-6.2` included, although Redis 6.2 itself fails on a table
   error (its error handler concatenates it as a string).
 - The fuel-limit kill has code `ERR` and `err` `Script killed by fuel limit`,
-  in every profile. So do the engine's own failures, with their bare message:
-  `reached lua stack limit` (a host reply nested too deeply for `redis.call`),
-  `empty reply from host`, `host callback failed`, `sha1hex failed`.
+  in every profile. So do the engine's own failures, uncaught, with their bare
+  message: `reached lua stack limit` (a host reply nested too deeply for
+  `redis.call`), `reply decoding failed`, `empty reply from host`,
+  `host callback failed`, `sha1hex failed`.
 - Script-aborting messages are cut at the first NUL, have trailing CR/LF trimmed
   and every other CR/LF mapped to a space, so they can be written into RESP as
   is.
@@ -114,15 +116,27 @@ With `profile: "redis-6.2"` errors are plain strings and a host error reaches
 the script verbatim; the `redis.log`, `redis.setresp` and `redis.sha1hex`
 argument errors carry no `ERR` code (`RESP version must be 2 or 3.`), and
 `redis.error_reply` returns its argument unchanged, as in Redis 6.2. The
-engine's own failures (`reached lua stack limit`, `sha1hex failed`, the
-fuel-limit kill, ...) follow the same model: `ERR`-coded tables in the Redis 7
-model, bare strings with `redis-6.2`. The `compat.tableErrors` option overrides
-the profile.
+`compat.tableErrors` option overrides the profile.
+
+The engine's own failures that a script can catch (`reached lua stack limit`
+for a host reply nested too deeply, `reply decoding failed`,
+`empty reply from host`, `host callback failed`, `sha1hex failed`) follow the
+same model: `{err='ERR ...'}` tables in the Redis 7 model, bare strings with
+`redis-6.2`. An exception thrown by the host's `log` or `onSetResp` is raised
+like one thrown by `redisCall`: in the Redis 7 model as an `{err=...}` table,
+with the `ERR` code added when its message has none (`log sink down` →
+`ERR log sink down`, `WRONGTYPE x` kept), and with `redis-6.2` as the message
+itself. The fuel-limit kill cannot be caught, and the `unknown error` fallback
+exists only for an uncaught error table; both reach the host as code `ERR` and
+their bare message.
 
 `redis.sha1hex` takes exactly one argument, as in Redis: no argument or more
 than one raises `wrong number of arguments`, which a script that catches it
 sees as `ERR wrong number of arguments` (Redis 7 model) or
 `wrong number of arguments` (`redis-6.2`, with no `user_script:N:` position).
+Like Redis, it reads that argument with `lua_tolstring`: a number hashes its
+string form, and a value with none (`nil`, a boolean, a table) hashes as the
+empty string.
 
 A `redis.pcall` argument that is not a string or number
 (`redis.pcall('set', 'k', {})`) is returned as an error table, as in Redis, and

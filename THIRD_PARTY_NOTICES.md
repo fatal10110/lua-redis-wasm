@@ -18,9 +18,10 @@ all of this third-party code are reproduced below.
     tables, error reply parsing, `pcall` unwrapping, the script error handler
     and its `ERR unknown error` fallback) and `double2ll`.
   - Portions of `wasm/src/redis_api.c` derived from Redis 6.2's `src/scripting.c`
-    (BSD 3-Clause): the `redis-6.2` profile's `redis.error_reply`, `redis.log` and
-    `redis.setresp` error behavior (`luaRedisReturnSingleFieldTable`, `luaPushError`,
-    `luaLogCommand`, `luaSetResp`).
+    (BSD 3-Clause): the `redis-6.2` profile's `redis.error_reply`, `redis.log`,
+    `redis.setresp` and `redis.sha1hex` error behavior
+    (`luaRedisReturnSingleFieldTable`, `luaPushError`, `luaLogCommand`, `luaSetResp`,
+    `luaRedisSha1hexCommand`).
   - Redis and Valkey modifications to the Lua 5.1 core in `vendor/valkey/deps/lua/src`
     (readonly tables, string hashing, security fixes).
   - `vendor/valkey/src/rand.c` (see [rand.c](#randc) below).

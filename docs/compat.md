@@ -108,6 +108,8 @@ an integer, so a non-integer numeric prop reads back truncated.
     code or position. These follow `compat.tableErrors`.
   - `redis.sha1hex` with no argument or more than one raises
     `wrong number of arguments` (`ERR`-coded in the Redis 7.0+ error model).
+    Its one argument is read with `lua_tolstring` in every version, so `nil`,
+    a boolean or a table hashes as the empty string, with no error.
   - a `redis.pcall` argument that is not a string or number returns (does not
     raise) `{err='ERR Lua redis lib command arguments must be strings or
     integers'}` (Redis 7.x/8.0 profiles, no profile), `{err='ERR Command
