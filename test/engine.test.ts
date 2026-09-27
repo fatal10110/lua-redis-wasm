@@ -1596,3 +1596,24 @@ test("redis.call/pcall: handler receives the caller's source and line", async ()
     ["pcall \ufffd", "return redis.pcall('\u00ff')", 1] // source is raw chunk text
   ]);
 });
+
+test("redis.call: ctx.source read after the handler returned throws", async () => {
+  let kept: RedisCallContext | undefined;
+  let early: Buffer | undefined;
+  const module = await load();
+  const engine = module.create(
+    createTestHost({
+      redisCall: (_args, ctx) => {
+        kept = ctx;
+        return null;
+      },
+      redisPcall: (_args, ctx) => {
+        early = ctx?.source; // materialized inside the handler: stays readable
+        return null;
+      }
+    })
+  );
+  engine.eval("redis.call('a') redis.pcall('b')");
+  assert.throws(() => kept?.source, /after the redis.call handler returned/);
+  assert.equal(early?.toString(), "@user_script");
+});

@@ -181,8 +181,16 @@ exactly as Redis 6.2's `luaPushError` sees it (stack level 1): `source` (a `Buff
 read it inside the handler) is
 `"@user_script"` for the script, the chunk for `loadstring` code, or `"=[C]"` (line
 `-1`) for a C caller such as `pcall(redis.pcall, ...)`. `source` is empty when unknown.
-Use it to emit Redis 6.2's `${source}: ${line}: ...` pcall error prefix. When
-delegating between handlers, pass `ctx` along (`this.redisCall(args, ctx)`).
+Use it to emit Redis 6.2's pcall error prefix, keeping `source` as bytes (a template
+literal would UTF-8-decode it):
+
+```typescript
+const prefixed = Buffer.concat([ctx.source, Buffer.from(`: ${ctx.line}: `), message]);
+```
+
+Read `ctx.source` inside the handler; a first read after the handler has returned
+throws. When delegating between handlers, pass `ctx` along
+(`this.redisCall(args, ctx)`).
 
 ### Error metadata
 

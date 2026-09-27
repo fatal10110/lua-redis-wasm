@@ -124,7 +124,7 @@ export type RedisCallHandler = (args: Buffer[], ctx?: RedisCallContext) => Reply
 /**
  * Call-site context passed to {@link RedisCallHandler}: the caller of
  * `redis.call`/`redis.pcall` (stack level 1, as Redis 6.2's `luaPushError`
- * sees it). Lets a host build Redis 6.2's `${source}: ${line}: ` prefix for
+ * sees it). Lets a host build Redis 6.2's `<source>: <line>: ` prefix for
  * pcall errors, which it returns as an error table rather than raising.
  */
 export type RedisCallContext = {
@@ -132,8 +132,9 @@ export type RedisCallContext = {
    * Chunk source of the caller, raw bytes: `"@user_script"` for the script
    * itself, the chunk string/name for `loadstring` code, `"=[C]"` when called
    * from a C function (e.g. `pcall(redis.pcall, ...)`). Empty when unknown, in
-   * which case Redis omits the prefix. Read it inside the handler: it is copied
-   * lazily from WASM memory on first access.
+   * which case Redis omits the prefix. Copied lazily from WASM memory on first
+   * access, so read it inside the handler: a first read after the handler has
+   * returned throws.
    */
   readonly source: Buffer;
   /** Line of the call within `source`; -1 for a C caller, 0 when unknown. */

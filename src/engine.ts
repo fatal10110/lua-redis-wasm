@@ -641,12 +641,18 @@ export class LuaWasmModule {
 
     const callHandler = (args: Buffer[], isPcall: boolean): ReplyValue => {
       // source is copied lazily: for loadstring code it is the whole chunk, and
-      // most handlers never read it. The pointer is valid during the handler.
+      // most handlers never read it. The pointer is only valid during the
+      // handler, so a first read after it returns throws instead of reading
+      // memory the chunk may no longer own.
       const sourcePtr = exports._current_call_source?.() ?? 0;
       let source: Buffer | undefined;
+      let done = false;
       const ctx: RedisCallContext = {
         line: exports._current_call_line?.() ?? 0,
         get source() {
+          if (source === undefined && done) {
+            throw new Error("ctx.source read after the redis.call handler returned");
+          }
           const heap = exports.HEAPU8;
           return (source ??= sourcePtr
             ? readBytes(heap, sourcePtr, heap.indexOf(0, sourcePtr) - sourcePtr)
@@ -660,6 +666,8 @@ export class LuaWasmModule {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { err: Buffer.from(message, "utf8") };
+      } finally {
+        done = true;
       }
     };
 
