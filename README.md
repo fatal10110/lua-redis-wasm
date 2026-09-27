@@ -174,6 +174,22 @@ by the engine.
 Called when Lua executes `redis.pcall(...)`. Return `{ err: Buffer, code?: Buffer }`
 instead of throwing to match Redis behavior.
 
+### Host callback failures
+
+A host callback never breaks the engine. A throw from `redisCall`, or a malformed
+`ReplyValue` it returns (e.g. `{ map: "x" }`, a non-Buffer `ok`, or a reply nested
+too deeply to encode), becomes an error reply carrying the exception message:
+`redis.call` raises it, `redis.pcall` returns it as an error table. A throw from
+`log` or `onSetResp` is raised in the script as an ordinary Lua error with the
+exception message (a script can catch it with `pcall`); this differs from Redis,
+where `redis.log` cannot fail. A throwing `onSetResp` also leaves the protocol
+unchanged.
+
+If an exception still escapes the WASM module (a trap, or a throwing `_alloc`),
+the VM can no longer be trusted: that call throws, and every later `eval` /
+`evalWithArgs` throws `LuaEngine is unusable: ...` (with the original error as
+`cause`). Create a new engine to continue.
+
 ### Call context
 
 Both handlers receive `ctx: { source, line }`, the caller of `redis.call`/`redis.pcall`
@@ -371,6 +387,11 @@ const engine = module.create(host);
 | `maxMemoryBytes` | Memory growth cap            | Host-coordinated |
 | `maxReplyBytes`  | Maximum reply payload size   | WASM runtime     |
 | `maxArgBytes`    | Maximum single argument size | WASM runtime     |
+
+The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinary
+`not enough memory` error, after which its garbage is collected and the engine stays
+usable. A script, KEYS or ARGV too large to copy into the heap makes `eval` /
+`evalWithArgs` throw a `RangeError`; the engine stays usable.
 
 ## Included Lua Libraries
 
