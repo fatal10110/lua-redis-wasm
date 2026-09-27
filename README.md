@@ -571,17 +571,26 @@ This package is licensed under the **MIT License**. See [LICENSE](LICENSE) for d
 
 ### Third-Party Licenses
 
-This project includes third-party code under the MIT License:
+The WASM module is built from C sources vendored from
+[Valkey](https://github.com/valkey-io/valkey) (the `vendor/valkey` submodule, pinned to a
+release tag), and parts of this project's C code are derived from Valkey / Redis 7.2.4.
+It includes third-party code under the BSD 3-Clause License:
+
+- **Valkey / Redis 7.2.4** (derived scripting code, Lua core modifications, `rand.c`) -
+  Copyright (C) 2006-2020 Redis Ltd., (C) 2024-present Valkey contributors
+
+under the MIT License:
 
 - **Lua 5.1** - Copyright (C) 1994-2012 Lua.org, PUC-Rio
-- **lua_cjson** - Copyright (C) 2010-2012 Mark Pulford
-- **lua_cmsgpack** - Copyright (C) 2012 Salvatore Sanfilippo
+- **lua_cjson**, **strbuf**, **fpconv** - Copyright (C) 2010-2012 Mark Pulford
+- **lua_cmsgpack** - Copyright (C) 2012 Redis Ltd.
 - **lua_struct** - Copyright (C) 2010-2018 Lua.org, PUC-Rio
 - **lua_bit** - Copyright (C) 2008-2012 Mike Pall
 
 and under the Boost Software License 1.0:
 
-- **fpconv_dtoa** - Copyright (C) 2013-2019 night-shift, (C) 2009 Florian Loitsch
+- **fpconv_dtoa** - Copyright (C) 2013-2019 night-shift, (C) 2009 Florian Loitsch,
+  (C) 2021 Redis Ltd.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full license texts.
 
