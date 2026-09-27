@@ -65,12 +65,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after `line` (`0x01` engine error, `0x02` message from an error table), so
   the TS layer no longer reads the error's kind from its text (#59, #76). See
   `docs/abi.md`.
-- An uncaught table error whose `err` has no uppercase error code is reported
-  without a `code` instead of with `ERR`, since Redis sends it as-is:
-  `error({err='boom'})` → `{ err: "boom", meta }` (Redis: `-boom script: ...`),
-  and likewise `error({err=7})`, `error({err='oops something'})` and, with table
-  errors on, a host command error such as `"oops something"`. A string error
-  still gets `ERR` (#76).
+- In the Redis 7 error model (every profile but `redis-6.2`, see
+  `compat.tableErrors`), an uncaught table error whose `err` has no uppercase
+  error code is reported without a `code` instead of with `ERR`, since Redis 7
+  sends it as-is: `error({err='boom'})` → `{ err: "boom", meta }` (Redis:
+  `-boom script: ...`), and likewise `error({err=7})`,
+  `error({err='oops something'})` and a host command error reply such as
+  `"oops something"`. A string error, and every error in the `redis-6.2` string
+  model (Redis 6.2 sends `-ERR ...`), still gets `ERR` (#76).
+- A `redisCall` / `redisPcall` handler exception whose message has no uppercase
+  error code becomes an `ERR <message>` error reply (was `<message>`): it is a
+  host failure, not a Redis reply, like Redis's `addReplyError`. A returned
+  `{ err }` reply is still passed on as is.
 - WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
   (`{0,0}` on success, otherwise the error message C raises as a Lua error), and
   every `PtrLen`-returning export and import uses the struct-return pointer only.

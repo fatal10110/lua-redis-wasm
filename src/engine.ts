@@ -71,6 +71,7 @@ import {
   encodeArgArray,
   encodeRedisProps,
   ensureBuffer,
+  failureErrorReply,
   REPLY_SCRIPT_ERROR,
   SCRIPT_ERROR_ENGINE,
   SCRIPT_ERROR_FROM_TABLE,
@@ -651,8 +652,10 @@ function errorMessage(err: unknown): string {
  * `retPtr`. A throw anywhere (argument decoding, the host handler, encoding a
  * malformed ReplyValue, heap exhaustion) becomes an error reply carrying the
  * exception message, which C raises (call) or returns as an error table
- * (pcall). If even that cannot be allocated, the zero PtrLen makes C raise
- * "ERR empty reply from host".
+ * (pcall). A thrown exception is a host failure, not a reply the host built,
+ * so it gets the generic `ERR` code when its message has none (a returned
+ * `{ err }` is passed on as is). If even that cannot be allocated, the zero
+ * PtrLen makes C raise "ERR empty reply from host".
  */
 function writeReplyImport(
   exports: WasmExports,
@@ -665,9 +668,10 @@ function writeReplyImport(
   } catch (err) {
     rethrowFault(err);
     try {
-      out = encodeReplyToPtrLen(exports, {
-        err: Buffer.from(errorMessage(err), "utf8"),
-      });
+      out = encodeReplyToPtrLen(
+        exports,
+        failureErrorReply(Buffer.from(errorMessage(err), "utf8")),
+      );
     } catch (fallbackErr) {
       rethrowFault(fallbackErr);
       out = NULL_PTR_LEN;

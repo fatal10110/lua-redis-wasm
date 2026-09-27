@@ -91,5 +91,10 @@ int main(void) {
   /* And the handler still works after a rebuild. */
   expect_error_reply(test_unprotected_error(), REPLY_ERROR, "the Lua VM was reset");
   expect_int("return 3", 3);
+  /* The rebuilt VM has its own engine-error slot: still flagged. */
+  expect_error_reply_flags(eval_str("return undefined_global"), REPLY_SCRIPT_ERROR,
+                           "global-read:undefined_global", SCRIPT_ERROR_ENGINE);
+  expect_error_reply(eval_str("error('__RLUA_E__:global-read:undefined_global', 0)"),
+                     REPLY_SCRIPT_ERROR, "__RLUA_E__:global-read:undefined_global");
   return 0;
 }

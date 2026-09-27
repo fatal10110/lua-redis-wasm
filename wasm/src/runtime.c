@@ -278,8 +278,9 @@ static PtrLen reply_script_error(const char *msg, uint32_t line, uint8_t flags) 
  * - a number becomes its string form;
  * - anything else becomes what Lua's tostring gives ("nil", "true", ...), which
  *   Redis's handler turns into "ERR <tostring(err)>" (the host adds the code).
- * A table's message is flagged (g_error_from_table, SCRIPT_ERROR_FROM_TABLE):
- * Redis replies "-<err>" for it as-is, with no ERR code added (luaCallFunction
+ * A table's message is flagged (g_error_from_table, SCRIPT_ERROR_FROM_TABLE, in
+ * the Redis 7 error model only): Redis 7 replies "-<err>" for it as-is, with no
+ * ERR code added (luaCallFunction
  * in Valkey 8.0's src/script_lua.c, same in Redis 7.2.4) (#76). */
 static int script_error_handler(lua_State *L) {
   lua_Debug ar;
@@ -1271,19 +1272,22 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_script_gc_status = collect_if_heap_high();
   if (g_fuel_killed) {
     // Whether the kill escaped (status != 0) or was swallowed as a value. The
-    // message carries its code, like the error table Redis raises for a kill.
-    PtrLen out = reply_script_error(FUEL_KILL_MSG, g_fuel_kill_line, SCRIPT_ERROR_FROM_TABLE);
+    // message carries its code, like the error table Redis 7 raises for a kill.
+    PtrLen out = reply_script_error(FUEL_KILL_MSG, g_fuel_kill_line,
+                                    redis_table_errors() ? SCRIPT_ERROR_FROM_TABLE : 0);
     lua_settop(g_state, 0);
     return out;
   }
   if (status != 0) {
     // The error handler ran (and set g_error_from_table) only for LUA_ERRRUN;
-    // a memory error or a failing handler leaves a plain message.
+    // a memory error or a failing handler leaves a plain message. A table's
+    // `err` is sent as-is only in the Redis 7 error model: Redis 6.2 replies
+    // "-ERR Error running script ..." for every script error.
     uint8_t flags = 0;
     if (status == LUA_ERRRUN) {
       if (is_engine_error(g_state, -1)) {
         flags = SCRIPT_ERROR_ENGINE;
-      } else if (g_error_from_table) {
+      } else if (g_error_from_table && redis_table_errors()) {
         flags = SCRIPT_ERROR_FROM_TABLE;
       }
     }

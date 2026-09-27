@@ -31,6 +31,10 @@ int compat_table_errors(void);
 int compat_log_debug_level(void);
 int compat_server_log_name(void);
 
+/* The error model register_redis_api snapshot for the current state: non-zero
+ * for Redis 7 table errors. */
+int redis_table_errors(void);
+
 /* Raises `msg` as a script error in the error model of the current state:
  * {err=msg} with table errors, the string itself otherwise. With table errors
  * `msg` should be "CODE message"; a Redis 6.2 (string) error may have no code.

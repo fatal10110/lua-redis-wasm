@@ -18,6 +18,10 @@ const host: RedisHost = {
         return { err: Buffer.from("ERR unknown command 'nope'") };
       case "bare":
         return { err: Buffer.from("boom\r\n") };
+      case "oops":
+        return { err: Buffer.from("oops something") };
+      case "throw":
+        throw new Error("oops thrown");
       case "echoerr":
         return { err: Buffer.concat([Buffer.from("ERR wrong type for key "), args[1] ?? Buffer.alloc(0)]) };
       case "wrongtype":
@@ -75,6 +79,10 @@ const ALL_PROFILES: Array<CompatProfile | undefined> = [...TABLE_PROFILES, "redi
 for (const profile of ALL_PROFILES) {
   const name = profile ?? "default";
 
+  // Code of a table error whose err has none: Redis 7 sends the err as-is, Redis
+  // 6.2 replies "-ERR ..." for every script error (#76).
+  const bare = profile === "redis-6.2" ? "ERR" : undefined;
+
   test(`error model (${name}): error() with a table reports its err field`, async () => {
     const engine = await engineFor(profile);
     assertErr(engine.eval("error({err='MY custom'})"), "MY", "custom", 1);
@@ -83,19 +91,30 @@ for (const profile of ALL_PROFILES) {
     // Like luaExtractErrorInformation: no string `err` field -> "ERR unknown error".
     assertErr(engine.eval("error({})"), "ERR", "unknown error");
     assertErr(engine.eval("error({err=true})"), "ERR", "unknown error");
-    // Redis sends a table's err as-is ("-7"): no code is invented (#76).
-    assertErr(engine.eval("error({err=7})"), undefined, "7");
+    // Redis 7 sends a table's err as-is ("-7"): no code is invented (#76).
+    assertErr(engine.eval("error({err=7})"), bare, "7");
     assertUsable(engine);
   });
 
-  test(`error model (${name}): a table error without a code stays code-less (#76)`, async () => {
+  test(`error model (${name}): a table error without a code is code-less in the Redis 7 model (#76)`, async () => {
     const engine = await engineFor(profile);
-    // Redis 7: `-boom script: <sha>, on @user_script:1.`, not `-ERR boom ...`.
-    assertErr(engine.eval("error({err='boom'})"), undefined, "boom", 1);
-    assertErr(engine.eval("\nerror({err='oops something'})"), undefined, "oops something", 2);
-    assertErr(engine.eval("error({err='My Error x'})"), undefined, "My Error x");
-    assertErr(engine.eval("error({err='boom\\r\\n'})"), undefined, "boom");
+    // Redis 7: `-boom script: <sha>, on @user_script:1.`, not `-ERR boom ...`;
+    // Redis 6.2: `-ERR Error running script ...`.
+    assertErr(engine.eval("error({err='boom'})"), bare, "boom", 1);
+    assertErr(engine.eval("\nerror({err='oops something'})"), bare, "oops something", 2);
+    assertErr(engine.eval("error({err='My Error x'})"), bare, "My Error x");
+    assertErr(engine.eval("error({err='boom\\r\\n'})"), bare, "boom");
     assertErr(engine.eval("error({err='MY boom'})"), "MY", "boom", 1);
+    // A code-less host error reply, raised by redis.call or rethrown from
+    // redis.pcall, gets the same code either way.
+    assertErr(engine.eval("return redis.call('oops')"), bare, "oops something", 1);
+    assertErr(engine.eval("local e = redis.pcall('oops')\nerror(e)"), bare, "oops something", 2);
+    // A thrown host exception is a host failure, not a Redis reply: always ERR.
+    assertErr(engine.eval("return redis.call('throw')"), "ERR", "oops thrown", 1);
+    assert.deepEqual(engine.eval("return redis.pcall('throw')"), {
+      err: Buffer.from("oops thrown"),
+      code: Buffer.from("ERR"),
+    });
     // A string error still gets the generic code, as Redis prefixes "ERR ".
     assertErr(engine.eval("error('boom', 0)"), "ERR", "boom");
     assertErr(engine.eval("error('boom')"), "ERR", "user_script:1: boom", 1);
@@ -200,6 +219,20 @@ test("error model (redis-6.2): redis.call raises a string, pcall is the stock on
   assertUsable(engine);
 });
 
+test("error model: code-less table errors follow the tableErrors override (#76)", async () => {
+  const off = await engineFor(undefined, undefined, { tableErrors: false });
+  assertErr(off.eval("error({err='boom'})"), "ERR", "boom", 1);
+  assertErr(off.eval("return redis.call('oops')"), "ERR", "oops something", 1);
+  const on = await engineFor("redis-6.2", undefined, { tableErrors: true });
+  assertErr(on.eval("error({err='boom'})"), undefined, "boom", 1);
+  assertErr(on.eval("return redis.call('oops')"), undefined, "oops something", 1);
+  // The fuel kill carries its code in both models.
+  for (const tableErrors of [false, true]) {
+    const engine = await engineFor(undefined, { maxFuel: 100_000 }, { tableErrors });
+    assertErr(engine.eval("while true do end"), "ERR", "Script killed by fuel limit", 1);
+  }
+});
+
 test("error model: the tableErrors override is merged over the profile", async () => {
   const off = await engineFor("redis-7.2", undefined, { tableErrors: false });
   assert.equal((off.eval(XPCALL_TYPE) as Buffer).toString(), "string");
@@ -230,7 +263,7 @@ for (const profile of ALL_PROFILES) {
     assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:x\\r\\n+OK', 0)"), "ERR", "__RLUA_E__:x  +OK"));
     // A spoofed globals-protection error is reported as what it is.
     assertNoCrLf(assertErr(engine.eval("error('__RLUA_E__:global-read:foo', 0)"), "ERR", "__RLUA_E__:global-read:foo"));
-    assertNoCrLf(assertErr(engine.eval("error({err='__RLUA_E__:global-read:foo'})"), undefined, "__RLUA_E__:global-read:foo"));
+    assertNoCrLf(assertErr(engine.eval("error({err='__RLUA_E__:global-read:foo'})"), profile === "redis-6.2" ? "ERR" : undefined, "__RLUA_E__:global-read:foo"));
     // A real engine error earlier in the script does not vouch for a later one.
     assertNoCrLf(
       assertErr(

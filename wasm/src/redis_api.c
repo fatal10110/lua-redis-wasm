@@ -46,6 +46,10 @@ int32_t current_call_line(void) {
   return g_call_line;
 }
 
+int redis_table_errors(void) {
+  return g_table_errors;
+}
+
 uint32_t redis_resp_version(void) {
   return g_resp_version;
 }

@@ -234,8 +234,11 @@ instead of throwing to match Redis behavior.
 
 A host callback never breaks the engine. A throw from `redisCall`, or a malformed
 `ReplyValue` it returns (e.g. `{ map: "x" }`, a non-Buffer `ok`, or a reply nested
-too deeply to encode), becomes an error reply carrying the exception message:
-`redis.call` raises it, `redis.pcall` returns it as an error table. A throw from
+too deeply to encode), becomes an error reply carrying the exception message,
+with the generic `ERR` code when the message does not start with an uppercase
+code (`throw new Error("oops")` → `ERR oops`, like Redis's `addReplyError`; a
+returned `{ err }` reply is passed on as is): `redis.call` raises it,
+`redis.pcall` returns it as an error table. A throw from
 `log` or `onSetResp` is raised in the script as an ordinary Lua error with the
 exception message (a script can catch it with `pcall`); this differs from Redis,
 where `redis.log` cannot fail. A throwing `onSetResp` also leaves the protocol
@@ -295,10 +298,13 @@ lets the host render. When a script aborts, the reply carries:
 
 - `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call`.
   A string error without one (`error('boom')`) gets `ERR`, as Redis prefixes
-  `ERR `. An error table's `err` is what Redis sends as-is, so a table error has
-  a `code` only when its `err` starts with one: `error({err='MY boom'})` → code
-  `MY`, `err` `boom`; `error({err='boom'})` → no `code`, `err` `boom` (Redis:
-  `-boom script: ...`). Write `-<code> <err>`, or `-<err>` when `code` is absent.
+  `ERR `. In the Redis 7 error model (every profile but `redis-6.2`, see
+  `compat.tableErrors`), an error table's `err` is what Redis sends as-is, so a
+  table error has a `code` only when its `err` starts with one:
+  `error({err='MY boom'})` → code `MY`, `err` `boom`; `error({err='boom'})` → no
+  `code`, `err` `boom` (Redis: `-boom script: ...`). With `redis-6.2` string
+  errors, which Redis 6.2 always sends as `-ERR ...`, it gets `ERR` too. Write
+  `-<code> <err>`, or `-<err>` when `code` is absent.
   See [Reply Types](#reply-types).
 - `meta` — `{ line, sha }` always, plus `{ kind, name }` for errors the engine itself
   classifies (`global-read` of a nonexistent global; `command-arg-type` for a bad
@@ -343,9 +349,10 @@ uppercase-code rule, so `RESP version must be 2 or 3.` reports code `RESP` (Redi
 receives when the error aborts the script is the same in both models, except that
 the table model trims CR/LF around the message after the code, as Redis does
 (host error `"\r\nboom"` → `boom`; with string errors → `"  boom"`), and that a
-host error whose first word is not an uppercase code (`"oops something"`) stays
-code-less in the table model, as Redis 7 sends it as-is, while with string errors
-it gets the `ERR` code, as Redis 6.2 prefixes `ERR`.
+host error reply whose first word is not an uppercase code (`"oops something"`),
+like an `error({err=...})` table without one, stays code-less in the table model,
+as Redis 7 sends it as-is, while with string errors it gets the `ERR` code, as
+Redis 6.2 prefixes `ERR` to every script error.
 
 ### log
 

@@ -38,8 +38,10 @@ typedef enum ReplyType {
 #define SCRIPT_ERROR_ENGINE 0x01u
 /* The message is the `err` field of an error table, which Redis 7 sends as-is
  * ("-<err>"): its leading word is the error code only if it has one, and no
- * default code is added. Otherwise the error was a string (or another value)
- * and the host adds the generic ERR code when the message carries none. */
+ * default code is added. Set only in the Redis 7 error model (COMPAT_TABLE_ERRORS);
+ * Redis 6.2 replies "-ERR ..." for every script error. Otherwise the error was
+ * a string (or another value), or the model is 6.2's, and the host adds the
+ * generic ERR code when the message carries none. */
 #define SCRIPT_ERROR_FROM_TABLE 0x02u
 
 #if defined(__GNUC__)

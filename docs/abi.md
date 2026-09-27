@@ -75,11 +75,13 @@ struct ScriptErrorPayload {
     CR/LF). Only the error the engine raised in the current eval, uncaught or
     rethrown unchanged, carries it.
   - `0x02` `SCRIPT_ERROR_FROM_TABLE`: `message` is the `err` field of an error
-    table (`error({err=...})`, a `redis.call` error in the Redis 7 error
-    model, the fuel kill). Redis sends it as-is (`-<err>`), so the host must
-    not add a default error code.
-  - neither: a string (or other value) error. Redis 7 prefixes it with `ERR `;
-    the engine reports the generic `ERR` code when the message has none.
+    table (`error({err=...})`, a `redis.call` error, the fuel kill). Redis 7
+    sends it as-is (`-<err>`), so the host must not add a default error code.
+    Set only in the Redis 7 error model (compat flag `0x10`): Redis 6.2 sends
+    `-ERR ...` for every script error.
+  - neither: a string (or other value) error, or any error in the Redis 6.2
+    error model. Redis prefixes it with `ERR `; the engine reports the generic
+    `ERR` code when the message has none.
 - Except with `SCRIPT_ERROR_ENGINE`, `message` is cut at the first NUL, has
   trailing CR/LF trimmed and every other CR/LF mapped to a space, so it can be
   written into RESP as is.

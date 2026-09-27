@@ -118,6 +118,16 @@ function splitErrorPayload(payload: Buffer): { err: Buffer; code?: Buffer } {
   return { err: Buffer.from(payload) };
 }
 
+/**
+ * Error reply for a failure message that is not a Redis reply (e.g. a thrown
+ * host exception): split like a wire payload, with the generic `ERR` code
+ * when the message has none, as Redis's `addReplyError` adds `-ERR `.
+ */
+export function failureErrorReply(message: Buffer): { err: Buffer; code: Buffer } {
+  const { err, code } = splitErrorPayload(message);
+  return { err, code: code ?? Buffer.from("ERR", "utf8") };
+}
+
 /** Tests whether `buffer[0, end)` matches the Redis error-code shape `[A-Z][A-Z0-9]*`. */
 function isErrorCode(buffer: Buffer, end: number): boolean {
   if (buffer[0] < 0x41 || buffer[0] > 0x5a) {
