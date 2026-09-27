@@ -1,9 +1,12 @@
 #include "../include/abi.h"
 #include "redis_api.h"
+#include "redis_math.h"
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#include <setjmp.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +26,16 @@ static uint32_t g_max_reply_bytes = 0;
 static uint32_t g_max_arg_bytes = 0;
 /* Script line captured by script_error_handler at the last error point. */
 static uint32_t g_error_line = 0;
+
+/* Registry references to the C functions the eval path calls in protected
+ * mode. Pushing a C function creates a closure, which allocates and so can
+ * raise a memory error; outside any protected call that error would reach the
+ * panic handler. These closures are created once per VM, inside the protected
+ * setup_state_body, so the eval path only fetches them (lua_rawgeti does not
+ * allocate) before lua_pcall. */
+static int g_error_handler_ref = LUA_NOREF;
+static int g_encode_reply_ref = LUA_NOREF;
+static int g_collect_garbage_ref = LUA_NOREF;
 
 static void write_u32_le(uint8_t *dst, uint32_t value) {
   dst[0] = (uint8_t)(value & 0xFF);
@@ -523,13 +536,14 @@ static void remove_package_entry(lua_State *L, const char *name) {
 }
 
 // Compatibility profile flags (set via set_compat() before init/reset). Each
-// flag toggles one of the three behaviors that actually differ across Redis
+// flag toggles one of the four behaviors that actually differ across Redis
 // 6.2-8.x and Valkey; everything else is constant. Default reproduces the
 // historical behavior (os loaded, `server` alias present, print stripped),
 // which matches Valkey 8.0/8.1.
 #define COMPAT_PRINT 0x1u        // keep Lua `print` (Redis 6.2 only)
 #define COMPAT_OS 0x2u           // expose `os` lib (Redis 7.4+, Valkey 8.0+)
 #define COMPAT_SERVER_ALIAS 0x4u // `server` aliases `redis` (Valkey 8.0+)
+#define COMPAT_RESEED_RANDOM 0x8u // reseed math.random with 0 per script (Redis 6.2 only)
 static uint32_t g_compat_flags = COMPAT_OS | COMPAT_SERVER_ALIAS;
 
 void set_compat(uint32_t flags) { g_compat_flags = flags; }
@@ -666,6 +680,9 @@ static void raw_setglobal(lua_State *L, const char *name) {
   }
 }
 
+// lua_call is unprotected by itself; this only runs inside setup_state_body,
+// under setup_state's lua_cpcall, so a failing library load (e.g. out of
+// memory) fails the setup instead of reaching the panic handler.
 static void luaLoadLib(lua_State *L, const char *name, lua_CFunction func) {
   lua_pushcfunction(L, func);
   lua_pushstring(L, name);
@@ -770,35 +787,169 @@ static void set_empty_keys_argv(lua_State *L) {
   raw_setglobal(L, "ARGV");
 }
 
-// Build a fresh Lua state in g_state honoring g_compat_flags. Shared by init()
-// and reset(); the caller is responsible for closing any prior state.
-static int32_t setup_state(void) {
-  g_state = luaL_newstate();
-  if (!g_state) {
-    return -1;
+typedef struct KeysArgvCtx {
+  int has_args;
+  const uint8_t *args;
+  size_t args_len;
+  uint32_t keys_count;
+  int rc; /* set_keys_argv's result: -1 on a malformed encoding */
+} KeysArgvCtx;
+
+/* lua_cpcall body for set_script_keys_argv. */
+static int set_keys_argv_body(lua_State *L) {
+  KeysArgvCtx *ctx = (KeysArgvCtx *)lua_touserdata(L, 1);
+  if (ctx->has_args) {
+    ctx->rc = set_keys_argv(L, ctx->args, ctx->args_len, ctx->keys_count);
+  } else {
+    set_empty_keys_argv(L);
   }
-  srand(0);
-  open_allowed_libs(g_state, g_compat_flags);
-  register_redis_api(g_state);
-  {
-    PtrLen props = host_redis_props();
-    if (props.ptr && props.len) {
-      int rc = apply_redis_props(g_state, (const uint8_t *)(uintptr_t)props.ptr,
-                                 (size_t)props.len);
-      free_mem(props.ptr);
-      if (rc != 0) {
-        return -1;
-      }
+  return 0;
+}
+
+/* Sets KEYS/ARGV in protected mode: the tables and strings are allocated here,
+ * before the script's lua_pcall, and a huge ARGV can exhaust the heap. Returns
+ * NULL on success, else the error reply to send. */
+static const char *set_script_keys_argv(lua_State *L, KeysArgvCtx *ctx) {
+  int status = lua_cpcall(L, set_keys_argv_body, ctx);
+  if (status != 0) {
+    /* The error may have hit raw_setglobal between unlocking the globals table
+     * and locking it again. */
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 1);
+    lua_settop(L, 0);
+    return status == LUA_ERRMEM ? "ERR not enough memory to set KEYS/ARGV"
+                                : "ERR invalid KEYS/ARGV encoding";
+  }
+  return ctx->rc != 0 ? "ERR invalid KEYS/ARGV encoding" : NULL;
+}
+
+typedef struct EncodeReplyCtx {
+  ReplyBuffer *rb;
+  int rc;
+} EncodeReplyCtx;
+
+/* Protected body of encode_reply: encodes the value at index 1. */
+static int encode_reply_body(lua_State *L) {
+  EncodeReplyCtx *ctx = (EncodeReplyCtx *)lua_touserdata(L, 2);
+  ctx->rc = encode_lua_value(L, 1, ctx->rb);
+  return 0;
+}
+
+/* encode_lua_value in protected mode. The encoder pushes Lua strings and grows
+ * the Lua stack, which raise a memory error when the heap is exhausted; that
+ * fails the encoding like a reply buffer that cannot grow. */
+static int encode_reply(lua_State *L, int idx, ReplyBuffer *rb) {
+  if (idx < 0) {
+    idx = lua_gettop(L) + idx + 1;
+  }
+  EncodeReplyCtx ctx = {rb, ENCODE_FAILED};
+  lua_rawgeti(L, LUA_REGISTRYINDEX, g_encode_reply_ref);
+  lua_pushvalue(L, idx);
+  lua_pushlightuserdata(L, &ctx);
+  if (lua_pcall(L, 2, 0, 0) != 0) {
+    lua_pop(L, 1);
+    return ENCODE_FAILED;
+  }
+  return ctx.rc;
+}
+
+/* Protected body of collect_if_heap_high. */
+static int collect_garbage(lua_State *L) {
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  return 0;
+}
+
+/* Error reply for an unprotected Lua error; see vm_panic. */
+static char g_panic_msg[128];
+static jmp_buf g_panic_jmp;
+static int g_panic_armed = 0;
+
+/* lua_atpanic handler. Lua calls it for an error raised outside any protected
+ * call, then calls exit() if it returns. Every Lua call on the eval path runs
+ * protected (setup, KEYS/ARGV, script, reply encoding, collection), so this is
+ * a backstop. While run_guarded is active it jumps back there, which discards
+ * the VM (the C code that was interrupted may have left it half-updated, e.g.
+ * with the globals table unlocked) and builds a new one; the eval then replies
+ * with an error. Anywhere else there is nothing safe to return to, so it
+ * aborts, which the JS engine reports as a fault. */
+static int vm_panic(lua_State *L) {
+  if (!g_panic_armed) {
+    abort();
+  }
+  g_panic_armed = 0;
+  /* Only read a string: converting another value could allocate and fail. */
+  const char *msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "unknown error";
+  snprintf(g_panic_msg, sizeof(g_panic_msg), "%s", msg);
+  for (char *p = g_panic_msg; *p; p++) {
+    if (*p == '\r' || *p == '\n') {
+      *p = ' ';
     }
+  }
+  longjmp(g_panic_jmp, 1);
+  return 0;
+}
+
+typedef struct SetupCtx {
+  const uint8_t *props;
+  size_t props_len;
+  int props_rc;
+} SetupCtx;
+
+static int store_cfunction(lua_State *L, lua_CFunction fn) {
+  lua_pushcfunction(L, fn);
+  return luaL_ref(L, LUA_REGISTRYINDEX);
+}
+
+/* lua_cpcall body of setup_state: everything that builds the sandbox. */
+static int setup_state_body(lua_State *L) {
+  SetupCtx *ctx = (SetupCtx *)lua_touserdata(L, 1);
+  lua_settop(L, 0);
+  open_allowed_libs(L, g_compat_flags);
+  register_redis_math(L);
+  register_redis_api(L);
+  if (ctx->props && apply_redis_props(L, ctx->props, ctx->props_len) != 0) {
+    ctx->props_rc = -1;
+    return 0;
   }
   /* Valkey 8.0+ exposes `server` as an alias of `redis` (same table reference so
    * both share the host-injected props). Must run before protection locks them.
    * Redis keeps `redis` only -- gated on COMPAT_SERVER_ALIAS. */
   if (g_compat_flags & COMPAT_SERVER_ALIAS) {
-    lua_getglobal(g_state, "redis");
-    lua_setglobal(g_state, "server");
+    lua_getglobal(L, "redis");
+    lua_setglobal(L, "server");
   }
-  enable_globals_protection(g_state);
+  enable_globals_protection(L);
+  g_error_handler_ref = store_cfunction(L, script_error_handler);
+  g_encode_reply_ref = store_cfunction(L, encode_reply_body);
+  g_collect_garbage_ref = store_cfunction(L, collect_garbage);
+  return 0;
+}
+
+// Build a fresh Lua state in g_state honoring g_compat_flags. Shared by init()
+// and reset(); the caller is responsible for closing any prior state. The
+// setup runs in protected mode, so running out of memory fails it (-1, no
+// state) instead of reaching the panic handler.
+static int32_t setup_state(void) {
+  g_state = luaL_newstate();
+  if (!g_state) {
+    return -1;
+  }
+  lua_atpanic(g_state, vm_panic);
+  SetupCtx ctx = {NULL, 0, 0};
+  PtrLen props = host_redis_props();
+  if (props.ptr && props.len) {
+    ctx.props = (const uint8_t *)(uintptr_t)props.ptr;
+    ctx.props_len = (size_t)props.len;
+  }
+  int status = lua_cpcall(g_state, setup_state_body, &ctx);
+  if (props.ptr) {
+    free_mem(props.ptr);
+  }
+  if (status != 0 || ctx.props_rc != 0) {
+    lua_close(g_state);
+    g_state = NULL;
+    return -1;
+  }
+  lua_settop(g_state, 0);
   lua_sethook(g_state, fuel_hook, LUA_MASKCOUNT, FUEL_HOOK_STEP);
   reset_fuel();
   return 0;
@@ -825,12 +976,6 @@ int32_t reset(void) {
  * a quarter of the fixed 64 MB heap. */
 #define GC_AFTER_RUN_KB (16 * 1024)
 
-/* lua_cpcall body for collect_if_heap_high. */
-static int collect_garbage(lua_State *L) {
-  lua_gc(L, LUA_GCCOLLECT, 0);
-  return 0;
-}
-
 /* Lua 5.1 has no emergency collection, and its GC pacing (next cycle at 2x the
  * memory that survived the last one) knows nothing of the fixed-size heap. A
  * script that allocated heavily, whether it succeeded, hit "not enough memory"
@@ -838,12 +983,24 @@ static int collect_garbage(lua_State *L) {
  * script fails to allocate. Collect it once Lua holds more than
  * GC_AFTER_RUN_KB; below that the regular pacing leaves ample headroom, and
  * above it the cost is proportional to what the script just allocated.
- * Protected, as a collection may resize the string table. */
-static void collect_if_heap_high(void) {
-  if (g_state && lua_gc(g_state, LUA_GCCOUNT, 0) > GC_AFTER_RUN_KB) {
-    lua_cpcall(g_state, collect_garbage, NULL);
-    lua_settop(g_state, 0); /* drop the error lua_cpcall pushes on failure */
+ * Protected, as a collection allocates (see below), through the preallocated
+ * collect_garbage closure: creating one here could itself fail on a full heap.
+ * The Lua stack is left as it was.
+ *
+ * Returns non-zero if the collection ran out of memory. Lua 5.1 shrinks the
+ * string table at the end of a sweep by allocating the smaller one first; when
+ * the heap is full of objects that died after that cycle's mark, this fails
+ * every time and the cycle that would free them never starts. Only discarding
+ * the VM gets that memory back (see run_guarded). */
+static int collect_if_heap_high(void) {
+  if (!g_state || lua_gc(g_state, LUA_GCCOUNT, 0) <= GC_AFTER_RUN_KB) {
+    return 0;
   }
+  int top = lua_gettop(g_state);
+  lua_rawgeti(g_state, LUA_REGISTRYINDEX, g_collect_garbage_ref);
+  int status = lua_pcall(g_state, 0, 0, 0);
+  lua_settop(g_state, top); /* drop the error lua_pcall pushes on failure */
+  return status;
 }
 
 // Shared body of eval() and eval_with_args(). With has_args set, KEYS/ARGV are
@@ -856,18 +1013,18 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   }
   reset_fuel();
   redis_reset_resp_version();
-  if (has_args) {
-    if (g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
-      return REPLY_ERROR_LIT("ERR KEYS/ARGV exceeds configured limit");
-    }
-    if (set_keys_argv(g_state, args, args_len, keys_count) != 0) {
-      lua_settop(g_state, 0);
-      return REPLY_ERROR_LIT("ERR invalid KEYS/ARGV encoding");
-    }
-  } else {
-    set_empty_keys_argv(g_state);
+  if (g_compat_flags & COMPAT_RESEED_RANDOM) {
+    redis_math_reseed();
   }
-  lua_pushcfunction(g_state, script_error_handler);
+  if (has_args && g_max_arg_bytes > 0 && args_len > g_max_arg_bytes) {
+    return REPLY_ERROR_LIT("ERR KEYS/ARGV exceeds configured limit");
+  }
+  KeysArgvCtx keys_argv = {has_args, args, args_len, keys_count, 0};
+  const char *setup_err = set_script_keys_argv(g_state, &keys_argv);
+  if (setup_err) {
+    return reply_error(setup_err, strlen(setup_err));
+  }
+  lua_rawgeti(g_state, LUA_REGISTRYINDEX, g_error_handler_ref);
   int errfunc = lua_gettop(g_state);
   if (luaL_loadbuffer(g_state, script, script_len, "@user_script") != 0) {
     const char *err = lua_tostring(g_state, -1);
@@ -878,7 +1035,11 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   g_error_line = 0;
   // Like Redis (lua_pcall(lua, 0, 1, -2)), keep exactly one result: the first
   // value of a multi-value return, or nil when the script returns nothing.
-  if (lua_pcall(g_state, 0, 1, errfunc) != 0) {
+  int status = lua_pcall(g_state, 0, 1, errfunc);
+  // Free the script's garbage before allocating the reply: a script that
+  // filled the heap and caught the error would otherwise leave no room for it.
+  collect_if_heap_high();
+  if (status != 0) {
     const char *err = lua_tostring(g_state, -1);
     PtrLen out = reply_script_error(err ? err : "ERR script execution failed", g_error_line);
     lua_settop(g_state, 0);
@@ -886,7 +1047,7 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   }
   ReplyBuffer rb;
   rb_init(&rb);
-  int rc = encode_lua_value(g_state, -1, &rb);
+  int rc = encode_reply(g_state, -1, &rb);
   lua_settop(g_state, 0);
   if (rc != 0) {
     free(rb.data);
@@ -903,19 +1064,85 @@ static PtrLen run_script(const char *script, size_t script_len, int has_args,
   return out;
 }
 
-PtrLen eval(uint32_t ptr, uint32_t len) {
-  PtrLen out = run_script((const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0);
-  collect_if_heap_high();
+typedef PtrLen (*GuardedFn)(void *arg);
+
+/* Closes the VM and builds a fresh one (g_state is NULL if that fails). */
+static int32_t rebuild_vm(void) {
+  lua_State *old = g_state;
+  g_state = NULL;
+  if (old) {
+    lua_close(old);
+  }
+  return setup_state();
+}
+
+/* Runs fn with the panic handler armed (see vm_panic). After a panic the VM is
+ * rebuilt and the reply is an error naming the Lua error. The VM is also
+ * rebuilt when its garbage cannot be collected (see collect_if_heap_high):
+ * nothing but KEYS/ARGV outlives a script, so a fresh VM behaves the same. */
+static PtrLen run_guarded(GuardedFn fn, void *arg) {
+  PtrLen out;
+  if (setjmp(g_panic_jmp) == 0) {
+    g_panic_armed = 1;
+    out = fn(arg);
+    g_panic_armed = 0;
+  } else {
+    int32_t rc = rebuild_vm();
+    char msg[sizeof(g_panic_msg) + 96];
+    snprintf(msg, sizeof(msg), "ERR unprotected Lua error (%s); %s", g_panic_msg,
+             rc == 0 ? "the Lua VM was reset" : "the Lua VM could not be re-created");
+    out = reply_error(msg, strlen(msg));
+  }
+  if (collect_if_heap_high() != 0) {
+    rebuild_vm();
+  }
+  // Every reply run_script builds is non-empty, so {0, 0} means even the error
+  // reply could not be allocated. Retry now that the heap has been collected.
+  if (out.ptr == 0) {
+    out = REPLY_ERROR_LIT("ERR not enough memory for the script reply");
+  }
   return out;
+}
+
+typedef struct ScriptRun {
+  const char *script;
+  size_t script_len;
+  int has_args;
+  const uint8_t *args;
+  size_t args_len;
+  uint32_t keys_count;
+} ScriptRun;
+
+static PtrLen run_script_guarded(void *arg) {
+  ScriptRun *run = (ScriptRun *)arg;
+  return run_script(run->script, run->script_len, run->has_args, run->args, run->args_len,
+                    run->keys_count);
+}
+
+PtrLen eval(uint32_t ptr, uint32_t len) {
+  ScriptRun run = {(const char *)(uintptr_t)ptr, (size_t)len, 0, NULL, 0, 0};
+  return run_guarded(run_script_guarded, &run);
 }
 
 PtrLen eval_with_args(uint32_t script_ptr, uint32_t script_len, uint32_t args_ptr,
                       uint32_t args_len, uint32_t keys_count) {
-  PtrLen out = run_script((const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
-                          (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count);
-  collect_if_heap_high();
-  return out;
+  ScriptRun run = {(const char *)(uintptr_t)script_ptr, (size_t)script_len, 1,
+                   (const uint8_t *)(uintptr_t)args_ptr, (size_t)args_len, keys_count};
+  return run_guarded(run_script_guarded, &run);
 }
+
+#ifdef LUA_REDIS_WASM_TESTING
+/* Smoke-test hook: raises a Lua error outside any protected call, which only
+ * the panic handler can catch. */
+static PtrLen raise_unprotected_error(void *arg) {
+  (void)arg;
+  lua_pushstring(g_state, "injected\r\nerror");
+  lua_error(g_state);
+  return (PtrLen){0, 0};
+}
+
+PtrLen test_unprotected_error(void) { return run_guarded(raise_unprotected_error, NULL); }
+#endif
 
 uint32_t alloc(uint32_t size) {
   void *mem = malloc(size);

@@ -426,9 +426,11 @@ The WASM heap is fixed at 64 MB. A script that exhausts it fails with an ordinar
 emergency garbage collection, the engine runs a full collection after any
 evaluation that leaves more than 16 MB of Lua memory in use, so a heavy script's
 garbage (whether it succeeded, failed, or caught and rethrew an out-of-memory
-error) does not make the next script run out of memory. A script, KEYS or ARGV
-too large to copy into the heap makes `eval` / `evalWithArgs` throw a
-`RangeError`; the engine stays usable.
+error) does not make the next script run out of memory; if that collection
+itself runs out of memory, the Lua VM is discarded and rebuilt. A script, KEYS
+or ARGV too large to copy into the heap makes `eval` / `evalWithArgs` throw a
+`RangeError`; KEYS/ARGV that fit as bytes but not as Lua strings reply
+`ERR not enough memory to set KEYS/ARGV`. In both cases the engine stays usable.
 
 ## Included Lua Libraries
 

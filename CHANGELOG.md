@@ -19,6 +19,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `node:fs/promises`, `node:path`, `node:url`, or `node:crypto`. The Node build is
   unchanged in behavior and selected via the `node` condition.
 
+- `reseedRandom` compat override: reseed `math.random` with 0 before every
+  script. Set by the `redis-6.2` profile only (#45).
+
 ### Changed
 
 - WASM ABI version 1: `host_redis_log` and `host_redis_setresp` return a `PtrLen`
@@ -103,6 +106,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   via Redis's `fpconv_dtoa` (`0.1+0.2` → `0.30000000000000004`). The same for
   every compat profile; the `redis-7.2` profile thus matches Redis 7.2.5+
   (7.2.0–7.2.4 sent `1e15` as `1e+15`) (#68).
+- `math.random` / `math.randomseed` now use Redis's PRNG (`redisLrand48` /
+  `redisSrand48` from `vendor/redis/src/rand.c`) instead of libc
+  `rand()`/`srand()`, so they return the same numbers as a real server (#45).
+  As in Redis 7.0+ and Valkey, one sequence runs across scripts for the life of
+  the engine (a new engine's first `math.random(1,1000000)` is `396465`, like a
+  freshly started server), and a `math.randomseed` carries over to later
+  scripts. The `redis-6.2` profile reseeds with 0 before every script, like
+  Redis 6.2 (`170829` every time).
+- Running out of memory outside the script body no longer aborts the module
+  through Lua's panic handler (#41). KEYS/ARGV setup runs in protected mode (a
+  huge ARGV replies `ERR not enough memory to set KEYS/ARGV`), as do VM setup
+  (library loading), reply encoding and the post-run collection. A Lua error
+  that still escapes protection is caught by a `lua_atpanic` handler: the VM is
+  rebuilt and the call replies `ERR unprotected Lua error (...); the Lua VM was
+  reset`. The VM is also rebuilt when the post-run collection itself runs out
+  of memory (Lua 5.1 shrinks the string table by allocating first, which can
+  keep failing on a full heap), and an eval whose reply could not be allocated
+  now replies `ERR not enough memory for the script reply` instead of `null`.
 
 ## [1.3.0] - 2026-06-08
 

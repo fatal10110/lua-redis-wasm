@@ -48,10 +48,16 @@ through `redisProps`.
 ## Determinism and Sandbox Rules
 - No file, OS, or network access.
 - No clock or time APIs available in Lua.
-- `math.random` and `math.randomseed` are available. Each VM init/reset starts
-  from the fixed seed `0`, so new/reset VMs replay the same sequence; within a
-  VM, the sequence advances across script runs. Explicit `math.randomseed(...)`
-  resets the sequence.
+- `math.random` and `math.randomseed` use Redis's PRNG (`redisLrand48` from
+  `vendor/redis/src/rand.c`), so a given seed yields the same numbers as a real
+  server. As in Redis 7.0+ and Valkey, one sequence runs across scripts: a new
+  engine starts where a freshly started server does (the first
+  `math.random(1,1000000)` is `396465`), `reset()` does not restart it, and
+  `math.randomseed(n)` also sets it for the scripts that follow. The
+  `redis-6.2` profile (`reseedRandom` override) reseeds with `0` before every
+  script, like Redis 6.2, so every script sees the same sequence (first
+  `math.random(1,1000000)` is `170829`). Redis 6.2's reseed from
+  `redis.replicate_commands()` is not emulated (that function is not provided).
 - No other randomness unless explicitly injected by the host.
 - No native extensions beyond the supported Redis modules.
 
