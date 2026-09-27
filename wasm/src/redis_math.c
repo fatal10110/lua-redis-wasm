@@ -5,7 +5,11 @@
  * (vendor/redis/src/rand.c, compiled as is), so a seed yields the same sequence
  * on every platform. The functions below are Lua 5.1's math_random and
  * math_randomseed (vendor/redis/deps/lua/src/lmathlib.c) with exactly that
- * substitution, which is also how Redis derives its own.
+ * substitution, which is also how Redis and Valkey derive theirs (the result
+ * matches Valkey 8.0's redis_math_random / redis_math_randomseed).
+ *
+ * Derived from Lua 5.1 lmathlib.c, Copyright (C) 1994-2012 Lua.org, PUC-Rio,
+ * MIT license (see THIRD_PARTY_NOTICES.md).
  *
  * The generator state lives in rand.c's statics, outside the Lua VM: like the
  * Redis process-wide state it survives a VM reset. Redis 7.0+ never reseeds it,

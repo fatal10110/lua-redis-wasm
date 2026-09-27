@@ -3,6 +3,36 @@
 This project plans to vendor Redis-compatible Lua modules. The modules and their licenses
 are listed below with direct references to the source files in the Redis repository.
 
+## Lua 5.1
+- Files: the Lua core and standard libraries in `vendor/redis/deps/lua/src` compiled into the
+  WASM module (`lapi.c` … `lzio.c`, `lauxlib.c`, `lbaselib.c`, `ltablib.c`, `lstrlib.c`,
+  `lmathlib.c`, `loslib.c`), and `wasm/src/redis_math.c` (derived from `lmathlib.c`). License
+  text from `vendor/redis/deps/lua/COPYRIGHT`.
+- Copyright: Lua.org, PUC-Rio (1994–2012)
+- License: MIT
+
+```
+Copyright (C) 1994-2012 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## lua_cjson.c
 - File: `vendor/redis/deps/lua/src/lua_cjson.c`
 - Copyright: Mark Pulford (2010–2012)
