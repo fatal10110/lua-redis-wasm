@@ -26,7 +26,8 @@
  *   On decode the code is split out of the wire payload; on encode it is
  *   prepended back. When `code` is omitted the message is used verbatim. A
  *   script-aborting string error always has `code` `ERR` and its whole message
- *   (less one leading `ERR `) as `err`, as Redis sends `-ERR <message>`. In the
+ *   as `err`, a leading `ERR` included (`error('ERR x', 0)` → `err` `ERR x`),
+ *   as Redis sends `-ERR <message>`. In the
  *   Redis 7 error model (`compat.tableErrors`) a table error's `err` is split
  *   like an error reply, with no `code` when it has none
  *   (`error({err='boom'})`, which Redis 7 sends as `-boom`); in the Redis 6.2

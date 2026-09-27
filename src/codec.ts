@@ -129,19 +129,13 @@ export const SCRIPT_ERROR_FROM_TABLE = 0x02;
  * Redis 6.2 error model: Redis sends it with the `ERR` code in front (Redis 7's
  * error handler wraps it as `{err='ERR ' .. tostring(err)}`, Redis 6.2 replies
  * `-ERR Error running script ...`), so the code is always `ERR` and the whole
- * message is `err`, whatever its first word (#83). The engine's own string
- * errors already read `ERR ...`; one leading `ERR ` is dropped so they are not
- * reported as `ERR ERR ...` (a script's `error('ERR x', 0)` thus reports `x`).
+ * message is `err`, whatever its first word (#83), `ERR` included: a script's
+ * `error('ERR x', 0)` reports `ERR x`, which the host writes as `-ERR ERR x`
+ * like Redis 7 (#93). The engine's own string errors carry no `ERR ` of their
+ * own, so nothing is stripped here.
  */
 function stringScriptError(payload: Buffer): { err: Buffer; code: Buffer } {
-  // Built per call, not at module scope: importing the module must not touch
-  // the global `Buffer`, which browsers only have once a polyfill is installed.
-  const errPrefix = Buffer.from("ERR ", "utf8");
-  const hasErr = payload.subarray(0, errPrefix.length).equals(errPrefix);
-  return {
-    err: Buffer.from(hasErr ? payload.subarray(errPrefix.length) : payload),
-    code: Buffer.from("ERR", "utf8"),
-  };
+  return { err: Buffer.from(payload), code: Buffer.from("ERR", "utf8") };
 }
 
 const REPLY_BOOL = 0x07;

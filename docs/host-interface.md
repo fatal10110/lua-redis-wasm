@@ -115,7 +115,11 @@ A host callback never breaks the engine:
   error table.
 - A throw from `log` or `onSetResp` is raised in the script as an ordinary Lua
   error with the exception message (a script can catch it with `pcall`); this
-  differs from Redis, where `redis.log` cannot fail. A throwing `onSetResp`
+  differs from Redis, where `redis.log` cannot fail. It is raised like a
+  `redisCall` throw: in the Redis 7 error model as an `{err=...}` table, with
+  `ERR` added when the message has no code (`log sink down` →
+  `ERR log sink down`, `ERR x` and `WRONGTYPE x` kept), so the host never gets
+  `ERR ERR`; with `redis-6.2` as the message itself. A throwing `onSetResp`
   also leaves the protocol unchanged.
 
 If an exception still escapes the WASM module, the engine becomes unusable; see

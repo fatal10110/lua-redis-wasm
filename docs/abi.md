@@ -105,9 +105,11 @@ struct ScriptErrorPayload {
     error model. Redis sends it as `-ERR <message>` (Redis 7's error handler
     wraps it as `{err='ERR ' .. tostring(err)}`; Redis 6.2 replies
     `-ERR Error running script ...`), so the host reports code `ERR` and the
-    whole message, whatever its first word, less one leading `ERR `: the
-    engine's own string errors (`ERR reply decoding failed`, ...) already carry
-    it.
+    whole message, whatever its first word, `ERR` included (`error('ERR x', 0)`
+    → `-ERR ERR x`, as Redis 7 sends it). The engine's own errors carry no
+    `ERR ` of their own here: in the Redis 7 model they are error tables
+    (`0x02`), and in Redis 6.2's they are bare (`reached lua stack limit`,
+    `Script killed by fuel limit`, ...).
 - `message` is cut at the first NUL, has trailing CR/LF trimmed and every
   other CR/LF mapped to a space, so it can be written into RESP as is.
 
@@ -128,7 +130,8 @@ and the C side raises them as ordinary Lua errors.
 - `host_redis_call(ptr, len) -> ptr_len`
   - Input: encoded argument array buffer.
   - Output: encoded Reply buffer. An error reply is raised as a Lua error.
-    `{0,0}` raises `ERR empty reply from host`.
+    `{0,0}` raises `empty reply from host` (`{err='ERR empty reply from
+    host'}` in the Redis 7 error model).
 
 - `host_redis_pcall(ptr, len) -> ptr_len`
   - Input: encoded argument array buffer.
@@ -138,7 +141,8 @@ and the C side raises them as ordinary Lua errors.
   - Input: log level and message bytes.
   - Output: `{0,0}` on success. On failure `len != 0` and `ptr` is an
     `alloc`'d error message (or 0 when none could be allocated); WASM frees it
-    and raises it as a Lua error.
+    and raises it as a Lua error (in the Redis 7 error model an `{err=...}`
+    table, with `ERR ` added when the message does not start with a code).
 
 - `host_redis_setresp(version) -> ptr_len`
   - Input: the RESP version the script switched to (2 or 3).
@@ -147,7 +151,7 @@ and the C side raises them as ordinary Lua errors.
 - `host_sha1hex(ptr, len) -> ptr_len`
   - Input: raw bytes.
   - Output: 40-byte lowercase hex string as bytes. `{0,0}` raises
-    `ERR sha1hex failed`.
+    `sha1hex failed`, like `host_redis_call`'s `{0,0}`.
 
 - `host_redis_props() -> ptr_len`
   - Output: encoded redisProps blob applied to the `redis` table at `init`/
