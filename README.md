@@ -296,7 +296,9 @@ refuses `EVAL` from inside a script).
 The engine composes **no** user-facing error wording — it classifies the error and
 lets the host render. When a script aborts, the reply carries:
 
-- `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call`.
+- `code` — the RESP error class (e.g. `WRONGTYPE`); preserved from `redis.call` in
+  the Redis 7 error model (with `redis-6.2` string errors it is `ERR`, see
+  [Error objects inside the script](#error-objects-inside-the-script)).
   An uncaught string error always has code `ERR` and its whole message as `err`,
   whatever its first word (`error('MY boom', 0)` → code `ERR`, `err` `MY boom`),
   as Redis sends it as `-ERR <message>`. One leading `ERR ` is dropped, because
