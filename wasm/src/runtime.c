@@ -1,3 +1,9 @@
+/* Lua VM setup, sandboxing and script execution for lua-redis-wasm.
+ *
+ * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
+ * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and src/eval.c:
+ * the globals allow/deny lists and table protection, the error handler, and the
+ * Lua -> RESP reply conversion. */
 #include "../include/abi.h"
 #include "redis_api.h"
 #include "redis_math.h"
@@ -247,9 +253,10 @@ static PtrLen reply_script_error(const char *msg, uint32_t line) {
  * - a table is a Redis 7 error object ({err=...}, as raised by redis.call or
  *   error(redis.error_reply(...))): its `err` field, like
  *   luaExtractErrorInformation, or "ERR unknown error" when that is not a
- *   string (that fallback is derived from Valkey src/script_lua.c,
- *   valkey-io/valkey#2229, BSD-3-Clause). Its `source`/`line` fields are not read: Redis's handler overwrites
- *   both with the error point, which is the line recorded here (#37);
+ *   string (that fallback is derived from luaExtractErrorInformation in
+ *   Valkey 8.0's src/script_lua.c, valkey-io/valkey#2229, BSD-3-Clause). Its
+ *   `source`/`line` fields are not read: Redis's handler overwrites both with
+ *   the error point, which is the line recorded here (#37);
  * - a number becomes its string form;
  * - anything else becomes what Lua's tostring gives ("nil", "true", ...), which
  *   Redis's handler turns into "ERR <tostring(err)>" (the host adds the code). */
@@ -632,7 +639,8 @@ static void disable_non_determinism(lua_State *L, uint32_t flags) {
   remove_global(L, "newproxy");
   // Sandbox-escape vectors: setfenv swaps the running function's environment
   // for a writable table and getfenv(0) reaches the real global table,
-  // bypassing globals protection. Redis removes these too (lua_builtins_deprecated).
+  // bypassing globals protection. Valkey removes these too (lua_builtins_deprecated
+  // in src/script_lua.c).
   remove_global(L, "setfenv");
   remove_global(L, "getfenv");
   remove_package_entry(L, "io");
@@ -686,8 +694,9 @@ static void protect_table_recursively(lua_State *L) {
 }
 
 // Lock the metatables of basic types so a script cannot escape the sandbox by
-// mutating e.g. the shared string metatable. Mirrors Redis's
-// luaSetTableProtectionForBasicTypes.
+// mutating e.g. the shared string metatable. Mirrors
+// luaSetTableProtectionForBasicTypes in Valkey 8.0's src/script_lua.c
+// (BSD-licensed in Valkey 7.2.11+ / 8.0.6+ and Redis 7.2.11+).
 static void protect_basic_type_metatables(lua_State *L) {
   static const int types[] = {LUA_TSTRING,   LUA_TNUMBER, LUA_TBOOLEAN, LUA_TNIL,
                               LUA_TFUNCTION,  LUA_TTHREAD, LUA_TLIGHTUSERDATA};

@@ -21,7 +21,7 @@
 - Max reply size: 8 MiB per script result.
 
 ## Stack Limits
-These come from the Lua 5.1 build in `vendor/redis/deps/lua` (`luaconf.h`):
+These come from the Lua 5.1 build in `vendor/valkey/deps/lua` (`luaconf.h`):
 - Lua stack slots usable by a C function (`lua_checkstack`): 8000
   (`LUAI_MAXCSTACK`).
 - Nested Lua calls: 20000 (`LUAI_MAXCALLS`).

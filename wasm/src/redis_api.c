@@ -1,6 +1,11 @@
+/* redis.* bindings (redis.call/pcall/log/sha1hex/...) for lua-redis-wasm.
+ *
+ * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
+ * THIRD_PARTY_NOTICES.md), mainly Valkey 8.0's src/script_lua.c and double2ll
+ * from src/util.c. */
 #include "../include/abi.h"
 #include "redis_api.h"
-#include "../../vendor/redis/deps/fpconv/fpconv_dtoa.h"
+#include "../../vendor/valkey/deps/fpconv/fpconv_dtoa.h"
 #include <lauxlib.h>
 #include <limits.h>
 #include <lua.h>
@@ -47,8 +52,8 @@ void redis_reset_resp_version(void) {
  * the error handler instead. In table-error mode the error object is
  * {err=msg}, like Redis 7's luaPushError + luaError; otherwise it is the plain
  * string, like Redis 6.2.
- * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c
- * (luaPushError, luaError), BSD-3-Clause. */
+ * Derived from luaPushError / luaError in Valkey 8.0's src/script_lua.c
+ * (same in Redis 7.2.4), BSD-3-Clause. */
 int redis_raise_error(lua_State *L, const char *msg) {
   if (g_table_errors) {
     lua_createtable(L, 0, 1);
@@ -163,10 +168,10 @@ static int double2ll(double d, long long *out) {
 
 #define NUMBER_ARG_BUF 32 /* > fpconv_dtoa's 24 bytes and any %lld */
 
-/* Number argument -> string like luaArgsToRedisArgv in Redis 7.4+, not
- * lua_tolstring (whose "%.14g" loses precision): integral values print as
- * integers (1e15 -> "1000000000000000"), anything else in the shortest
- * round-trip form (fpconv_dtoa: 0.1+0.2 -> "0.30000000000000004",
+/* Number argument -> string like luaArgsToRedisArgv in Valkey 8.0's
+ * src/script_lua.c, not lua_tolstring (whose "%.14g" loses precision):
+ * integral values print as integers (1e15 -> "1000000000000000"), anything
+ * else in the shortest round-trip form (fpconv_dtoa: 0.1+0.2 -> "0.30000000000000004",
  * 1e300 -> "1e+300", 1/0 -> "inf"). */
 static size_t number_to_arg(lua_Number num, char buf[NUMBER_ARG_BUF]) {
   long long lvalue;
@@ -233,7 +238,7 @@ static int is_crlf(char c) {
 
 /* Pushes {err="CODE message"} for an error reply in Redis's "-CODE message"
  * form, with the leading '-' already removed. Mirrors luaPushErrorBuff on that
- * form (derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c,
+ * form (derived from Valkey 8.0's src/script_lua.c, same in Redis 7.2.4,
  * BSD-3-Clause):
  * - with no space, the generic "ERR " code is prepended; otherwise the token
  *   before the first space is the error code, taken as-is (no case check);
@@ -274,8 +279,8 @@ static int push_error_reply(lua_State *L, const char *err, size_t len) {
  * ignore_error_stats_update=true, the same table whether redis.call raises it
  * or redis.pcall returns it. Otherwise it is kept verbatim: raised as a string
  * or returned as {err=...}, as in Redis 6.2.
- * Derived from Valkey src/script_lua.c / Redis 7.2.4 src/script_lua.c
- * (redisProtocolToLuaType_Error), BSD-3-Clause. */
+ * Derived from redisProtocolToLuaType_Error in Valkey 8.0's src/script_lua.c
+ * (same in Redis 7.2.4), BSD-3-Clause. */
 static int push_command_error(lua_State *L, const uint8_t *data, uint32_t len,
                               int raise_on_error) {
   if (g_table_errors) {
@@ -770,11 +775,11 @@ int apply_redis_props(lua_State *L, const uint8_t *buf, size_t len) {
   return 0;
 }
 
-/* Global pcall in table-error mode. Derived from luaRedisPcall in Valkey
- * src/script_lua.c / Redis 7.2.4 src/script_lua.c, BSD-3-Clause: errors are {err=...} tables there, so for backward
- * compatibility a caught table error whose `err` is a string is returned as
- * that string. Any other error value, and every success, is returned as the
- * stock pcall would. Unlike Redis, a table error without a string `err` is
+/* Global pcall in table-error mode. Derived from luaRedisPcall in Valkey 8.0's
+ * src/script_lua.c (same in Redis 7.2.4), BSD-3-Clause: errors are {err=...}
+ * tables there, so for backward compatibility a caught table error whose `err`
+ * is a string is returned as that string. Any other error value, and every
+ * success, is returned as the stock pcall would. Unlike Redis, a table error without a string `err` is
  * returned alone, without the extra nil Redis leaves behind, and a call with no
  * arguments is rejected like the stock pcall instead of calling past the stack.
  * xpcall is untouched, as in Redis: its handler sees the raw table. */

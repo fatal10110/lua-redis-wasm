@@ -1,6 +1,6 @@
 /* lua_cmsgpack with allocation failures made fatal.
  *
- * The vendored lua_cmsgpack.c (vendor/redis/deps/lua/src, not modified here)
+ * The vendored lua_cmsgpack.c (vendor/valkey/deps/lua/src, not modified here)
  * grows its pack buffer through the raw Lua allocator obtained from
  * lua_getallocf() and never checks for NULL. Redis gets away with that because
  * its allocator (zmalloc) aborts on OOM; this module is linked with

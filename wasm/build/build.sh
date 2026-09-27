@@ -15,12 +15,12 @@ if ! command -v emcc >/dev/null 2>&1; then
   exit 1
 fi
 
-REDIS_LUA_DEPS="$ROOT_DIR/vendor/redis/deps/lua/src"
-REDIS_SRC="$ROOT_DIR/vendor/redis/src"
-LUA_SRC_DIR="$REDIS_LUA_DEPS"
+LUA_DEPS="$ROOT_DIR/vendor/valkey/deps/lua/src"
+VALKEY_SRC="$ROOT_DIR/vendor/valkey/src"
+LUA_SRC_DIR="$LUA_DEPS"
 LUA_CORE="lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c"
 LUA_LIBS="lauxlib.c lbaselib.c ltablib.c lstrlib.c lmathlib.c loslib.c"
-REDIS_LUA_MODULES="lua_cjson.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
+LUA_MODULES="lua_cjson.c lua_struct.c lua_bit.c strbuf.c fpconv.c"
 
 CORE_FILES=""
 for file in $LUA_CORE; do
@@ -33,10 +33,10 @@ for file in $LUA_LIBS; do
 done
 
 MODULE_FILES=""
-for file in $REDIS_LUA_MODULES; do
-  MODULE_FILES="$MODULE_FILES $REDIS_LUA_DEPS/$file"
+for file in $LUA_MODULES; do
+  MODULE_FILES="$MODULE_FILES $LUA_DEPS/$file"
 done
-MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/redis/deps/fpconv/fpconv_dtoa.c" # redis.call number args
+MODULE_FILES="$MODULE_FILES $ROOT_DIR/vendor/valkey/deps/fpconv/fpconv_dtoa.c" # redis.call number args
 
 emcc -O2 -DENABLE_CJSON_GLOBAL \
   --js-library "$SRC_DIR/library_host.js" \
@@ -46,9 +46,9 @@ emcc -O2 -DENABLE_CJSON_GLOBAL \
   -sINCOMING_MODULE_JS_API="['locateFile','instantiateWasm']" \
   -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=67108864 -sABORTING_MALLOC=0 \
   -sEXPORTED_FUNCTIONS="['_init','_reset','_eval','_eval_with_args','_alloc','_free_mem','_set_limits','_set_compat','_current_call_source','_current_call_line']" \
-  -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$REDIS_LUA_DEPS" -I"$REDIS_SRC" \
+  -I"$ROOT_DIR/wasm/include" -I"$LUA_SRC_DIR" -I"$LUA_DEPS" -I"$VALKEY_SRC" \
   "$SRC_DIR/runtime.c" "$SRC_DIR/redis_api.c" "$SRC_DIR/redis_math.c" "$SRC_DIR/lua_cmsgpack_checked.c" \
-  "$REDIS_SRC/rand.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
+  "$VALKEY_SRC/rand.c" $CORE_FILES $LIB_FILES $MODULE_FILES \
   -o "$OUT_DIR/redis_lua.mjs"
 
 echo "Built $OUT_DIR/redis_lua.mjs"

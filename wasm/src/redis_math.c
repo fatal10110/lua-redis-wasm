@@ -1,12 +1,17 @@
 /* math.random / math.randomseed backed by Redis's PRNG.
  *
- * Redis replaces Lua's math.random and math.randomseed, which use the libc
- * rand()/srand(), with versions driven by redisLrand48()/redisSrand48()
- * (vendor/redis/src/rand.c, compiled as is), so a seed yields the same sequence
- * on every platform. The functions below are Lua 5.1's math_random and
- * math_randomseed (vendor/redis/deps/lua/src/lmathlib.c) with exactly that
- * substitution, which is also how Redis and Valkey derive theirs (the result
- * matches Valkey 8.0's redis_math_random / redis_math_randomseed).
+ * Portions derived from Valkey / Redis 7.2.4 (BSD-3-Clause, see
+ * THIRD_PARTY_NOTICES.md): Valkey's redis_math_random / redis_math_randomseed
+ * (src/script_lua.c).
+ *
+ * Redis and Valkey replace Lua's math.random and math.randomseed, which use the
+ * libc rand()/srand(), with versions driven by the rand48 PRNG in src/rand.c
+ * (vendor/valkey/src/rand.c, compiled as is; Valkey 8.0 calls it serverLrand48 /
+ * serverSrand48, Redis redisLrand48 / redisSrand48 -- same generator), so a seed
+ * yields the same sequence on every platform. The functions below are Lua 5.1's
+ * math_random and math_randomseed (vendor/valkey/deps/lua/src/lmathlib.c) with
+ * exactly that substitution, which is also how Redis and Valkey derive theirs
+ * (the result matches Valkey 8.0's redis_math_random / redis_math_randomseed).
  *
  * Derived from Lua 5.1 lmathlib.c, Copyright (C) 1994-2012 Lua.org, PUC-Rio,
  * MIT license (see THIRD_PARTY_NOTICES.md).
@@ -25,7 +30,7 @@
 
 static int redis_math_random(lua_State *L) {
   /* the `%' avoids the (rare) case of r==1 */
-  lua_Number r = (lua_Number)(redisLrand48() % REDIS_LRAND48_MAX) / (lua_Number)REDIS_LRAND48_MAX;
+  lua_Number r = (lua_Number)(serverLrand48() % REDIS_LRAND48_MAX) / (lua_Number)REDIS_LRAND48_MAX;
   switch (lua_gettop(L)) { /* check number of arguments */
     case 0: {              /* no arguments */
       lua_pushnumber(L, r); /* Number between 0 and 1 */
@@ -51,7 +56,7 @@ static int redis_math_random(lua_State *L) {
 }
 
 static int redis_math_randomseed(lua_State *L) {
-  redisSrand48(luaL_checkint(L, 1));
+  serverSrand48(luaL_checkint(L, 1));
   return 0;
 }
 
@@ -64,4 +69,4 @@ void register_redis_math(lua_State *L) {
   lua_pop(L, 1);
 }
 
-void redis_math_reseed(void) { redisSrand48(0); }
+void redis_math_reseed(void) { serverSrand48(0); }

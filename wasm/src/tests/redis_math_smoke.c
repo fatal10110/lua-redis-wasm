@@ -1,4 +1,4 @@
-/* math.random / math.randomseed use Redis's PRNG (vendor/redis/src/rand.c).
+/* math.random / math.randomseed use Redis's PRNG (vendor/valkey/src/rand.c).
  *
  * The expected values were read from real servers (x86-64 Docker images):
  * redis 7.0 / 7.4 / 8.0 and valkey 8.0 / 9.0 all start a fresh process with
